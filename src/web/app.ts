@@ -4,11 +4,17 @@ import { isSuperAdmin as isSuperAdminRole } from '../shared/modules';
 import { resolveLink } from '../shared/links';
 import { h, type Child } from './dom';
 
-export const state: { meta: MetaResponse | null } = { meta: null };
+/** companyId: active company context (null = every company the user may access). */
+export const state: { meta: MetaResponse | null; companyId: number | null } = { meta: null, companyId: null };
 
 let renderRoute: () => void = () => undefined;
 export function setRouteRenderer(fn: () => void): void {
   renderRoute = fn;
+}
+
+/** Re-renders the current page, e.g. after the active company changes. */
+export function refreshRoute(): void {
+  renderRoute();
 }
 
 export function basePath(): string {

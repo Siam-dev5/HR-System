@@ -79,6 +79,33 @@ export interface MetaResponse {
   basePath: string;
   menu: MenuItem[];
   modules: Array<CrudMeta | PageMeta>;
+  profile: UserProfile;
+  companies: CompanyScope;
+}
+
+/** Account details for the header user menu. */
+export interface UserProfile {
+  email: string | null;
+  roles: Array<{ code: string; name: string }>;
+}
+
+export interface CompanyOption {
+  id: number;
+  code: string;
+  name: string;
+}
+
+/**
+ * Companies the user may use as the active company context.
+ * all  = organisation-wide data access (employees.all): every active company, plus "all companies"
+ * own  = only the company of the user's linked employee record
+ * none = no organisation-wide access and no linked employee
+ */
+export interface CompanyScope {
+  scope: 'all' | 'own' | 'none';
+  items: CompanyOption[];
+  /** company of the user's own employee record, when linked */
+  ownCompanyId: number | null;
 }
 
 /** Contract for every dropdown option. label is always a non-empty string. */
@@ -114,6 +141,8 @@ export interface DashboardWidgetLink {
   value: number;
   /** null when the current user may not open the target */
   href: string | null;
+  /** false when the figure is organisation-wide and ignores the selected company */
+  companyScoped?: boolean;
 }
 
 export interface DashboardResponse {
@@ -122,6 +151,8 @@ export interface DashboardResponse {
   nineBox: Array<{ box: number; title: string; count: number; href: string | null }> | null;
   pendingApprovals: number;
   notifications: NotificationItem[];
+  /** company the figures are limited to (null = every company the user may see) */
+  company: CompanyOption | null;
 }
 
 export interface WorkflowRequestRow {

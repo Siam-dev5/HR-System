@@ -14,3 +14,14 @@ public/assets/app.js
 public/assets/app.js.map
 # external test report of the reference system (kept locally, not published)
 REPORT3-in-1.md
+# data exported from the running system (real personal / payroll data) — never commit
+/*.csv
+/*.xlsx
+/*.xls
+/exports/
+payroll-*.csv
+*-[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]*.csv
+*-[0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9]*.csv
+# CSV templates shipped with the project stay tracked
+!templates/**/*.csv
+!**/templates/**/*.csv

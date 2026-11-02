@@ -20,6 +20,11 @@ export default tseslint.config(
     rules: { '@typescript-eslint/no-explicit-any': 'off' },
   },
   {
+    // runs before the bundle to apply the saved theme without a flash
+    files: ['public/assets/theme-init.js'],
+    languageOptions: { globals: { window: 'readonly', document: 'readonly', localStorage: 'readonly' } },
+  },
+  {
     files: ['scripts/**/*.mjs', 'eslint.config.js'],
     languageOptions: { globals: { console: 'readonly', process: 'readonly', Buffer: 'readonly', TextEncoder: 'readonly' } },
   },

@@ -22,13 +22,16 @@ const kpi = (label: string, value: string | number, href: string | null, sub?: s
 export async function renderDashboard(main: HTMLElement): Promise<void> {
   mount(main, loading());
   try {
-    const d = await get<DashboardResponse>('/api/dashboard');
+    const d = await get<DashboardResponse>(`/api/dashboard${qs({ company: state.companyId })}`);
+    const companies = state.meta?.companies;
+    const scopeText = d.company ? d.company.name : companies?.scope === 'all' && companies.items.length ? `ทุกบริษัท (${companies.items.length})` : null;
     mount(main,
+      scopeText ? h('p', { class: 'scope-line muted small' }, '🏢 ขอบเขตข้อมูล: ', h('strong', null, scopeText), d.company ? ' · ตัวเลขที่ระบุ "ทุกบริษัท" ไม่ได้แยกตามบริษัท' : null) : null,
       h('div', { class: 'kpis' },
-        d.kpis.map((k) => kpi(k.label, fmtNum(k.value), k.href)),
+        d.kpis.map((k) => kpi(k.label, fmtNum(k.value), k.href, d.company && k.companyScoped === false ? 'ทุกบริษัท' : undefined)),
         can('workflow.view') ? kpi('คำขอรออนุมัติ', d.pendingApprovals, '/workflow/inbox') : null),
       h('div', { class: 'grid2' },
-        d.headcountByDepartment.length ? h('section', { class: 'card' }, h('h2', null, 'กำลังคนตามหน่วยงาน'), bars(d.headcountByDepartment.map((r) => ({ label: r.department, value: r.count })))) : null,
+        d.headcountByDepartment.length ? h('section', { class: 'card' }, h('h2', null, d.company ? `กำลังคนตามหน่วยงาน · ${d.company.name}` : 'กำลังคนตามหน่วยงาน'), bars(d.headcountByDepartment.map((r) => ({ label: r.department, value: r.count })))) : null,
         d.nineBox ? h('section', { class: 'card' }, h('h2', null, 'Talent 9-Box (รอบล่าสุด)'),
           h('div', { class: 'ninebox small' }, d.nineBox.map((b) => {
             const body = [h('strong', null, String(b.count)), h('span', null, b.title)];

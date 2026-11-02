@@ -6,6 +6,11 @@ import { state, currentPath, link, moduleByPath, navigate, setRouteRenderer, set
 import { renderLogin, renderRegister, renderForcedMfa, renderForcedPassword } from './pages/auth';
 import { renderCrud } from './pages/crud';
 import { PAGES, renderPayslipView } from './pages/registry';
+import { closeMenus, closeNotifications, headerMenus } from './header';
+import { applyTheme, watchSystemTheme } from './theme';
+
+applyTheme();
+watchSystemTheme();
 
 const root = document.getElementById('app') as HTMLElement;
 
@@ -60,19 +65,14 @@ function renderShell(): void {
     }),
   );
   const bell = h('button', { class: 'icon-btn bell', 'aria-label': 'การแจ้งเตือน', onclick: () => void openNotifications() }, '🔔', h('span', { class: 'badge', id: 'bell-count', hidden: true }));
-  const userMenu = h('div', { class: 'user-menu' },
-    h('span', { class: 'user-name' }, meta.me.displayName, h('small', null, meta.me.roles.join(', '))),
-    link('/security', 'ความปลอดภัย', { class: 'btn small' }),
-    h('button', { class: 'btn small', onclick: () => void logout() }, 'ออกจากระบบ'),
-  );
-  const menuToggle = h('button', { class: 'icon-btn menu-toggle', 'aria-label': 'เปิด/ปิดเมนู', onclick: () => document.body.classList.toggle('nav-open') }, '☰');
+  const menuToggle = h('button', { class: 'icon-btn menu-toggle', 'aria-label': 'เปิด/ปิดเมนู', onclick: () => { closeMenus(); closeNotifications(); document.body.classList.toggle('nav-open'); } }, '☰');
   const main = h('main', { id: 'main', tabindex: '-1' });
   // mobile: the open menu covers the toggle, so a scrim (tap outside) and Escape close it
   const scrim = h('div', { class: 'nav-scrim', 'aria-hidden': 'true', onclick: () => document.body.classList.remove('nav-open') });
   document.addEventListener('keydown', (e) => {
     if (e.key === 'Escape') document.body.classList.remove('nav-open');
   });
-  mount(root, h('div', { class: 'shell' }, nav, scrim, h('div', { class: 'content' }, h('header', { class: 'topbar' }, menuToggle, h('h1', { id: 'page-title' }, ''), h('div', { class: 'topbar-actions' }, bell, userMenu)), main)));
+  mount(root, h('div', { class: 'shell' }, nav, scrim, h('div', { class: 'content' }, h('header', { class: 'topbar' }, menuToggle, h('h1', { id: 'page-title' }, ''), h('div', { class: 'topbar-actions' }, headerMenus(meta, bell, () => void logout()))), main)));
   setRouteRenderer(() => renderRoute(main));
   window.onpopstate = () => renderRoute(main);
   if (['/', '/login', '/register'].includes(currentPath())) navigate(meta.menu[0]?.path ?? '/help', true);
@@ -96,6 +96,7 @@ async function refreshBell(): Promise<void> {
 async function openNotifications(): Promise<void> {
   const existing = document.getElementById('notif-panel');
   if (existing) return existing.remove();
+  closeMenus();
   const data = await get<{ unread: number; items: NotificationItem[] }>('/api/notifications');
   const panel = h('div', { class: 'notif-panel', id: 'notif-panel' },
     h('div', { class: 'notif-head' }, h('strong', null, 'การแจ้งเตือน'), h('button', { class: 'btn small', onclick: async () => { await post('/api/notifications/read-all'); panel.remove(); void refreshBell(); } }, 'อ่านทั้งหมด')),
@@ -114,13 +115,15 @@ async function openNotifications(): Promise<void> {
 async function logout(): Promise<void> {
   await post('/api/auth/logout');
   state.meta = null;
+  state.companyId = null;
   history.replaceState(null, '', '/');
   void boot();
 }
 
 function renderRoute(main: HTMLElement): void {
   document.body.classList.remove('nav-open');
-  document.getElementById('notif-panel')?.remove();
+  closeMenus();
+  closeNotifications();
   const path = currentPath();
   const params = new URLSearchParams(location.search);
   for (const a of document.querySelectorAll<HTMLAnchorElement>('.nav-item')) a.classList.toggle('active', a.dataset.path === path);

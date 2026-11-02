@@ -7,6 +7,7 @@ import { DATE_RE, badRequest, conflict, forbidden, intParam } from '../lib/http'
 import { audit } from '../lib/audit';
 import { loadSettings, settingText } from '../lib/settings';
 import { bangkokNow } from '../lib/time';
+import { companyScope, requireCompany } from '../lib/companies';
 import { can, canOpen, currentUser, requireAuth, requirePerm } from '../auth';
 import { toMe } from './auth';
 import { modulePerms, treeOrder } from './crud';
@@ -23,7 +24,7 @@ export function linkIfAllowed(user: AuthUser, path: string): string | null {
 export const overviewRoutes = new Hono<AppEnv>();
 overviewRoutes.use('*', requireAuth);
 
-overviewRoutes.get('/meta', (c) => {
+overviewRoutes.get('/meta', async (c) => {
   const user = currentUser(c);
   const menu: MenuItem[] = MODULES.filter((m) => !(m.kind === 'page' && m.hidden) && canOpen(user, m)).map((m) => ({ key: m.key, path: m.path, title: m.title, group: m.group }));
   const modules: Array<CrudMeta | PageMeta> = MODULES.map((m) =>
@@ -35,7 +36,16 @@ overviewRoutes.get('/meta', (c) => {
         }
       : { kind: 'page', key: m.key, path: m.path, title: m.title, group: m.group, allowed: canOpen(user, m), perm: m.superAdminOnly ? 'super_admin' : m.perm },
   );
-  return c.json<MetaResponse>({ me: toMe(user), appName: c.env.APP_NAME || 'HR System', basePath: c.env.APP_BASE_PATH || '', menu, modules });
+  const account = await c.env.DB.prepare('SELECT email FROM users WHERE id = ?').bind(user.id).first<{ email: string | null }>();
+  const { results: roles } = await c.env.DB
+    .prepare('SELECT r.code, r.name FROM roles r JOIN user_roles ur ON ur.role_id = r.id WHERE ur.user_id = ? ORDER BY r.privileged DESC, r.name')
+    .bind(user.id)
+    .all<{ code: string; name: string }>();
+  return c.json<MetaResponse>({
+    me: toMe(user), appName: c.env.APP_NAME || 'HR System', basePath: c.env.APP_BASE_PATH || '', menu, modules,
+    profile: { email: account?.email || null, roles },
+    companies: await companyScope(c.env.DB, user),
+  });
 });
 
 async function notificationsFor(db: D1Database, user: AuthUser, basePath: string, limit = 20): Promise<NotificationItem[]> {
@@ -67,21 +77,29 @@ overviewRoutes.get('/dashboard', requirePerm('dashboard.view'), async (c) => {
   const today = bangkokNow().date;
   const in30 = new Date(Date.parse(today) + 30 * 86400000).toISOString().slice(0, 10);
   const count = async (sql: string, ...params: unknown[]) => (await db.prepare(sql).bind(...params).first<{ n: number }>())?.n ?? 0;
+  // ?company= limits employee-based figures to one company the user may access (403 otherwise)
+  const company = await requireCompany(db, user, c.req.query('company'));
+  const inCompany = company ? ' AND e.company_id = ?' : '';
+  const companyParams: unknown[] = company ? [company.id] : [];
+  const companyFilter = company ? `f.company_id=${company.id}` : '';
+  const scoped = company !== null;
   const kpis: DashboardResponse['kpis'] = [];
   if (can(user, 'employees.view') && can(user, 'employees.all')) {
-    kpis.push({ label: 'พนักงานปัจจุบัน', value: await count("SELECT COUNT(*) n FROM employees WHERE status IN ('active','probation')"), href: linkIfAllowed(user, '/employees') });
-    kpis.push({ label: 'ครบทดลองงานใน 30 วัน', value: await count("SELECT COUNT(*) n FROM employees WHERE status = 'probation' AND probation_end BETWEEN ? AND ?", today, in30), href: linkIfAllowed(user, '/employees?f.status=probation') });
+    kpis.push({ label: 'พนักงานปัจจุบัน', value: await count(`SELECT COUNT(*) n FROM employees e WHERE e.status IN ('active','probation')${inCompany}`, ...companyParams), href: linkIfAllowed(user, companyFilter ? `/employees?${companyFilter}` : '/employees'), companyScoped: scoped });
+    kpis.push({ label: 'ครบทดลองงานใน 30 วัน', value: await count(`SELECT COUNT(*) n FROM employees e WHERE e.status = 'probation' AND e.probation_end BETWEEN ? AND ?${inCompany}`, today, in30, ...companyParams), href: linkIfAllowed(user, `/employees?f.status=probation${companyFilter ? `&${companyFilter}` : ''}`), companyScoped: scoped });
   }
-  if (can(user, 'leave.all')) kpis.push({ label: 'ลาวันนี้', value: await count("SELECT COUNT(*) n FROM leave_requests WHERE status = 'approved' AND ? BETWEEN start_date AND end_date", today), href: linkIfAllowed(user, '/leave') });
-  if (can(user, 'attendance.all')) kpis.push({ label: 'มาสายวันนี้', value: await count("SELECT COUNT(*) n FROM attendance_records WHERE work_date = ? AND status = 'late'", today), href: linkIfAllowed(user, '/attendance') });
-  if (can(user, 'requisitions.view')) kpis.push({ label: 'ใบขอสรรหาที่เปิด', value: await count("SELECT COUNT(*) n FROM requisitions WHERE status = 'open'"), href: linkIfAllowed(user, '/recruitment') });
-  if (can(user, 'training.view')) kpis.push({ label: 'รอบอบรมที่เปิดรับ', value: await count("SELECT COUNT(*) n FROM training_sessions WHERE status IN ('planned','open')"), href: linkIfAllowed(user, '/training') });
-  if (can(user, 'payroll.view')) kpis.push({ label: 'งวดเงินเดือนรอดำเนินการ', value: await count("SELECT COUNT(*) n FROM payroll_periods WHERE status <> 'published'"), href: linkIfAllowed(user, '/payroll') });
+  if (can(user, 'leave.all')) kpis.push({ label: 'ลาวันนี้', value: await count(`SELECT COUNT(*) n FROM leave_requests l JOIN employees e ON e.id = l.employee_id WHERE l.status = 'approved' AND ? BETWEEN l.start_date AND l.end_date${inCompany}`, today, ...companyParams), href: linkIfAllowed(user, '/leave'), companyScoped: scoped });
+  if (can(user, 'attendance.all')) kpis.push({ label: 'มาสายวันนี้', value: await count(`SELECT COUNT(*) n FROM attendance_records a JOIN employees e ON e.id = a.employee_id WHERE a.work_date = ? AND a.status = 'late'${inCompany}`, today, ...companyParams), href: linkIfAllowed(user, '/attendance'), companyScoped: scoped });
+  // recruitment, training and payroll periods are not tied to a company in this data model
+  if (can(user, 'requisitions.view')) kpis.push({ label: 'ใบขอสรรหาที่เปิด', value: await count("SELECT COUNT(*) n FROM requisitions WHERE status = 'open'"), href: linkIfAllowed(user, '/recruitment'), companyScoped: false });
+  if (can(user, 'training.view')) kpis.push({ label: 'รอบอบรมที่เปิดรับ', value: await count("SELECT COUNT(*) n FROM training_sessions WHERE status IN ('planned','open')"), href: linkIfAllowed(user, '/training'), companyScoped: false });
+  if (can(user, 'payroll.view')) kpis.push({ label: 'งวดเงินเดือนรอดำเนินการ', value: await count("SELECT COUNT(*) n FROM payroll_periods WHERE status <> 'published'"), href: linkIfAllowed(user, '/payroll'), companyScoped: false });
 
   let headcountByDepartment: DashboardResponse['headcountByDepartment'] = [];
   if (can(user, 'employees.all') && can(user, 'employees.view')) {
     const { results } = await db
-      .prepare("SELECT COALESCE(d.name, 'ไม่ระบุหน่วยงาน') AS department, COUNT(*) AS count FROM employees e LEFT JOIN departments d ON d.id = e.department_id WHERE e.status IN ('active','probation') GROUP BY d.id ORDER BY count DESC")
+      .prepare(`SELECT COALESCE(d.name, 'ไม่ระบุหน่วยงาน') AS department, COUNT(*) AS count FROM employees e LEFT JOIN departments d ON d.id = e.department_id WHERE e.status IN ('active','probation')${inCompany} GROUP BY d.id ORDER BY count DESC`)
+      .bind(...companyParams)
       .all<{ department: string; count: number }>();
     headcountByDepartment = results;
   }
@@ -91,7 +109,7 @@ overviewRoutes.get('/dashboard', requirePerm('dashboard.view'), async (c) => {
   if (can(user, 'talent.view')) {
     const cycle = await db.prepare("SELECT id FROM performance_cycles ORDER BY (status = 'active') DESC, start_date DESC LIMIT 1").first<{ id: number }>();
     const { results } = cycle
-      ? await db.prepare('SELECT performance, potential FROM talent_assessments WHERE cycle_id = ?').bind(cycle.id).all<{ performance: number; potential: number }>()
+      ? await db.prepare(`SELECT t.performance, t.potential FROM talent_assessments t JOIN employees e ON e.id = t.employee_id WHERE t.cycle_id = ?${inCompany}`).bind(cycle.id, ...companyParams).all<{ performance: number; potential: number }>()
       : { results: [] as Array<{ performance: number; potential: number }> };
     nineBox = [7, 8, 9, 4, 5, 6, 1, 2, 3].map((box) => ({
       box,
@@ -108,6 +126,7 @@ overviewRoutes.get('/dashboard', requirePerm('dashboard.view'), async (c) => {
     nineBox,
     pendingApprovals: can(user, 'workflow.approve') || can(user, 'workflow.approve_any') ? (pending?.n ?? 0) : 0,
     notifications: await notificationsFor(db, user, c.env.APP_BASE_PATH || '', 5),
+    company,
   });
 });
 

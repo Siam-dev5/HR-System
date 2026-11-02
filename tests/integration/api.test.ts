@@ -750,3 +750,73 @@ describe('Employee Welfare Fund in payroll', () => {
     expect((await clients.employee!.get(`/api/payslips/${mine.id}`)).body.ewf_employee).toBe(41.25);
   });
 });
+
+describe('header: account profile and company scope', () => {
+  it('meta returns the account profile with role names, never secrets', async () => {
+    const meta = (await admin().get<MetaResponse>('/api/meta')).body;
+    expect(meta.profile.roles.map((r) => r.code)).toEqual(['super_admin']);
+    expect(meta.profile.roles[0]!.name.length).toBeGreaterThan(0);
+    expect('email' in meta.profile).toBe(true);
+    const raw = JSON.stringify(meta);
+    for (const secret of ['password_hash', 'mfa_secret', 'sessionId']) expect(raw).not.toContain(secret);
+    const mgr = (await clients.manager!.get<MetaResponse>('/api/meta')).body;
+    expect(mgr.profile.roles.map((r) => r.code).sort()).toEqual(['employee', 'hr_manager']);
+  });
+
+  let second = 0;
+  let inactive = 0;
+  it('lists only companies the user may access: organisation-wide roles see every active company, others only their own', async () => {
+    second = (await admin().post('/api/m/companies', { code: 'ZZB', name: 'บริษัท บี ทดสอบ จำกัด', active: true })).body.id;
+    inactive = (await admin().post('/api/m/companies', { code: 'ZZC', name: 'บริษัท ซี ปิดใช้งาน', active: false })).body.id;
+    expect(second).toBeGreaterThan(0);
+    expect(inactive).toBeGreaterThan(0);
+
+    const a = (await admin().get<MetaResponse>('/api/meta')).body.companies;
+    expect(a.scope).toBe('all');
+    expect(a.items.map((c) => c.code)).toEqual(['DEMO', 'ZZB']); // inactive company is not offered
+    expect(a.ownCompanyId).toBeNull(); // it_admin has no employee record
+
+    const m = (await clients.manager!.get<MetaResponse>('/api/meta')).body.companies;
+    expect(m.scope).toBe('all'); // hr_manager holds employees.all
+    expect(m.ownCompanyId).toBe(1);
+
+    const e = (await clients.employee!.get<MetaResponse>('/api/meta')).body.companies;
+    expect(e).toEqual({ scope: 'own', items: [{ id: 1, code: 'DEMO', name: 'บริษัท เดโม่ เอชอาร์ จำกัด' }], ownCompanyId: 1 });
+
+    const anon = (await clients.anon!.get('/api/meta')).status;
+    expect(anon).toBe(401);
+  });
+
+  it('dashboard figures follow the selected company and a company outside the scope is rejected', async () => {
+    const all = (await admin().get('/api/dashboard')).body;
+    const demo = (await admin().get('/api/dashboard?company=1')).body;
+    const b = (await admin().get(`/api/dashboard?company=${second}`)).body;
+    const headcount = (d: any) => d.kpis.find((k: any) => k.label === 'พนักงานปัจจุบัน');
+    expect(all.company).toBeNull();
+    expect(demo.company).toEqual({ id: 1, code: 'DEMO', name: 'บริษัท เดโม่ เอชอาร์ จำกัด' });
+    expect(headcount(demo).value).toBe(headcount(all).value); // every seeded employee is in DEMO
+    expect(headcount(b).value).toBe(0);
+    expect(headcount(b).href).toBe(`/employees?f.company_id=${second}`);
+    expect(b.headcountByDepartment).toEqual([]);
+    expect(b.nineBox.every((x: any) => x.count === 0)).toBe(true);
+    // organisation-wide figures say so instead of pretending to be filtered
+    expect(b.kpis.filter((k: any) => k.companyScoped === false).map((k: any) => k.label)).toContain('งวดเงินเดือนรอดำเนินการ');
+
+    for (const bad of [String(inactive), '999999', 'abc', '-1', '1 OR 1=1']) {
+      const r = await admin().get(`/api/dashboard?company=${encodeURIComponent(bad)}`);
+      expect(r.status, bad).toBe(403);
+    }
+    // an own-scope user cannot reach another company's figures by editing the request
+    const own = await clients.employee!.get('/api/dashboard?company=1');
+    expect(own.status).toBe(200);
+    expect((await clients.employee!.get(`/api/dashboard?company=${second}`)).status).toBe(403);
+  });
+
+  it('employee list filter used by the scoped KPI link returns only that company', async () => {
+    const r = (await admin().get(`/api/m/employees?f.company_id=${second}`)).body;
+    expect(r.total).toBe(0);
+    const d = (await admin().get('/api/m/employees?f.company_id=1')).body;
+    expect(d.rows.length).toBeGreaterThan(0);
+    expect(d.rows.every((x: any) => x.company_id === 1)).toBe(true);
+  });
+});
