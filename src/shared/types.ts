@@ -148,6 +148,8 @@ export interface PayrollPeriod {
   status: 'draft' | 'calculated' | 'approved' | 'published';
   employees: number;
   total_net: number;
+  /** EWF employer contributions of the period (company cost, not deducted from employees) */
+  total_ewf_employer: number;
 }
 
 export interface PayslipSummary {
@@ -170,6 +172,12 @@ export interface PayslipDetail extends PayslipSummary {
   unpaid_leave: number;
   sso: number;
   tax: number;
+  ewf_employee: number;
+  ewf_employee_rate: number | null;
+  ewf_status: string | null;
+  /** present only for payroll staff (payroll.view); omitted from the employee's own payslip */
+  ewf_employer?: number;
+  ewf_employer_rate?: number | null;
   lines: Array<{ code: string; name: string; kind: 'earning' | 'deduction'; amount: number }>;
   department: string | null;
   position: string | null;

@@ -1,4 +1,4 @@
-import type { PayrollConfig } from '../../shared/payroll';
+import type { EwfConfig, PayrollConfig } from '../../shared/payroll';
 import { DEFAULT_PAYROLL_CONFIG } from '../../shared/payroll';
 import type { AuthPolicy, SettingItem } from '../../shared/types';
 
@@ -49,4 +49,21 @@ export function validatePassword(password: string, minLength: number): string | 
   const classes = [/[a-z]/, /[A-Z]/, /\d/, /[^A-Za-z0-9]/].filter((r) => r.test(password)).length;
   if (classes < 3) return 'รหัสผ่านต้องมีอย่างน้อย 3 ใน 4 ประเภท: ตัวพิมพ์เล็ก ตัวพิมพ์ใหญ่ ตัวเลข สัญลักษณ์';
   return null;
+}
+
+export function ewfConfig(s: Settings): EwfConfig {
+  return {
+    enabled: settingBool(s, 'payroll.ewf_enabled', false),
+    effectiveDate: settingText(s, 'payroll.ewf_effective_date', ''),
+    employeeRate: settingNumber(s, 'payroll.ewf_employee_rate', 0),
+    employerRate: settingNumber(s, 'payroll.ewf_employer_rate', 0),
+    nextRateDate: settingText(s, 'payroll.ewf_next_rate_date', ''),
+    nextEmployeeRate: settingNumber(s, 'payroll.ewf_next_employee_rate', 0),
+    nextEmployerRate: settingNumber(s, 'payroll.ewf_next_employer_rate', 0),
+    wageCap: settingNumber(s, 'payroll.ewf_wage_cap', 0),
+    minEmployeeCount: settingNumber(s, 'payroll.ewf_min_employee_count', 0),
+    exemptProvidentFund: settingBool(s, 'payroll.ewf_exempt_provident_fund', true),
+    providentFundComponent: settingText(s, 'payroll.ewf_provident_fund_component', 'PVD'),
+    exemptEquivalentWelfare: settingBool(s, 'payroll.ewf_exempt_equivalent_welfare', true),
+  };
 }

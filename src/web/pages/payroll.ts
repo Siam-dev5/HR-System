@@ -24,10 +24,10 @@ export async function renderPayroll(main: HTMLElement): Promise<void> {
         can('payroll.calculate') ? h('button', { class: 'btn primary', onclick: () => newPeriod(() => void renderPayroll(main)) }, '+ สร้างงวด') : null),
       periods.length
         ? h('table', { class: 'table' },
-            h('thead', null, h('tr', null, ['รหัส', 'ชื่องวด', 'ช่วงวันที่', 'วันจ่าย', 'สถานะ', 'จำนวนคน', 'ยอดสุทธิรวม', ''].map((t) => h('th', null, t)))),
+            h('thead', null, h('tr', null, ['รหัส', 'ชื่องวด', 'ช่วงวันที่', 'วันจ่าย', 'สถานะ', 'จำนวนคน', 'ยอดสุทธิรวม', 'EWF นายจ้างสมทบ', ''].map((t) => h('th', null, t)))),
             h('tbody', null, periods.map((p) => h('tr', null,
               h('td', null, p.code), h('td', null, p.name), h('td', null, `${fmtDate(p.start_date)} – ${fmtDate(p.end_date)}`), h('td', null, fmtDate(p.pay_date)),
-              h('td', null, h('span', { class: `badge-status s-${p.status}` }, optionLabel(p.status))), h('td', null, String(p.employees)), h('td', null, fmtMoney(p.total_net)),
+              h('td', null, h('span', { class: `badge-status s-${p.status}` }, optionLabel(p.status))), h('td', null, String(p.employees)), h('td', null, fmtMoney(p.total_net)), h('td', null, fmtMoney(p.total_ewf_employer)),
               h('td', { class: 'actions' },
                 (p.status === 'draft' || p.status === 'calculated') && can('payroll.calculate') ? h('button', { class: 'btn small', onclick: () => void act(p, 'calculate', 'คำนวณ') }, p.status === 'draft' ? 'คำนวณ' : 'คำนวณใหม่') : null,
                 p.status === 'calculated' && can('payroll.approve') ? h('button', { class: 'btn small primary', onclick: () => void act(p, 'approve', 'อนุมัติ') }, 'อนุมัติ') : null,
@@ -120,6 +120,10 @@ export async function renderPayslipView(main: HTMLElement, id: number, back: str
         h('dl', { class: 'dl' }, h('dt', null, 'พนักงาน'), h('dd', null, s.employee), h('dt', null, 'หน่วยงาน'), h('dd', null, s.department ?? '-'), h('dt', null, 'ตำแหน่ง'), h('dd', null, s.position ?? '-')),
         h('div', { class: 'grid2' }, col('รายได้', earn, earn.reduce((a, l) => a + l.amount, 0)), col('รายการหัก', ded, s.deductions + s.unpaid_leave)),
         h('div', { class: 'net' }, 'เงินได้สุทธิ ', h('strong', null, `${fmtMoney(s.net)} บาท`)),
+        // employer contribution is returned only to payroll staff; it is informational and never part of net pay
+        s.ewf_employer !== undefined && s.ewf_employer > 0
+          ? h('div', { class: 'alert employer-note no-print' }, `เงินสมทบกองทุนสงเคราะห์ลูกจ้างของนายจ้าง ${fmtMoney(s.ewf_employer)} บาท (อัตรา ${s.ewf_employer_rate ?? '-'}%) — ไม่หักจากเงินได้ของพนักงาน แสดงเฉพาะฝ่ายเงินเดือน`)
+          : null,
         s.published ? null : h('div', { class: 'alert' }, 'สลิปนี้ยังไม่ได้เผยแพร่ให้พนักงาน')),
     );
   } catch (e) {

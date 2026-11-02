@@ -1,5 +1,5 @@
 import type { ListResponse, LookupOption, SettingItem } from '../../shared/types';
-import { get, post, put, qs } from '../api';
+import { get, post, put, qs, ApiFailure } from '../api';
 import { h, mount, loading, errorBox, fmtDate, modal, toast, confirmDialog } from '../dom';
 import { basePath, can, crudMeta, link } from '../app';
 import { cell, lookup, clearLookups } from './crud';
@@ -263,32 +263,104 @@ export async function renderRoles(main: HTMLElement): Promise<void> {
   }
 }
 
+const SETTING_GROUPS: Array<{ title: string; match: (key: string) => boolean; note?: string }> = [
+  { title: 'ความปลอดภัย', match: (k) => k.startsWith('security.') },
+  { title: 'เงินเดือน & ประกันสังคม', match: (k) => k.startsWith('payroll.') && !k.startsWith('payroll.ewf_') },
+  { title: 'เวลาทำงาน', match: (k) => k.startsWith('attendance.') },
+  { title: 'องค์กร', match: (k) => k.startsWith('org.') },
+];
+
+function settingInput(s: SettingItem, inputs: Map<string, HTMLInputElement>, suffix?: string): HTMLElement {
+  const el =
+    s.type === 'bool'
+      ? h('input', { type: 'checkbox', name: s.key, checked: s.value === 'true' })
+      : s.key.endsWith('_date')
+        ? h('input', { type: 'date', name: s.key, value: s.value })
+        : h('input', { type: s.type === 'number' ? 'number' : 'text', name: s.key, step: 'any', min: s.type === 'number' ? 0 : undefined, max: suffix === '%' ? 100 : undefined, value: s.value });
+  inputs.set(s.key, el);
+  const control = suffix ? h('div', { class: 'input-suffix' }, el, h('span', null, suffix)) : el;
+  if (s.type === 'bool') {
+    // checkbox first, then its description; the setting key stays underneath like other fields
+    return h('label', { class: 'field check-row' }, h('span', { class: 'check-line' }, el, h('span', null, s.description)), h('small', { class: 'muted' }, s.key));
+  }
+  return h('label', { class: 'field' }, h('span', null, s.description), control, h('small', { class: 'muted' }, s.key));
+}
+
+/** Employee Welfare Fund card: status, dated rates and eligibility — every value is a System Setting. */
+function ewfCard(items: SettingItem[], inputs: Map<string, HTMLInputElement>): HTMLElement | null {
+  const by = (k: string) => items.find((s) => s.key === `payroll.ewf_${k}`);
+  const enabled = by('enabled');
+  if (!enabled) return null;
+  const on = h('input', { type: 'radio', name: 'ewf-status', value: 'true', checked: enabled.value === 'true' });
+  const off = h('input', { type: 'radio', name: 'ewf-status', value: 'false', checked: enabled.value !== 'true' });
+  // the radio pair is submitted through a hidden checkbox so the generic save keeps working
+  const hidden = h('input', { type: 'checkbox', name: enabled.key, checked: enabled.value === 'true', hidden: true });
+  inputs.set(enabled.key, hidden);
+  const sync = () => {
+    hidden.checked = on.checked;
+    card.classList.toggle('is-off', !on.checked);
+  };
+  on.addEventListener('change', sync);
+  off.addEventListener('change', sync);
+  const field = (k: string, suffix?: string) => {
+    const s = by(k);
+    return s ? settingInput(s, inputs, suffix) : null;
+  };
+  const card = h('section', { class: `card ewf-card ${enabled.value === 'true' ? '' : 'is-off'}`, id: 'ewf-settings' },
+    h('div', { class: 'card-head' },
+      h('div', null, h('h2', null, 'กองทุนสงเคราะห์ลูกจ้าง'), h('p', { class: 'muted small' }, 'Employee Welfare Fund (EWF)')),
+      h('div', { class: 'segmented', role: 'radiogroup', 'aria-label': 'สถานะกองทุนสงเคราะห์ลูกจ้าง' },
+        h('label', null, on, h('span', null, 'เปิดใช้งาน')),
+        h('label', null, off, h('span', null, 'ปิดใช้งาน')))),
+    hidden,
+    h('div', { class: 'alert ewf-note' }, 'ขอบเขตการคำนวณ: การคำนวณกองทุนสงเคราะห์ลูกจ้างต้องอ้างอิงค่าจ้างและเงื่อนไขตามกฎหมายที่มีผลบังคับใช้ — ระบบคำนวณจากค่าจ้าง (เงินเดือนหลังหักลาไม่รับค่าจ้าง) และเลือกอัตราตาม "วันจ่าย" ของงวดเงินเดือน'),
+    h('h3', null, 'อัตราปัจจุบัน'),
+    h('div', { class: 'grid-form' }, field('effective_date'), h('div'), field('employee_rate', '%'), field('employer_rate', '%')),
+    h('h3', null, 'การเปลี่ยนอัตราครั้งถัดไป'),
+    h('div', { class: 'grid-form' }, field('next_rate_date'), h('div'), field('next_employee_rate', '%'), field('next_employer_rate', '%')),
+    h('h3', null, 'ฐานค่าจ้างและการเข้าเกณฑ์'),
+    h('div', { class: 'grid-form' }, field('wage_cap', 'บาท'), field('min_employee_count', 'คน'), field('exempt_provident_fund'), field('provident_fund_component'), field('exempt_equivalent_welfare')),
+    h('p', { class: 'muted small' }, 'เงินสะสมของพนักงานแสดงเป็นรายการหักในสลิป ส่วนเงินสมทบของนายจ้างบันทึกแยกและไม่หักจากเงินสุทธิของพนักงาน การเปลี่ยนค่าตั้งไม่กระทบงวดที่อนุมัติหรือเผยแพร่แล้ว'));
+  return card;
+}
+
 export async function renderSettings(main: HTMLElement): Promise<void> {
   mount(main, loading());
   try {
     const items = await get<SettingItem[]>('/api/admin/settings');
     const inputs = new Map<string, HTMLInputElement>();
-    const groups = new Map<string, SettingItem[]>();
-    for (const s of items) groups.set(s.key.split('.')[0] ?? 'other', [...(groups.get(s.key.split('.')[0] ?? 'other') ?? []), s]);
-    const titles: Record<string, string> = { security: 'ความปลอดภัย', payroll: 'เงินเดือน', attendance: 'เวลาทำงาน', org: 'องค์กร' };
+    const known = new Set<string>();
+    const cards = SETTING_GROUPS.map((g) => {
+      const list = items.filter((s) => g.match(s.key));
+      list.forEach((s) => known.add(s.key));
+      if (!list.length) return null;
+      const card = h('section', { class: 'card' }, h('h2', null, g.title), h('div', { class: 'grid-form' }, list.map((s) => settingInput(s, inputs))));
+      return g.title.startsWith('เงินเดือน') ? [card, ewfCard(items, inputs)] : card;
+    });
+    for (const s of items) if (s.key.startsWith('payroll.ewf_')) known.add(s.key);
+    const other = items.filter((s) => !known.has(s.key));
+    const msg = h('div', { class: 'form-msg', role: 'alert' });
     mount(main,
+      h('p', { class: 'muted lead' }, 'เฉพาะ Super Admin เท่านั้นที่ดูและแก้ไขค่าตั้งระบบได้ ทุกการเปลี่ยนแปลงถูกบันทึกใน Audit Log'),
       h('form', { class: 'stack', onsubmit: async (e: Event) => {
         e.preventDefault();
+        msg.textContent = '';
         const body: Record<string, unknown> = {};
         for (const [k, el] of inputs) body[k] = el.type === 'checkbox' ? el.checked : el.value;
         try {
           const r = await put<{ changed: number }>('/api/admin/settings', body);
           toast(r.changed ? `บันทึก ${r.changed} รายการแล้ว` : 'ไม่มีการเปลี่ยนแปลง');
         } catch (err) {
-          toast(err instanceof Error ? err.message : String(err), 'error');
+          msg.textContent = err instanceof Error ? err.message : String(err);
+          const field = err instanceof ApiFailure ? (err.details as { field?: string } | undefined)?.field : undefined;
+          if (field) main.querySelector<HTMLInputElement>(`[name="${field}"]`)?.focus();
+          toast(msg.textContent, 'error');
         }
       } },
-      [...groups].map(([g, list]) => h('section', { class: 'card' }, h('h2', null, titles[g] ?? g), h('div', { class: 'grid-form' }, list.map((s) => {
-        const el = s.type === 'bool' ? h('input', { type: 'checkbox', checked: s.value === 'true' }) : h('input', { type: s.type === 'number' ? 'number' : 'text', step: 'any', min: s.type === 'number' ? 0 : undefined, value: s.value });
-        inputs.set(s.key, el);
-        return h('label', { class: `field ${s.type === 'bool' ? 'check' : ''}` }, h('span', null, s.description), el, h('small', { class: 'muted' }, s.key));
-      })))),
-      h('div', null, h('button', { class: 'btn primary', type: 'submit' }, 'บันทึกการตั้งค่า'))),
+      cards,
+      other.length ? h('section', { class: 'card' }, h('h2', null, 'อื่น ๆ'), h('div', { class: 'grid-form' }, other.map((s) => settingInput(s, inputs)))) : null,
+      msg,
+      h('div', { class: 'form-actions' }, h('button', { class: 'btn primary', type: 'submit' }, 'บันทึกการตั้งค่า'))),
     );
   } catch (e) {
     mount(main, errorBox(e));

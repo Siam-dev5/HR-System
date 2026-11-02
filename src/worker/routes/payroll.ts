@@ -1,15 +1,16 @@
 import { Hono } from 'hono';
 import type { AppEnv } from '../env';
 import type { PayrollPeriod, PayslipDetail, PayslipSummary } from '../../shared/types';
-import { calculatePay } from '../../shared/payroll';
+import { calculatePay, resolveEwf } from '../../shared/payroll';
 import { DATE_RE, badRequest, conflict, csv, forbidden, intParam, notFound, readJson, str } from '../lib/http';
 import { audit, notify } from '../lib/audit';
-import { loadSettings, payrollConfig, settingBool } from '../lib/settings';
+import { ewfConfig, loadSettings, payrollConfig, settingBool } from '../lib/settings';
 import { can, currentUser, requireAuth, requirePerm } from '../auth';
 
 const PERIOD_SELECT = `SELECT p.id, p.code, p.name, p.start_date, p.end_date, p.pay_date, p.status, p.calculated_by, p.approved_by,
   (SELECT COUNT(*) FROM payslips s WHERE s.period_id = p.id) AS employees,
-  (SELECT COALESCE(SUM(net), 0) FROM payslips s WHERE s.period_id = p.id) AS total_net
+  (SELECT COALESCE(SUM(net), 0) FROM payslips s WHERE s.period_id = p.id) AS total_net,
+  (SELECT COALESCE(SUM(ewf_employer), 0) FROM payslips s WHERE s.period_id = p.id) AS total_ewf_employer
   FROM payroll_periods p`;
 
 const SLIP_SELECT = `SELECT s.id, p.code AS period_code, p.name AS period_name, p.pay_date, s.employee_id,
@@ -57,12 +58,18 @@ payrollRoutes.post('/periods/:id/calculate', requirePerm('payroll.calculate'), a
   const db = c.env.DB;
   const p = await period(db, intParam(c.req.param('id')));
   if (p.status !== 'draft' && p.status !== 'calculated') throw conflict('คำนวณใหม่ได้เฉพาะงวดที่ยังไม่อนุมัติ');
-  const cfg = payrollConfig(await loadSettings(db));
+  const settings = await loadSettings(db);
+  const cfg = payrollConfig(settings);
+  // EWF parameters come only from System Settings; the period's pay date selects the rates in force
+  const ewf = ewfConfig(settings);
 
   const { results: emps } = await db
-    .prepare("SELECT id, base_salary FROM employees WHERE status IN ('active', 'probation') AND hire_date <= ? AND base_salary IS NOT NULL AND base_salary > 0 ORDER BY emp_code")
+    .prepare("SELECT id, base_salary, company_id, ewf_equivalent_welfare FROM employees WHERE status IN ('active', 'probation') AND hire_date <= ? AND base_salary IS NOT NULL AND base_salary > 0 ORDER BY emp_code")
     .bind(p.end_date)
-    .all<{ id: number; base_salary: number }>();
+    .all<{ id: number; base_salary: number; company_id: number; ewf_equivalent_welfare: number }>();
+  const { results: headcounts } = await db
+    .prepare("SELECT company_id, COUNT(*) AS n FROM employees WHERE status IN ('active', 'probation') GROUP BY company_id")
+    .all<{ company_id: number; n: number }>();
   const { results: ot } = await db
     .prepare("SELECT employee_id, hours, rate FROM overtime_requests WHERE status = 'approved' AND work_date BETWEEN ? AND ?")
     .bind(p.start_date, p.end_date)
@@ -83,6 +90,12 @@ payrollRoutes.post('/periods/:id/calculate', requirePerm('payroll.calculate'), a
   let totalNet = 0;
   for (const e of emps) {
     const mine = items.filter((i) => i.employee_id === e.id);
+    const ewfFor = resolveEwf(ewf, {
+      date: p.pay_date,
+      companyEmployeeCount: headcounts.find((h) => h.company_id === e.company_id)?.n ?? 0,
+      providentFundMember: mine.some((i) => i.code === ewf.providentFundComponent),
+      equivalentWelfare: e.ewf_equivalent_welfare === 1,
+    });
     const r = calculatePay(
       {
         baseSalary: e.base_salary,
@@ -90,14 +103,17 @@ payrollRoutes.post('/periods/:id/calculate', requirePerm('payroll.calculate'), a
         earnings: mine.filter((i) => i.kind === 'earning').map((i) => ({ code: i.code, name: i.name, amount: i.amount, taxable: i.taxable === 1 })),
         deductions: mine.filter((i) => i.kind === 'deduction').map((i) => ({ code: i.code, name: i.name, amount: i.amount })),
         unpaidLeaveDays: unpaid.find((u) => u.employee_id === e.id)?.days ?? 0,
+        ewf: ewfFor.rates,
       },
       cfg,
     );
     totalNet += r.net;
     stmts.push(
       db.prepare(
-        'INSERT INTO payslips (period_id, employee_id, base_salary, ot_amount, earnings, unpaid_leave, gross, sso, tax, deductions, net, lines_json) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)',
-      ).bind(p.id, e.id, r.baseSalary, r.otAmount, r.earnings, r.unpaidLeave, r.gross, r.sso, r.tax, r.deductions, r.net, JSON.stringify(r.lines)),
+        `INSERT INTO payslips (period_id, employee_id, base_salary, ot_amount, earnings, unpaid_leave, gross, sso, tax, deductions, net, lines_json,
+           ewf_employee, ewf_employer, ewf_employee_rate, ewf_employer_rate, ewf_status) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      ).bind(p.id, e.id, r.baseSalary, r.otAmount, r.earnings, r.unpaidLeave, r.gross, r.sso, r.tax, r.deductions, r.net, JSON.stringify(r.lines),
+        r.ewfEmployee, r.ewfEmployer, ewfFor.rates?.employeeRate ?? null, ewfFor.rates?.employerRate ?? null, ewfFor.status),
     );
   }
   stmts.push(db.prepare("UPDATE payroll_periods SET status = 'calculated', calculated_by = ?, calculated_at = datetime('now'), updated_at = datetime('now'), updated_by = ? WHERE id = ?").bind(user.id, user.id, p.id));
@@ -149,13 +165,13 @@ payrollRoutes.get('/payslips', async (c) => {
 payrollRoutes.get('/periods/:id/export.csv', requirePerm('payroll.export'), async (c) => {
   const p = await period(c.env.DB, intParam(c.req.param('id')));
   const { results } = await c.env.DB.prepare(
-    `SELECT e.emp_code, e.first_name || ' ' || e.last_name AS name, e.bank_name, e.bank_account, s.base_salary, s.ot_amount, s.earnings, s.unpaid_leave, s.gross, s.sso, s.tax, s.deductions, s.net
+    `SELECT e.emp_code, e.first_name || ' ' || e.last_name AS name, e.bank_name, e.bank_account, s.base_salary, s.ot_amount, s.earnings, s.unpaid_leave, s.gross, s.sso, s.ewf_employee, s.tax, s.deductions, s.net, s.ewf_employer
      FROM payslips s JOIN employees e ON e.id = s.employee_id WHERE s.period_id = ? ORDER BY e.emp_code`,
   )
     .bind(p.id)
     .all<Record<string, string | number | null>>();
-  const head = ['รหัส', 'ชื่อ', 'ธนาคาร', 'เลขบัญชี', 'เงินเดือน', 'OT', 'เงินได้อื่น', 'หักลาไม่รับค่าจ้าง', 'รวมเงินได้', 'ประกันสังคม', 'ภาษี', 'รวมหัก', 'สุทธิ'];
-  const keys = ['emp_code', 'name', 'bank_name', 'bank_account', 'base_salary', 'ot_amount', 'earnings', 'unpaid_leave', 'gross', 'sso', 'tax', 'deductions', 'net'];
+  const head = ['รหัส', 'ชื่อ', 'ธนาคาร', 'เลขบัญชี', 'เงินเดือน', 'OT', 'เงินได้อื่น', 'หักลาไม่รับค่าจ้าง', 'รวมเงินได้', 'ประกันสังคม', 'กองทุนสงเคราะห์ลูกจ้าง (พนักงาน)', 'ภาษี', 'รวมหัก', 'สุทธิ', 'กองทุนสงเคราะห์ลูกจ้าง (นายจ้างสมทบ)'];
+  const keys = ['emp_code', 'name', 'bank_name', 'bank_account', 'base_salary', 'ot_amount', 'earnings', 'unpaid_leave', 'gross', 'sso', 'ewf_employee', 'tax', 'deductions', 'net', 'ewf_employer'];
   await audit(c, 'payroll.exported', 'payroll_periods', p.id, { rows: results.length });
   return c.body(csv([head, ...results.map((r) => keys.map((k) => r[k] ?? null))]), 200, {
     'content-type': 'text/csv; charset=utf-8',
@@ -186,10 +202,12 @@ payslipRoutes.get('/payslips/:id', async (c) => {
      FROM payslips s JOIN payroll_periods p ON p.id = s.period_id JOIN employees e ON e.id = s.employee_id WHERE s.id = ?`,
   )
     .bind(id)
-    .first<Omit<PayslipDetail, 'lines'> & { lines_json: string }>();
+    .first<Omit<PayslipDetail, 'lines' | 'ewf_employer' | 'ewf_employer_rate'> & { lines_json: string; ewf_employer: number; ewf_employer_rate: number | null }>();
   const own = row && user.employeeId !== null && row.employee_id === user.employeeId && row.published === 1 && can(user, 'payslip.own');
   if (!row || (!own && !can(user, 'payroll.view'))) throw notFound('ไม่พบสลิปเงินเดือน');
-  const { lines_json, ...rest } = row;
+  const { lines_json, ewf_employer, ewf_employer_rate, ...rest } = row;
+  // the employer contribution is company cost: only payroll staff see it, the employee's own view does not
   await audit(c, 'payslip.viewed', 'payslips', id, { own: !!own });
-  return c.json<PayslipDetail>({ ...rest, lines: JSON.parse(lines_json) as PayslipDetail['lines'] });
+  const employer = can(user, 'payroll.view') ? { ewf_employer, ewf_employer_rate } : {};
+  return c.json<PayslipDetail>({ ...rest, ...employer, lines: JSON.parse(lines_json) as PayslipDetail['lines'] });
 });

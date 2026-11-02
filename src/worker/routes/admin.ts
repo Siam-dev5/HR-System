@@ -6,9 +6,9 @@ import { RESERVED_PERMISSIONS, permissionCatalogue } from '../../shared/modules'
 import { permissionMatches } from '../../shared/permissions';
 import { ROLE } from '../../shared/permissions';
 import { generatePassword, hashPassword } from '../../shared/crypto';
-import { badRequest, conflict, forbidden, intParam, notFound, readJson, str } from '../lib/http';
+import { DATE_RE, badRequest, conflict, forbidden, intParam, notFound, readJson, str } from '../lib/http';
 import { audit } from '../lib/audit';
-import { currentUser, requireAuth, requirePerm, requireSuperAdmin } from '../auth';
+import { currentUser, requireAuth, requireSuperAdmin } from '../auth';
 
 const PERMISSION_PATTERN = /^(\*|\*\.[a-z_]+|[a-z_]+\.(\*|[a-z_]+))$/;
 
@@ -269,12 +269,23 @@ adminRoutes.put('/roles/:id', requireSuperAdmin, async (c) => {
 });
 
 // ---- Settings -------------------------------------------------------------------------------
-adminRoutes.get('/settings', requirePerm('settings.manage'), async (c) => {
+adminRoutes.get('/settings', requireSuperAdmin, async (c) => {
   const { results } = await c.env.DB.prepare('SELECT key, value, type, description FROM settings ORDER BY key').all<SettingItem>();
   return c.json(results);
 });
 
-adminRoutes.put('/settings', requirePerm('settings.manage'), async (c) => {
+/** Per-key rules on top of the bool/number/text type check. */
+function validateSettingValue(key: string, value: string): string | null {
+  if (key.endsWith('_date') && value !== '') {
+    if (!DATE_RE.test(value) || Number.isNaN(Date.parse(value))) return `${key} ต้องเป็นวันที่รูปแบบ YYYY-MM-DD`;
+  }
+  if (/^payroll\.ewf_.*_rate$/.test(key) && Number(value) > 100) return `${key} ต้องเป็นเปอร์เซ็นต์ระหว่าง 0-100`;
+  if (key === 'payroll.ewf_min_employee_count' && !Number.isInteger(Number(value))) return 'จำนวนลูกจ้างขั้นต่ำต้องเป็นจำนวนเต็ม';
+  if (key === 'payroll.ewf_provident_fund_component' && !/^[A-Za-z0-9_-]{1,20}$/.test(value)) return 'รหัสรายการกองทุนสำรองเลี้ยงชีพไม่ถูกต้อง';
+  return null;
+}
+
+adminRoutes.put('/settings', requireSuperAdmin, async (c) => {
   const user = currentUser(c);
   const body = await readJson<Record<string, unknown>>(c);
   const { results } = await c.env.DB.prepare('SELECT key, value, type FROM settings').all<SettingItem>();
@@ -295,8 +306,16 @@ adminRoutes.put('/settings', requirePerm('settings.manage'), async (c) => {
       if (typeof raw !== 'string' || raw.length > 300) throw badRequest(`${key} ต้องเป็นข้อความไม่เกิน 300 ตัวอักษร`);
       value = raw.trim();
     }
+    const problem = validateSettingValue(key, value);
+    if (problem) throw badRequest(problem, { field: key });
     if (value !== s.value) changes.push({ key, from: s.value, to: value });
   }
+  // cross-field rule on the resulting state
+  const after = (k: string) => changes.find((ch) => ch.key === k)?.to ?? known.get(k)?.value ?? '';
+  const eff = after('payroll.ewf_effective_date');
+  const next = after('payroll.ewf_next_rate_date');
+  if (eff && next && next <= eff) throw badRequest('วันที่เปลี่ยนอัตราครั้งถัดไปต้องอยู่หลังวันที่มีผลบังคับใช้', { field: 'payroll.ewf_next_rate_date' });
+  if (after('payroll.ewf_enabled') === 'true' && !eff) throw badRequest('ต้องระบุวันที่มีผลบังคับใช้ก่อนเปิดใช้งานกองทุนสงเคราะห์ลูกจ้าง', { field: 'payroll.ewf_effective_date' });
   if (changes.length) {
     await c.env.DB.batch(changes.map((ch) => c.env.DB.prepare("UPDATE settings SET value = ?, updated_at = datetime('now'), updated_by = ? WHERE key = ?").bind(ch.to, user.id, ch.key)));
     await audit(c, 'settings.updated', 'settings', null, { changes });

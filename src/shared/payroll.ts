@@ -41,6 +41,8 @@ export interface PayInput {
   earnings: Array<{ code: string; name: string; amount: number; taxable: boolean }>;
   deductions: Array<{ code: string; name: string; amount: number }>;
   unpaidLeaveDays: number;
+  /** Employee Welfare Fund rates (%) resolved by resolveEwf(); null = not applicable */
+  ewf?: { employeeRate: number; employerRate: number; wageCap: number } | null;
 }
 
 export interface PayLine {
@@ -60,6 +62,10 @@ export interface PayResult {
   tax: number;
   deductions: number;
   net: number;
+  /** EWF deducted from the employee (part of deductions and a payslip line) */
+  ewfEmployee: number;
+  /** EWF employer contribution: recorded separately, never deducted from net pay */
+  ewfEmployer: number;
   lines: PayLine[];
 }
 
@@ -103,15 +109,61 @@ export function calculatePay(input: PayInput, cfg: PayrollConfig = DEFAULT_PAYRO
   const taxable = base - unpaidLeave + otAmount + taxableEarnings;
   const tax = monthlyWithholding(taxable, sso, cfg);
   const other = round2(input.deductions.reduce((s, d) => s + d.amount, 0));
-  const deductions = round2(sso + tax + other);
+  const ewfWage = input.ewf ? (input.ewf.wageCap > 0 ? Math.min(base - unpaidLeave, input.ewf.wageCap) : base - unpaidLeave) : 0;
+  const ewfEmployee = input.ewf ? round2(Math.max(ewfWage, 0) * input.ewf.employeeRate / 100) : 0;
+  const ewfEmployer = input.ewf ? round2(Math.max(ewfWage, 0) * input.ewf.employerRate / 100) : 0;
+  const deductions = round2(sso + tax + other + ewfEmployee);
 
   const lines: PayLine[] = [{ code: 'BASE', name: 'เงินเดือน', kind: 'earning', amount: base }];
   if (otAmount) lines.push({ code: 'OT', name: 'ค่าล่วงเวลา', kind: 'earning', amount: otAmount });
   for (const e of input.earnings) lines.push({ code: e.code, name: e.name, kind: 'earning', amount: round2(e.amount) });
   if (unpaidLeave) lines.push({ code: 'UNPAID', name: 'หักลาไม่รับค่าจ้าง', kind: 'deduction', amount: unpaidLeave });
   lines.push({ code: 'SSO', name: 'ประกันสังคม', kind: 'deduction', amount: sso });
+  if (ewfEmployee) lines.push({ code: 'EWF', name: 'เงินสะสมกองทุนสงเคราะห์ลูกจ้าง', kind: 'deduction', amount: ewfEmployee });
   lines.push({ code: 'TAX', name: 'ภาษีหัก ณ ที่จ่าย', kind: 'deduction', amount: tax });
   for (const d of input.deductions) lines.push({ code: d.code, name: d.name, kind: 'deduction', amount: round2(d.amount) });
 
-  return { baseSalary: base, otAmount, earnings, unpaidLeave, gross, sso, tax, deductions, net: round2(gross - deductions), lines };
+  return { baseSalary: base, otAmount, earnings, unpaidLeave, gross, sso, tax, deductions, net: round2(gross - deductions), ewfEmployee, ewfEmployer, lines };
+}
+
+// ---- Employee Welfare Fund (กองทุนสงเคราะห์ลูกจ้าง) -----------------------------------------------
+// Every legal parameter comes from System Settings (EwfConfig); nothing statutory is hard-coded here.
+
+export interface EwfConfig {
+  enabled: boolean;
+  effectiveDate: string; // YYYY-MM-DD, '' = not set
+  employeeRate: number; // %
+  employerRate: number; // %
+  nextRateDate: string; // YYYY-MM-DD, '' = no scheduled change
+  nextEmployeeRate: number; // %
+  nextEmployerRate: number; // %
+  wageCap: number; // 0 = no cap
+  minEmployeeCount: number; // 0 = every company
+  exemptProvidentFund: boolean;
+  providentFundComponent: string;
+  exemptEquivalentWelfare: boolean;
+}
+
+export type EwfStatus = 'applied' | 'disabled' | 'not_effective' | 'below_min_employees' | 'exempt_provident_fund' | 'exempt_equivalent_welfare';
+
+export interface EwfEmployeeContext {
+  /** reference date of the payroll period (its pay date) */
+  date: string;
+  companyEmployeeCount: number;
+  providentFundMember: boolean;
+  equivalentWelfare: boolean;
+}
+
+/** Decides whether EWF applies to one employee in one period and which rates are in force on that date. */
+export function resolveEwf(cfg: EwfConfig, ctx: EwfEmployeeContext): { status: EwfStatus; rates: { employeeRate: number; employerRate: number; wageCap: number } | null } {
+  if (!cfg.enabled) return { status: 'disabled', rates: null };
+  if (!cfg.effectiveDate || ctx.date < cfg.effectiveDate) return { status: 'not_effective', rates: null };
+  if (cfg.minEmployeeCount > 0 && ctx.companyEmployeeCount < cfg.minEmployeeCount) return { status: 'below_min_employees', rates: null };
+  if (cfg.exemptProvidentFund && ctx.providentFundMember) return { status: 'exempt_provident_fund', rates: null };
+  if (cfg.exemptEquivalentWelfare && ctx.equivalentWelfare) return { status: 'exempt_equivalent_welfare', rates: null };
+  const next = !!cfg.nextRateDate && ctx.date >= cfg.nextRateDate;
+  return {
+    status: 'applied',
+    rates: { employeeRate: next ? cfg.nextEmployeeRate : cfg.employeeRate, employerRate: next ? cfg.nextEmployerRate : cfg.employerRate, wageCap: cfg.wageCap },
+  };
 }

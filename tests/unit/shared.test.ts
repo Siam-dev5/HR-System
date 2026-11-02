@@ -1,7 +1,8 @@
 import { describe, expect, it } from 'vitest';
 import { hasPermission, permissionMatches } from '../../src/shared/permissions';
 import { resolveLink } from '../../src/shared/links';
-import { annualTax, calculatePay, monthlyWithholding, socialSecurity, DEFAULT_PAYROLL_CONFIG } from '../../src/shared/payroll';
+import { annualTax, calculatePay, monthlyWithholding, resolveEwf, round2, socialSecurity, DEFAULT_PAYROLL_CONFIG } from '../../src/shared/payroll';
+import type { EwfConfig } from '../../src/shared/payroll';
 import { decryptString, encryptString, generatePassword, hashPassword, toBase64, randomBytes, verifyPassword } from '../../src/shared/crypto';
 import { base32Decode, base32Encode, totpCode, verifyTotp } from '../../src/shared/totp';
 
@@ -120,5 +121,58 @@ describe('TOTP (RFC 6238)', () => {
     expect(await verifyTotp(secret, await totpCode(secret, t - 30_000), t)).toBe(true);
     expect(await verifyTotp(secret, await totpCode(secret, t - 90_000), t)).toBe(false);
     expect(await verifyTotp(secret, 'abc123', t)).toBe(false);
+  });
+});
+
+describe('Employee Welfare Fund (settings-driven)', () => {
+  // test values only — the engine has no statutory numbers of its own
+  const cfg: EwfConfig = {
+    enabled: true, effectiveDate: '2026-10-01', employeeRate: 0.25, employerRate: 0.25,
+    nextRateDate: '2028-10-01', nextEmployeeRate: 0.5, nextEmployerRate: 0.5, wageCap: 0,
+    minEmployeeCount: 0, exemptProvidentFund: true, providentFundComponent: 'PVD', exemptEquivalentWelfare: true,
+  };
+  const ctx = { date: '2026-11-30', companyEmployeeCount: 20, providentFundMember: false, equivalentWelfare: false };
+  const base = { baseSalary: 30000, overtime: [], earnings: [], deductions: [], unpaidLeaveDays: 0 };
+
+  it('disabled or before the effective date → no calculation', () => {
+    expect(resolveEwf({ ...cfg, enabled: false }, ctx)).toEqual({ status: 'disabled', rates: null });
+    expect(resolveEwf(cfg, { ...ctx, date: '2026-09-30' }).status).toBe('not_effective');
+    expect(resolveEwf({ ...cfg, effectiveDate: '' }, ctx).status).toBe('not_effective');
+    const r = calculatePay({ ...base, ewf: null });
+    expect(r.ewfEmployee).toBe(0);
+    expect(r.ewfEmployer).toBe(0);
+    expect(r.lines.some((l) => l.code === 'EWF')).toBe(false);
+  });
+
+  it('selects the rate in force on the period date, including across the change date', () => {
+    expect(resolveEwf(cfg, ctx).rates).toEqual({ employeeRate: 0.25, employerRate: 0.25, wageCap: 0 });
+    expect(resolveEwf(cfg, { ...ctx, date: '2028-09-30' }).rates?.employeeRate).toBe(0.25);
+    expect(resolveEwf(cfg, { ...ctx, date: '2028-10-01' }).rates).toEqual({ employeeRate: 0.5, employerRate: 0.5, wageCap: 0 });
+    expect(resolveEwf({ ...cfg, nextRateDate: '' }, { ...ctx, date: '2030-01-31' }).rates?.employeeRate).toBe(0.25);
+  });
+
+  it('eligibility comes from settings (minimum headcount, provident fund, equivalent welfare)', () => {
+    expect(resolveEwf({ ...cfg, minEmployeeCount: 50 }, ctx).status).toBe('below_min_employees');
+    expect(resolveEwf({ ...cfg, minEmployeeCount: 20 }, ctx).status).toBe('applied');
+    expect(resolveEwf(cfg, { ...ctx, providentFundMember: true }).status).toBe('exempt_provident_fund');
+    expect(resolveEwf({ ...cfg, exemptProvidentFund: false }, { ...ctx, providentFundMember: true }).status).toBe('applied');
+    expect(resolveEwf(cfg, { ...ctx, equivalentWelfare: true }).status).toBe('exempt_equivalent_welfare');
+    expect(resolveEwf({ ...cfg, exemptEquivalentWelfare: false }, { ...ctx, equivalentWelfare: true }).status).toBe('applied');
+  });
+
+  it('employee deduction reduces net pay; employer contribution does not', () => {
+    const without = calculatePay(base);
+    const withEwf = calculatePay({ ...base, ewf: { employeeRate: 0.25, employerRate: 0.5, wageCap: 0 } });
+    expect(withEwf.ewfEmployee).toBe(75); // 30,000 × 0.25%
+    expect(withEwf.ewfEmployer).toBe(150); // 30,000 × 0.5% — recorded separately
+    expect(withEwf.net).toBe(round2(without.net - 75));
+    expect(withEwf.deductions).toBe(round2(without.deductions + 75));
+    expect(withEwf.lines.find((l) => l.code === 'EWF')).toEqual({ code: 'EWF', name: 'เงินสะสมกองทุนสงเคราะห์ลูกจ้าง', kind: 'deduction', amount: 75 });
+    expect(withEwf.lines.some((l) => l.amount === 150)).toBe(false); // employer share never appears as a payslip line
+  });
+
+  it('uses wages after unpaid leave and applies the optional wage cap', () => {
+    expect(calculatePay({ ...base, unpaidLeaveDays: 3, ewf: { employeeRate: 1, employerRate: 1, wageCap: 0 } }).ewfEmployee).toBe(270); // (30,000 − 3,000) × 1%
+    expect(calculatePay({ ...base, ewf: { employeeRate: 1, employerRate: 2, wageCap: 20000 } })).toMatchObject({ ewfEmployee: 200, ewfEmployer: 400 });
   });
 });

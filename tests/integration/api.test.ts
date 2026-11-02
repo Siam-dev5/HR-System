@@ -615,3 +615,138 @@ describe('self-registration', () => {
     expect((await anon.get('/api/auth/policy')).body.selfRegistration).toBe(true);
   });
 });
+
+describe('System Settings are Super Admin only', () => {
+  it('every other role gets 403 on read and write, and has no settings menu', async () => {
+    for (const k of ['manager', 'staff', 'employee', 'payroll']) {
+      expect((await clients[k]!.get('/api/admin/settings')).status, k).toBe(403);
+      expect((await clients[k]!.put('/api/admin/settings', { 'payroll.ewf_enabled': true })).status, k).toBe(403);
+      const meta = (await clients[k]!.get<MetaResponse>('/api/meta')).body;
+      expect(meta.menu.some((m) => m.key === 'settings'), k).toBe(false);
+    }
+  });
+  it('a mis-granted settings.manage permission is still refused, and the role editor will not grant it', async () => {
+    H.sql("INSERT INTO role_permissions (role_id, permission) SELECT id, 'settings.manage' FROM roles WHERE code = 'hr_manager';");
+    try {
+      expect((await clients.manager!.put('/api/admin/settings', { 'payroll.ewf_enabled': true })).status).toBe(403);
+    } finally {
+      H.sql("DELETE FROM role_permissions WHERE permission = 'settings.manage';");
+    }
+    const roles = (await admin().get('/api/admin/roles')).body;
+    const mgr = roles.roles.find((r: { code: string }) => r.code === 'hr_manager');
+    expect((await admin().put(`/api/admin/roles/${mgr.id}`, { permissions: [...mgr.permissions, 'settings.manage'] })).status).toBe(400);
+  });
+  it('Super Admin reads and saves EWF settings with validation', async () => {
+    const items = (await admin().get('/api/admin/settings')).body as Array<{ key: string; value: string }>;
+    const ewf = items.filter((s) => s.key.startsWith('payroll.ewf_')).map((s) => s.key).sort();
+    expect(ewf).toEqual([
+      'payroll.ewf_effective_date', 'payroll.ewf_employee_rate', 'payroll.ewf_employer_rate', 'payroll.ewf_enabled',
+      'payroll.ewf_exempt_equivalent_welfare', 'payroll.ewf_exempt_provident_fund', 'payroll.ewf_min_employee_count',
+      'payroll.ewf_next_employee_rate', 'payroll.ewf_next_employer_rate', 'payroll.ewf_next_rate_date',
+      'payroll.ewf_provident_fund_component', 'payroll.ewf_wage_cap',
+    ]);
+    expect(items.find((s) => s.key === 'payroll.ewf_enabled')?.value).toBe('false'); // starts disabled, no legal rates seeded
+    expect((await admin().put('/api/admin/settings', { 'payroll.ewf_enabled': true })).body.error.details.field).toBe('payroll.ewf_effective_date');
+    expect((await admin().put('/api/admin/settings', { 'payroll.ewf_effective_date': '2026-13-01' })).status).toBe(400);
+    expect((await admin().put('/api/admin/settings', { 'payroll.ewf_employee_rate': 150 })).status).toBe(400);
+    expect((await admin().put('/api/admin/settings', { 'payroll.ewf_effective_date': '2026-11-01', 'payroll.ewf_next_rate_date': '2026-10-01' })).body.error.details.field).toBe('payroll.ewf_next_rate_date');
+    expect((await admin().put('/api/admin/settings', { 'payroll.ewf_min_employee_count': 2.5 })).status).toBe(400);
+  });
+});
+
+describe('Employee Welfare Fund in payroll', () => {
+  const ewfOn = {
+    'payroll.ewf_enabled': true, 'payroll.ewf_effective_date': '2026-11-01',
+    'payroll.ewf_employee_rate': 0.25, 'payroll.ewf_employer_rate': 0.5,
+    'payroll.ewf_next_rate_date': '2026-12-15', 'payroll.ewf_next_employee_rate': 1, 'payroll.ewf_next_employer_rate': 1.5,
+  };
+  let octSlip: Record<string, unknown>;
+  let nov = 0;
+  const slipOf = async (periodId: number, code: string) => {
+    const list = (await clients.payroll!.get(`/api/payroll/payslips?period_id=${periodId}`)).body as Array<{ id: number; employee: string }>;
+    const s = list.find((x) => x.employee.startsWith(code));
+    return (await clients.payroll!.get(`/api/payslips/${s!.id}`)).body;
+  };
+
+  it('existing (published) payroll history is not recalculated or modified', async () => {
+    const oct = (await clients.payroll!.get('/api/payroll/periods')).body.find((p: { code: string }) => p.code === '2026-10');
+    octSlip = await slipOf(oct.id, 'E007');
+    expect(octSlip.ewf_employee).toBe(0);
+    expect(octSlip.ewf_status).toBe('disabled');
+    expect((await admin().put('/api/admin/settings', ewfOn)).status).toBe(200);
+    expect((await admin().get('/api/admin/settings')).body.find((s: { key: string }) => s.key === 'payroll.ewf_employer_rate').value).toBe('0.5');
+    expect((await clients.payroll!.post(`/api/payroll/periods/${oct.id}/calculate`)).status).toBe(409);
+    const again = await slipOf(oct.id, 'E007');
+    expect(again).toEqual(octSlip);
+  });
+
+  it('enabled → employee deduction and employer contribution are calculated separately', async () => {
+    const p = await clients.payroll!.post('/api/payroll/periods', { code: '2026-11', name: 'พ.ย.', start_date: '2026-11-01', end_date: '2026-11-30', pay_date: '2026-11-30' });
+    nov = p.body.id;
+    expect((await clients.payroll!.post(`/api/payroll/periods/${nov}/calculate`)).status).toBe(200);
+    const s = await slipOf(nov, 'E007'); // base 16,500, no unpaid leave in November
+    expect(s.ewf_status).toBe('applied');
+    expect(s.ewf_employee_rate).toBe(0.25);
+    expect(s.ewf_employee).toBe(41.25); // 16,500 × 0.25%
+    expect(s.ewf_employer).toBe(82.5); // 16,500 × 0.5% (visible to payroll staff)
+    expect(s.lines.find((l: { code: string }) => l.code === 'EWF')?.amount).toBe(41.25);
+    expect(s.net).toBe(Math.round((s.gross - s.deductions) * 100) / 100);
+    const lineDeductions = s.lines.filter((l: { kind: string; code: string }) => l.kind === 'deduction' && l.code !== 'UNPAID').reduce((a: number, l: { amount: number }) => a + l.amount, 0);
+    expect(Math.round(lineDeductions * 100) / 100).toBe(s.deductions); // employer share is not a deduction
+    const period = (await clients.payroll!.get('/api/payroll/periods')).body.find((x: { id: number }) => x.id === nov);
+    expect(period.total_ewf_employer).toBeGreaterThan(0);
+    const csv = (await clients.payroll!.get(`/api/payroll/periods/${nov}/export.csv`)).text;
+    expect(csv).toContain('กองทุนสงเคราะห์ลูกจ้าง (นายจ้างสมทบ)');
+  });
+
+  it('a period paid after the rate-change date uses the next rates', async () => {
+    const p = await clients.payroll!.post('/api/payroll/periods', { code: '2026-12', name: 'ธ.ค.', start_date: '2026-12-01', end_date: '2026-12-31', pay_date: '2026-12-31' });
+    await clients.payroll!.post(`/api/payroll/periods/${p.body.id}/calculate`);
+    const s = await slipOf(p.body.id, 'E007');
+    expect(s.ewf_employee_rate).toBe(1);
+    expect(s.ewf_employee).toBe(165);
+    expect(s.ewf_employer).toBe(247.5);
+  });
+
+  it('eligibility exemptions and minimum headcount follow the settings', async () => {
+    const pvd = (await admin().get('/api/lookup/pay_components')).body.find((c: { code: string }) => c.code === 'PVD');
+    const e4 = H.sql("SELECT id FROM employees WHERE emp_code = 'E004'")[0]?.id;
+    const e5 = H.sql("SELECT id FROM employees WHERE emp_code = 'E005'")[0]?.id;
+    expect((await admin().post('/api/m/employee_pay_items', { employee_id: e4, component_id: pvd.value, amount: 1000, start_date: '2026-01-01' })).status).toBe(201);
+    expect((await admin().put(`/api/m/employees/${e5}`, { ewf_equivalent_welfare: true })).status).toBe(200);
+    await clients.payroll!.post(`/api/payroll/periods/${nov}/calculate`);
+    expect((await slipOf(nov, 'E004')).ewf_status).toBe('exempt_provident_fund');
+    expect((await slipOf(nov, 'E005')).ewf_status).toBe('exempt_equivalent_welfare');
+    expect((await slipOf(nov, 'E005')).ewf_employee).toBe(0);
+    await admin().put('/api/admin/settings', { 'payroll.ewf_min_employee_count': 100 });
+    await clients.payroll!.post(`/api/payroll/periods/${nov}/calculate`);
+    expect((await slipOf(nov, 'E007')).ewf_status).toBe('below_min_employees');
+    await admin().put('/api/admin/settings', { 'payroll.ewf_min_employee_count': 0 });
+  });
+
+  it('disabling EWF stops the calculation for periods that are not yet approved', async () => {
+    await admin().put('/api/admin/settings', { 'payroll.ewf_enabled': false });
+    await clients.payroll!.post(`/api/payroll/periods/${nov}/calculate`);
+    const s = await slipOf(nov, 'E007');
+    expect(s.ewf_status).toBe('disabled');
+    expect(s.ewf_employee).toBe(0);
+    expect(s.ewf_employer).toBe(0);
+    expect(s.lines.some((l: { code: string }) => l.code === 'EWF')).toBe(false);
+  });
+
+  it("the employee's own payslip never exposes the employer contribution", async () => {
+    await admin().put('/api/admin/settings', { 'payroll.ewf_enabled': true });
+    await clients.payroll!.post(`/api/payroll/periods/${nov}/calculate`);
+    await admin().post(`/api/payroll/periods/${nov}/approve`);
+    await admin().post(`/api/payroll/periods/${nov}/publish`);
+    const mine = (await clients.employee!.get('/api/my/payslips')).body.rows.find((r: { period_code: string }) => r.period_code === '2026-11');
+    const own = (await clients.employee!.get(`/api/payslips/${mine.id}`)).body;
+    expect(own.ewf_employee).toBe(41.25);
+    expect('ewf_employer' in own).toBe(false);
+    expect('ewf_employer_rate' in own).toBe(false);
+    expect((await clients.payroll!.get(`/api/payslips/${mine.id}`)).body.ewf_employer).toBe(82.5);
+    await admin().put('/api/admin/settings', { 'payroll.ewf_enabled': false });
+    expect((await clients.payroll!.post(`/api/payroll/periods/${nov}/calculate`)).status).toBe(409); // published history stays
+    expect((await clients.employee!.get(`/api/payslips/${mine.id}`)).body.ewf_employee).toBe(41.25);
+  });
+});

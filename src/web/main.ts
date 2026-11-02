@@ -9,6 +9,14 @@ import { PAGES, renderPayslipView } from './pages/registry';
 
 const root = document.getElementById('app') as HTMLElement;
 
+// The fixed site footer (index.html) reports its real height so every layout reserves that space (--footer-h).
+const siteFooter = document.getElementById('site-footer');
+if (siteFooter) {
+  const setFooterHeight = () => document.documentElement.style.setProperty('--footer-h', `${Math.ceil(siteFooter.getBoundingClientRect().height)}px`);
+  setFooterHeight();
+  new ResizeObserver(setFooterHeight).observe(siteFooter);
+}
+
 async function boot(): Promise<void> {
   setAuthLostHandler(() => {
     // only react when a signed-in session expires; signed-out screens handle their own errors
@@ -59,7 +67,12 @@ function renderShell(): void {
   );
   const menuToggle = h('button', { class: 'icon-btn menu-toggle', 'aria-label': 'เปิด/ปิดเมนู', onclick: () => document.body.classList.toggle('nav-open') }, '☰');
   const main = h('main', { id: 'main', tabindex: '-1' });
-  mount(root, h('div', { class: 'shell' }, nav, h('div', { class: 'content' }, h('header', { class: 'topbar' }, menuToggle, h('h1', { id: 'page-title' }, ''), h('div', { class: 'topbar-actions' }, bell, userMenu)), main)));
+  // mobile: the open menu covers the toggle, so a scrim (tap outside) and Escape close it
+  const scrim = h('div', { class: 'nav-scrim', 'aria-hidden': 'true', onclick: () => document.body.classList.remove('nav-open') });
+  document.addEventListener('keydown', (e) => {
+    if (e.key === 'Escape') document.body.classList.remove('nav-open');
+  });
+  mount(root, h('div', { class: 'shell' }, nav, scrim, h('div', { class: 'content' }, h('header', { class: 'topbar' }, menuToggle, h('h1', { id: 'page-title' }, ''), h('div', { class: 'topbar-actions' }, bell, userMenu)), main)));
   setRouteRenderer(() => renderRoute(main));
   window.onpopstate = () => renderRoute(main);
   if (['/', '/login', '/register'].includes(currentPath())) navigate(meta.menu[0]?.path ?? '/help', true);

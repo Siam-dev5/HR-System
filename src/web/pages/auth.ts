@@ -47,8 +47,7 @@ function authShell(opts: { icon: string; title: string; subtitle: string; body: 
         h('div', { class: 'auth-icon' }, icon(opts.icon)),
         h('h2', { class: 'auth-title' }, opts.title),
         h('p', { class: 'auth-subtitle' }, opts.subtitle),
-        opts.body),
-      h('footer', { class: 'auth-foot' }, `© ${new Date().getFullYear()} HR System · ข้อมูลทุกรายการได้รับการคุ้มครองตาม PDPA`)));
+        opts.body)));
 }
 
 /** Password input with a show/hide toggle and caps-lock hint. */
