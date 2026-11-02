@@ -1,0 +1,27 @@
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "hr-system",
+  "main": "src/worker/index.ts",
+  "compatibility_date": "2026-09-01",
+  "assets": {
+    "directory": "public",
+    "binding": "ASSETS",
+    "not_found_handling": "single-page-application",
+    "run_worker_first": ["/api/*"]
+  },
+  "d1_databases": [
+    {
+      "binding": "DB",
+      "database_name": "hr-system-db",
+      "database_id": "ba67e6d1-61b6-44f7-8922-49401a2cb295",
+      "migrations_dir": "migrations"
+    }
+  ],
+  // Non-secret configuration. Secrets (MFA_ENCRYPTION_KEY) are set with `wrangler secret put`
+  // and, for local development, in .dev.vars (git-ignored).
+  "vars": {
+    "APP_NAME": "HR System",
+    "APP_BASE_PATH": ""
+  },
+  "observability": { "enabled": true }
+}

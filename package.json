@@ -1,0 +1,38 @@
+{
+  "name": "hr-system",
+  "version": "1.0.0",
+  "private": true,
+  "description": "HR System (HRM / HRD / HROD / Payroll) on Cloudflare Workers + D1",
+  "type": "module",
+  "scripts": {
+    "build:web": "node scripts/build-web.mjs",
+    "build": "npm run build:web && wrangler deploy --dry-run --outdir dist",
+    "typecheck": "tsc -p tsconfig.worker.json && tsc -p tsconfig.web.json && tsc -p tsconfig.test.json",
+    "lint": "eslint .",
+    "test": "vitest run",
+    "test:unit": "vitest run tests/unit",
+    "test:integration": "vitest run tests/integration",
+    "check": "npm run typecheck && npm run lint && npm run build && npm test",
+    "dev": "npm run build:web && wrangler dev",
+    "db:migrate:local": "wrangler d1 migrations apply hr-system-db --local",
+    "db:migrate:remote": "wrangler d1 migrations apply hr-system-db --remote",
+    "user:create": "node scripts/create-user.mjs",
+    "deploy": "npm run build:web && wrangler deploy"
+  },
+  "license": "UNLICENSED",
+  "dependencies": {
+    "hono": "^4.13.16",
+    "qrcode-generator": "^2.0.4"
+  },
+  "devDependencies": {
+    "@cloudflare/workers-types": "^5.20261102.1",
+    "@eslint/js": "^10.0.1",
+    "@types/node": "^26.6.6",
+    "esbuild": "^0.28.2",
+    "eslint": "^10.14.0",
+    "typescript": "^5.9.3",
+    "typescript-eslint": "^8.72.1",
+    "vitest": "^5.0.5",
+    "wrangler": "^4.156.1"
+  }
+}
