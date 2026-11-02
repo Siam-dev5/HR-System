@@ -78,7 +78,8 @@ code { font-family: ui-monospace, Consolas, monospace; font-size: 0.85em; backgr
 .user-menu { display: flex; align-items: center; gap: 0.5rem; }
 .user-name { display: flex; flex-direction: column; text-align: right; font-size: 0.9rem; }
 .user-name small { color: var(--muted); }
-main { padding: 1.25rem 1.25rem calc(1.5rem + var(--footer-h)); outline: none; }
+main { padding: 1.25rem 1.25rem calc(1.5rem + var(--footer-h)); outline: none; min-width: 0; overflow-x: auto; }
+/* main is the horizontal scroll container: a wide table never widens the page (mobile) */
 .menu-toggle { display: none; }
 .nav-scrim { display: none; }
 
@@ -293,6 +294,10 @@ input:disabled, select:disabled, textarea:disabled { background: var(--surface-2
   .nav-open .nav-scrim { display: block; position: fixed; inset: 0; z-index: 35; background: rgb(15 23 42 / 45%); }
   .menu-toggle { display: inline-block; }
   .user-name { display: none; }
+  .topbar { gap: 0.5rem; padding: 0.6rem 0.75rem; }
+  .topbar h1 { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 1.02rem; }
+  .topbar-actions { flex: none; gap: 0.35rem; }
+  .user-menu a.btn { display: none; } /* security page stays reachable from the menu */
   .grid-form { grid-template-columns: 1fr; }
   .span2 { grid-column: auto; }
   main { padding: 0.9rem 0.9rem calc(1.25rem + var(--footer-h)); }
