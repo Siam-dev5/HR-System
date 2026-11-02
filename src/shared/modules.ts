@@ -1,6 +1,7 @@
 // Single source of truth for modules: database table, fields, menu placement and permissions.
 // The API (generic CRUD, lookups, menu) and the SPA (forms, tables, router) are both driven from here,
 // and an integration test checks every table/column below exists in the D1 schema.
+import { hasPermission } from './permissions';
 
 export type MenuGroup = 'overview' | 'hrm' | 'hrd' | 'hrod' | 'payroll' | 'system';
 
@@ -78,6 +79,8 @@ export interface PageModule {
   api: string;
   /** hidden pages are reachable (e.g. from links) but not listed in the sidebar */
   hidden?: boolean;
+  /** only users holding the super_admin role may open it, whatever permissions other roles carry */
+  superAdminOnly?: boolean;
 }
 
 export type ModuleDef = CrudModule | PageModule;
@@ -317,8 +320,8 @@ export const MODULES: readonly ModuleDef[] = [
     fields: [text('requester_name', 'ผู้ยื่นคำขอ', RL), ref('employee_id', 'พนักงานที่เกี่ยวข้อง', 'employees'), sel('type', 'ประเภท', ['access', 'rectify', 'erase', 'object', 'portability'], RL), date('received_date', 'วันที่รับ', RL), date('due_date', 'ครบกำหนด', RL), sel('status', 'สถานะ', ['received', 'in_progress', 'completed', 'rejected'], RL), area('note', 'บันทึก')],
   }),
   page('audit', '/audit', 'Audit Log', 'system', 'audit.view', '/api/audit'),
-  page('users', '/admin/users', 'ผู้ใช้ระบบ', 'system', 'users.manage', '/api/admin/users'),
-  page('roles', '/admin/roles', 'บทบาท & สิทธิ์', 'system', 'roles.manage', '/api/admin/roles'),
+  { ...page('users', '/admin/users', 'ผู้ใช้ระบบ', 'system', 'users.manage', '/api/admin/users'), superAdminOnly: true },
+  { ...page('roles', '/admin/roles', 'บทบาท & สิทธิ์', 'system', 'roles.manage', '/api/admin/roles'), superAdminOnly: true },
   page('settings', '/admin/settings', 'ตั้งค่าระบบ', 'system', 'settings.manage', '/api/admin/settings'),
   page('security', '/security', 'ความปลอดภัย & MFA', 'system', 'security.self', '/api/security/status'),
   page('help', '/help', 'คู่มือการใช้งาน', 'system', 'help.view', '/api/help'),
@@ -336,7 +339,24 @@ export function viewPermission(m: ModuleDef): string {
   return m.kind === 'crud' ? `${m.key}.view` : m.perm;
 }
 
-/** Every permission the system knows about (for the role editor). */
+/**
+ * User / role / permission management belongs to the super_admin role only. These permissions are
+ * never grantable through the role editor, and the API checks the role itself, not just the permission.
+ */
+export const SUPER_ADMIN_ROLE = 'super_admin';
+export const RESERVED_PERMISSIONS: readonly string[] = ['users.manage', 'roles.manage'];
+
+export function isSuperAdmin(roles: readonly string[]): boolean {
+  return roles.includes(SUPER_ADMIN_ROLE);
+}
+
+/** Whether a user may open a module — the single rule used by the menu, links and API guards. */
+export function canOpenModule(m: ModuleDef, permissions: readonly string[], roles: readonly string[]): boolean {
+  if (m.kind === 'page' && m.superAdminOnly) return isSuperAdmin(roles);
+  return hasPermission(permissions, viewPermission(m));
+}
+
+/** Every grantable permission (for the role editor); reserved Super Admin permissions are excluded. */
 export function permissionCatalogue(): string[] {
   const perms = new Set<string>();
   for (const m of CRUD_MODULES) {
@@ -346,5 +366,6 @@ export function permissionCatalogue(): string[] {
   }
   for (const p of PAGE_MODULES) perms.add(p.perm);
   for (const extra of ['payroll.calculate', 'payroll.approve', 'payroll.publish', 'payroll.export', 'workflow.approve', 'workflow.approve_any', 'reports.export']) perms.add(extra);
+  for (const r of RESERVED_PERMISSIONS) perms.delete(r);
   return [...perms].sort();
 }

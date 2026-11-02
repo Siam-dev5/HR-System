@@ -1,6 +1,7 @@
 import { readFileSync } from 'node:fs';
 import { describe, expect, it } from 'vitest';
-import { CRUD_MODULES, MODULES, PAGE_MODULES, crudModule, permissionCatalogue } from '../../src/shared/modules';
+import { readdirSync } from 'node:fs';
+import { CRUD_MODULES, MODULES, PAGE_MODULES, RESERVED_PERMISSIONS, canOpenModule, crudModule, permissionCatalogue } from '../../src/shared/modules';
 import { permissionMatches } from '../../src/shared/permissions';
 import { PAGES } from '../../src/web/pages/registry';
 import { verifyPassword } from '../../src/shared/crypto';
@@ -34,13 +35,39 @@ describe('module registry', () => {
   });
 });
 
+/** Permission patterns seeded by every migration (the json_each('[...]') lists). */
+function seededPatterns(): string[] {
+  const sql = readdirSync('migrations').filter((f) => f.endsWith('.sql')).map((f) => readFileSync(`migrations/${f}`, 'utf8')).join('\n');
+  return [...sql.matchAll(/json_each\('(\[[^']+\])'\)/g)].flatMap((m) => JSON.parse(m[1] as string) as string[]);
+}
+
 describe('role seed permissions', () => {
-  const sql = readFileSync('migrations/0002_reference_data.sql', 'utf8');
-  const patterns = [...sql.matchAll(/json_each\('(\[[^']+\])'\)/g)].flatMap((m) => JSON.parse(m[1] as string) as string[]).filter((p) => p.includes('.'));
+  const patterns = seededPatterns().filter((p) => p.includes('.'));
   const catalogue = permissionCatalogue();
   it('every seeded permission pattern grants at least one real permission (no typos)', () => {
     expect(patterns.length).toBeGreaterThan(20);
     for (const p of patterns) expect(catalogue.some((c) => permissionMatches(p, c)), p).toBe(true);
+  });
+});
+
+describe('Super Admin only user / role management', () => {
+  const users = MODULES.find((m) => m.key === 'users');
+  const roles = MODULES.find((m) => m.key === 'roles');
+  it('users and roles pages are reserved for the super_admin role', () => {
+    expect(users && roles).toBeTruthy();
+    for (const m of [users!, roles!]) {
+      expect(canOpenModule(m, ['*'], ['super_admin'])).toBe(true);
+      // even an explicit or wildcard permission does not open them without the role
+      expect(canOpenModule(m, ['users.manage', 'roles.manage', '*'], ['hr_admin'])).toBe(false);
+      expect(canOpenModule(m, ['*.manage'], ['hr_manager'])).toBe(false);
+    }
+  });
+  it('reserved permissions are not offered in the role editor catalogue', () => {
+    const cat = permissionCatalogue();
+    for (const r of RESERVED_PERMISSIONS) expect(cat).not.toContain(r);
+  });
+  it('no seeded non-super role carries a pattern that grants user/role management', () => {
+    for (const p of seededPatterns()) for (const r of RESERVED_PERMISSIONS) expect(permissionMatches(p, r), `${p} grants ${r}`).toBe(false);
   });
 });
 

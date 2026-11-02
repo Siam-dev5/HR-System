@@ -4,7 +4,7 @@ import type { LoginResponse, Me } from '../../shared/types';
 import { decryptString, encryptString, hashPassword, verifyPassword } from '../../shared/crypto';
 import { generateTotpSecret, otpauthUrl, verifyTotp } from '../../shared/totp';
 import { HttpError, badRequest, conflict, readJson, str, unauthorized } from '../lib/http';
-import { audit } from '../lib/audit';
+import { audit, notify } from '../lib/audit';
 import { authPolicy, loadSettings, settingNumber, validatePassword } from '../lib/settings';
 import { sqlDateTime } from '../lib/time';
 import { createSession, currentUser, destroySession, loadAuthUser, requireAuth } from '../auth';
@@ -32,6 +32,7 @@ interface LoginRow {
   locked_until: string | null;
   mfa_enabled: number;
   mfa_secret_enc: string | null;
+  approval_status: string;
 }
 
 // Used to keep timing similar when the username does not exist.
@@ -51,7 +52,7 @@ authRoutes.post('/login', async (c) => {
   const settings = await loadSettings(c.env.DB);
   const policy = authPolicy(settings);
   const row = await c.env.DB.prepare(
-    'SELECT id, username, password_hash, active, failed_attempts, locked_until, mfa_enabled, mfa_secret_enc FROM users WHERE username = ?',
+    'SELECT id, username, password_hash, active, failed_attempts, locked_until, mfa_enabled, mfa_secret_enc, approval_status FROM users WHERE username = ?',
   )
     .bind(username)
     .first<LoginRow>();
@@ -83,6 +84,12 @@ authRoutes.post('/login', async (c) => {
     throw invalid();
   }
 
+  // Only revealed after the correct password, so it does not leak which usernames are pending.
+  if (row.approval_status !== 'approved') {
+    await audit(c, 'auth.login_pending', 'user', row.id, undefined, actor);
+    throw new HttpError(403, 'account_pending', 'บัญชีของคุณรอการอนุมัติจากผู้ดูแลระบบ จึงยังเข้าสู่ระบบไม่ได้');
+  }
+
   if (row.mfa_enabled) {
     if (!totp) return c.json<LoginResponse>({ status: 'mfa_required' });
     const key = c.env.MFA_ENCRYPTION_KEY;
@@ -101,6 +108,55 @@ authRoutes.post('/login', async (c) => {
   await audit(c, 'auth.login', 'user', row.id, { mfa: probe.mfaEnabled, mfaEnrollmentRequired: mfaPending }, actor);
   const me = toMe({ ...probe, mfaPending });
   return c.json<LoginResponse>(mfaPending ? { status: 'mfa_enroll_required', me } : { status: 'ok', me });
+});
+
+/**
+ * Self-registration. The account is created WITHOUT roles and in "pending" state; it cannot sign in until a
+ * Super Admin approves it and chooses its roles. Role / permission / status fields in the request are ignored.
+ */
+authRoutes.post('/register', async (c) => {
+  const settings = await loadSettings(c.env.DB);
+  const policy = authPolicy(settings);
+  if (!policy.selfRegistration) throw new HttpError(403, 'registration_closed', 'ระบบปิดการลงทะเบียนด้วยตนเอง กรุณาติดต่อผู้ดูแลระบบ');
+  const body = await readJson(c);
+  const username = str(body, 'username', { required: true, max: 50 }) as string;
+  if (!/^[a-zA-Z0-9._-]{3,50}$/.test(username)) throw badRequest('ชื่อผู้ใช้ใช้ได้เฉพาะ a-z A-Z 0-9 . _ - ความยาว 3-50 ตัว', { field: 'username' });
+  const displayName = str(body, 'displayName', { required: true, max: 100 }) as string;
+  const email = str(body, 'email', { max: 200 });
+  if (email && !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) throw badRequest('รูปแบบอีเมลไม่ถูกต้อง', { field: 'email' });
+  const employeeCode = str(body, 'employeeCode', { max: 20 });
+  if (employeeCode && !/^[A-Za-z0-9._-]+$/.test(employeeCode)) throw badRequest('รหัสพนักงานไม่ถูกต้อง', { field: 'employeeCode' });
+  const password = typeof body.password === 'string' ? body.password : '';
+  const confirm = typeof body.confirmPassword === 'string' ? body.confirmPassword : '';
+  const problem = validatePassword(password, policy.passwordMinLength);
+  if (problem) throw badRequest(problem, { field: 'password' });
+  if (password !== confirm) throw badRequest('ยืนยันรหัสผ่านไม่ตรงกัน', { field: 'confirmPassword' });
+  if (password.toLowerCase().includes(username.toLowerCase())) throw badRequest('รหัสผ่านต้องไม่มีชื่อผู้ใช้อยู่ในนั้น', { field: 'password' });
+
+  const ip = c.req.header('cf-connecting-ip') ?? null;
+  const limit = settingNumber(settings, 'security.registration_limit_per_hour', 5);
+  const recent = await c.env.DB.prepare("SELECT COUNT(*) n FROM audit_logs WHERE action = 'auth.registered' AND ip IS ? AND at > datetime('now', '-1 hour')").bind(ip).first<{ n: number }>();
+  if ((recent?.n ?? 0) >= limit) throw new HttpError(429, 'rate_limited', 'มีการลงทะเบียนจากเครือข่ายนี้มากเกินไป กรุณาลองใหม่ภายหลัง');
+
+  let id: number;
+  try {
+    const row = await c.env.DB.prepare(
+      "INSERT INTO users (username, display_name, email, password_hash, must_change_password, approval_status, requested_employee_code) VALUES (?, ?, ?, ?, 0, 'pending', ?) RETURNING id",
+    )
+      .bind(username, displayName, email, await hashPassword(password), employeeCode)
+      .first<{ id: number }>();
+    if (!row) throw new Error('insert failed');
+    id = row.id;
+  } catch (e) {
+    if (e instanceof Error && /UNIQUE/i.test(e.message)) throw conflict('ชื่อผู้ใช้นี้ถูกใช้แล้ว กรุณาเลือกชื่ออื่น');
+    throw e;
+  }
+  const { results: admins } = await c.env.DB.prepare(
+    "SELECT DISTINCT u.id FROM users u JOIN user_roles ur ON ur.user_id = u.id JOIN roles r ON r.id = ur.role_id WHERE r.code = 'super_admin' AND u.active = 1",
+  ).all<{ id: number }>();
+  for (const a of admins) await notify(c.env.DB, a.id, 'มีคำขอลงทะเบียนใหม่รออนุมัติ', `${displayName} (${username})`, '/admin/users');
+  await audit(c, 'auth.registered', 'user', id, { username, employeeCode }, { id, username });
+  return c.json({ status: 'pending' }, 201);
 });
 
 authRoutes.post('/logout', async (c) => {

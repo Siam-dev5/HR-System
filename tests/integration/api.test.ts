@@ -9,7 +9,7 @@ const clients: Record<string, Client> = {};
 
 beforeAll(async () => {
   H = await startHarness();
-  for (const k of ['admin', 'payroll', 'manager', 'employee', 'anon', 'locktest']) clients[k] = new Client(H.baseUrl);
+  for (const k of ['admin', 'payroll', 'manager', 'employee', 'anon', 'locktest', 'staff']) clients[k] = new Client(H.baseUrl);
 });
 afterAll(async () => {
   await H?.stop();
@@ -41,7 +41,7 @@ describe('authentication', () => {
     expect((await clients.anon!.get('/api/auth/session')).body).toEqual({ me: null });
     const p = await clients.anon!.get('/api/auth/policy');
     expect(p.status).toBe(200);
-    expect(p.body).toEqual({ mfaEnforcedForPrivileged: true, lockoutThreshold: 5, lockoutMinutes: 15, passwordMinLength: 12 });
+    expect(p.body).toEqual({ mfaEnforcedForPrivileged: true, lockoutThreshold: 5, lockoutMinutes: 15, passwordMinLength: 12, selfRegistration: true });
   });
 
   it('enforces the CSRF header on state-changing requests', async () => {
@@ -112,10 +112,11 @@ describe('authentication', () => {
     expect(p.body.status).toBe('mfa_enroll_required');
     const m = await clients.manager!.login('it_manager', H.passwords.it_manager);
     expect(m.body.status).toBe('ok');
+    expect((await clients.staff!.login('it_staff', H.passwords.it_staff)).body.status).toBe('ok'); // hr_staff is not privileged
     const e = await clients.employee!.login('it_employee', H.passwords.it_employee);
     expect(e.body.status).toBe('ok');
     expect(e.body.me.employeeId).toBe(7);
-    for (const k of ['payroll', 'manager', 'employee']) expect((await clients[k]!.get('/api/meta')).status).toBe(200);
+    for (const k of ['payroll', 'manager', 'employee', 'staff']) expect((await clients[k]!.get('/api/meta')).status).toBe(200);
   });
 });
 
@@ -133,7 +134,7 @@ describe('navigation, routes and permissions are consistent', () => {
   });
 
   it('every menu entry shown to each role is reachable by that role, and hidden ones are refused', async () => {
-    for (const k of ['payroll', 'manager', 'employee']) {
+    for (const k of ['payroll', 'manager', 'employee', 'staff']) {
       const c = clients[k]!;
       const meta = (await c.get<MetaResponse>('/api/meta')).body;
       for (const mod of MODULES) {
@@ -466,5 +467,151 @@ describe('administration', () => {
     }
     const details = H.sql("SELECT details FROM audit_logs WHERE details IS NOT NULL").map((x) => String(x.details)).join('\n');
     for (const secret of Object.values(H.passwords)) expect(details).not.toContain(secret);
+  });
+});
+
+describe('user / role / permission management is Super Admin only', () => {
+  const denied = ['manager', 'staff', 'employee', 'payroll'];
+  const endpoints: Array<[string, string, unknown?]> = [
+    ['GET', '/api/admin/users'],
+    ['POST', '/api/admin/users', { username: 'escalate_me', displayName: 'x', roles: ['super_admin'] }],
+    ['PUT', '/api/admin/users/1', { roles: ['super_admin'] }],
+    ['POST', '/api/admin/users/1/reset-password'],
+    ['POST', '/api/admin/users/1/reset-mfa'],
+    ['POST', '/api/admin/users/1/approve', { roles: ['super_admin'] }],
+    ['POST', '/api/admin/users/1/reject'],
+    ['GET', '/api/admin/roles'],
+    ['POST', '/api/admin/roles', { code: 'evil_role', name: 'x', permissions: ['employees.view'] }],
+    ['PUT', '/api/admin/roles/3', { permissions: ['*.view'] }],
+  ];
+
+  it('Manager, HR Staff, Employee and Payroll Officer get 403 on every management API', async () => {
+    for (const k of denied) {
+      for (const [method, path, body] of endpoints) {
+        const r = await clients[k]!.req(method, path, body ?? (method === 'GET' ? undefined : {}));
+        expect(r.status, `${k} ${method} ${path}`).toBe(403);
+      }
+      const meta = (await clients[k]!.get<MetaResponse>('/api/meta')).body;
+      expect(meta.menu.some((m) => m.key === 'users' || m.key === 'roles'), k).toBe(false);
+      expect(meta.modules.find((m) => m.key === 'users')).toMatchObject({ allowed: false });
+    }
+    expect(H.sql("SELECT COUNT(*) AS n FROM users WHERE username = 'escalate_me'")[0]?.n).toBe(0);
+    expect(H.sql("SELECT COUNT(*) AS n FROM roles WHERE code = 'evil_role'")[0]?.n).toBe(0);
+  });
+
+  it('a mis-granted users.manage permission still does not open management (role check, not permission)', async () => {
+    H.sql("INSERT INTO role_permissions (role_id, permission) SELECT id, 'users.manage' FROM roles WHERE code = 'hr_manager'; INSERT INTO role_permissions (role_id, permission) SELECT id, 'roles.manage' FROM roles WHERE code = 'hr_manager';");
+    try {
+      expect((await clients.manager!.get('/api/admin/users')).status).toBe(403);
+      expect((await clients.manager!.get('/api/admin/roles')).status).toBe(403);
+      expect((await clients.manager!.get<MetaResponse>('/api/meta')).body.menu.some((m) => m.key === 'users')).toBe(false);
+    } finally {
+      H.sql("DELETE FROM role_permissions WHERE permission IN ('users.manage', 'roles.manage');");
+    }
+  });
+
+  it('the role editor refuses to grant user/role management to any role', async () => {
+    const roles = (await admin().get('/api/admin/roles')).body;
+    const mgr = roles.roles.find((r: { code: string }) => r.code === 'hr_manager');
+    for (const p of ['users.manage', 'roles.manage', 'users.*', '*.manage']) {
+      const r = await admin().put(`/api/admin/roles/${mgr.id}`, { permissions: [...mgr.permissions, p] });
+      expect(r.status, p).toBe(400);
+    }
+    expect(roles.catalogue).not.toContain('users.manage');
+    expect((await admin().post('/api/admin/roles', { code: 'sneaky', name: 'x', permissions: ['*.manage'] })).status).toBe(400);
+  });
+
+  it('Super Admin can manage users and roles', async () => {
+    expect((await admin().get('/api/admin/users')).status).toBe(200);
+    expect((await admin().get('/api/admin/roles')).body.roles.map((r: { code: string }) => r.code)).toEqual(expect.arrayContaining(['super_admin', 'hr_manager', 'hr_staff', 'employee']));
+    const meta = (await admin().get<MetaResponse>('/api/meta')).body;
+    expect(meta.menu.map((m) => m.key)).toEqual(expect.arrayContaining(['users', 'roles', 'settings']));
+  });
+});
+
+describe('HR Staff role', () => {
+  it('can run HR operations but not payroll, sensitive data, settings or deletion of employees', async () => {
+    const s = clients.staff!;
+    expect((await s.get('/api/m/employees')).status).toBe(200);
+    expect((await s.get('/api/m/employees?q=E007')).body.rows[0].base_salary).toBe('••••••');
+    expect((await s.get('/api/m/requisitions')).status).toBe(200);
+    expect((await s.get('/api/payroll/periods')).status).toBe(403);
+    expect((await s.get('/api/admin/settings')).status).toBe(403);
+    expect((await s.get('/api/audit')).status).toBe(403);
+    const emp = (await s.get('/api/m/employees?q=E006')).body.rows[0];
+    expect((await s.del(`/api/m/employees/${emp.id}`)).status).toBe(403);
+  });
+});
+
+describe('self-registration', () => {
+  const strong = 'Reg-Strong-Pass-2026';
+
+  it('validates input and never trusts role fields sent by the client', async () => {
+    const anon = new Client(H.baseUrl);
+    const base = { username: 'reg_user1', displayName: 'ผู้สมัคร หนึ่ง', email: 'reg1@example.com', employeeCode: 'E006', password: strong, confirmPassword: strong };
+    expect((await anon.post('/api/auth/register', { ...base, password: 'short', confirmPassword: 'short' })).body.error.details.field).toBe('password');
+    expect((await anon.post('/api/auth/register', { ...base, confirmPassword: 'Different-Pass-2026' })).body.error.details.field).toBe('confirmPassword');
+    expect((await anon.post('/api/auth/register', { ...base, username: 'bad name!' })).body.error.details.field).toBe('username');
+    expect((await anon.post('/api/auth/register', { ...base, email: 'not-an-email' })).body.error.details.field).toBe('email');
+    expect((await anon.post('/api/auth/register', { ...base, password: 'reg_user1-Pass-99', confirmPassword: 'reg_user1-Pass-99' })).body.error.details.field).toBe('password');
+    expect((await anon.req('POST', '/api/auth/register', base, { 'x-hr-requested': '0' })).status).toBe(403); // CSRF
+
+    const r = await anon.post('/api/auth/register', { ...base, roles: ['super_admin'], role: 'super_admin', approval_status: 'approved', active: 1, is_admin: true });
+    expect(r.status).toBe(201);
+    expect(r.body).toEqual({ status: 'pending' });
+    expect(r.headers.get('set-cookie')).toBeNull(); // no session is created
+    const row = H.sql("SELECT u.approval_status, u.must_change_password, u.requested_employee_code, (SELECT COUNT(*) FROM user_roles ur WHERE ur.user_id = u.id) AS roles FROM users u WHERE username = 'reg_user1'")[0];
+    expect(row).toEqual({ approval_status: 'pending', must_change_password: 0, requested_employee_code: 'E006', roles: 0 });
+    expect((await anon.post('/api/auth/register', base)).status).toBe(409);
+  });
+
+  it('pending accounts cannot sign in; Super Admins are notified', async () => {
+    const c = new Client(H.baseUrl);
+    const r = await c.post('/api/auth/login', { username: 'reg_user1', password: strong });
+    expect(r.status).toBe(403);
+    expect(r.body.error.code).toBe('account_pending');
+    expect(c.cookie).toBe('');
+    const wrong = await c.post('/api/auth/login', { username: 'reg_user1', password: 'Wrong-Pass-2026' });
+    expect(wrong.status).toBe(401); // pending state is only revealed after a correct password
+    const n = (await admin().get('/api/notifications')).body.items;
+    expect(n.some((x: { title: string; href: string }) => x.title === 'มีคำขอลงทะเบียนใหม่รออนุมัติ' && x.href === '/admin/users')).toBe(true);
+    const mn = (await clients.manager!.get('/api/notifications')).body.items;
+    expect(mn.some((x: { title: string }) => x.title === 'มีคำขอลงทะเบียนใหม่รออนุมัติ')).toBe(false);
+  });
+
+  it('only a Super Admin can approve, and the approved account gets exactly the chosen role', async () => {
+    const list = (await admin().get('/api/admin/users')).body;
+    const u = list.find((x: { username: string }) => x.username === 'reg_user1');
+    expect(u.approval_status).toBe('pending');
+    expect((await clients.manager!.post(`/api/admin/users/${u.id}/approve`, { roles: ['employee'] })).status).toBe(403);
+    expect((await admin().post(`/api/admin/users/${u.id}/approve`, { roles: [] })).status).toBe(400);
+    const emp6 = H.sql("SELECT id FROM employees WHERE emp_code = 'E006'")[0]?.id;
+    expect((await admin().post(`/api/admin/users/${u.id}/approve`, { roles: ['employee'], employeeId: emp6 })).status).toBe(200);
+    const c = new Client(H.baseUrl);
+    expect((await c.login('reg_user1', strong)).body.status).toBe('ok');
+    const me = (await c.get('/api/auth/me')).body;
+    expect(me.roles).toEqual(['employee']);
+    expect(me.employeeId).toBe(emp6);
+    expect((await c.get('/api/admin/users')).status).toBe(403);
+    expect((await admin().post(`/api/admin/users/${u.id}/approve`, { roles: ['employee'] })).status).toBe(404); // no longer pending
+  });
+
+  it('rejected registrations cannot sign in', async () => {
+    const anon = new Client(H.baseUrl);
+    expect((await anon.post('/api/auth/register', { username: 'reg_user2', displayName: 'ผู้สมัคร สอง', password: strong, confirmPassword: strong })).status).toBe(201);
+    const u = (await admin().get('/api/admin/users')).body.find((x: { username: string }) => x.username === 'reg_user2');
+    expect((await admin().post(`/api/admin/users/${u.id}/reject`)).status).toBe(200);
+    expect((await anon.post('/api/auth/login', { username: 'reg_user2', password: strong })).status).toBe(401);
+  });
+
+  it('is rate limited and can be switched off by settings', async () => {
+    const anon = new Client(H.baseUrl);
+    await admin().put('/api/admin/settings', { 'security.registration_limit_per_hour': 1 });
+    expect((await anon.post('/api/auth/register', { username: 'reg_user3', displayName: 'x', password: strong, confirmPassword: strong })).status).toBe(429);
+    await admin().put('/api/admin/settings', { 'security.registration_limit_per_hour': 5, 'security.self_registration': false });
+    expect((await anon.get('/api/auth/policy')).body.selfRegistration).toBe(false);
+    expect((await anon.post('/api/auth/register', { username: 'reg_user3', displayName: 'x', password: strong, confirmPassword: strong })).status).toBe(403);
+    await admin().put('/api/admin/settings', { 'security.self_registration': true });
+    expect((await anon.get('/api/auth/policy')).body.selfRegistration).toBe(true);
   });
 });

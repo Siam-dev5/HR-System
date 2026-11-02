@@ -3,7 +3,7 @@ import { MENU_GROUPS } from '../shared/modules';
 import { get, post, setAuthLostHandler } from './api';
 import { h, mount, toast, fmtDate, errorBox } from './dom';
 import { state, currentPath, link, moduleByPath, navigate, setRouteRenderer, setTitle } from './app';
-import { renderLogin, renderForcedMfa, renderForcedPassword } from './pages/auth';
+import { renderLogin, renderRegister, renderForcedMfa, renderForcedPassword } from './pages/auth';
 import { renderCrud } from './pages/crud';
 import { PAGES, renderPayslipView } from './pages/registry';
 
@@ -20,13 +20,25 @@ async function boot(): Promise<void> {
   const policy = await get<AuthPolicy>('/api/auth/policy');
   const { me } = await get<{ me: Me | null }>('/api/auth/session');
   if (!me) {
-    renderLogin(root, policy, () => void boot());
+    renderSignedOut(policy);
     return;
   }
+  window.onpopstate = null;
   if (me.mfaPending) return renderForcedMfa(root, me, () => void boot());
   if (me.mustChangePassword) return renderForcedPassword(root, policy, () => void boot());
   state.meta = await get<MetaResponse>('/api/meta');
   renderShell();
+}
+
+/** Signed-out screens: /register shows registration, every other path shows the login page. */
+function renderSignedOut(policy: AuthPolicy): void {
+  const go = (path: string) => {
+    history.pushState(null, '', path);
+    renderSignedOut(policy);
+  };
+  window.onpopstate = () => renderSignedOut(policy);
+  if (currentPath() === '/register') renderRegister(root, policy, go);
+  else renderLogin(root, policy, () => void boot(), go);
 }
 
 function renderShell(): void {
@@ -50,7 +62,7 @@ function renderShell(): void {
   mount(root, h('div', { class: 'shell' }, nav, h('div', { class: 'content' }, h('header', { class: 'topbar' }, menuToggle, h('h1', { id: 'page-title' }, ''), h('div', { class: 'topbar-actions' }, bell, userMenu)), main)));
   setRouteRenderer(() => renderRoute(main));
   window.onpopstate = () => renderRoute(main);
-  if (currentPath() === '/' || currentPath() === '/login') navigate(meta.menu[0]?.path ?? '/help', true);
+  if (['/', '/login', '/register'].includes(currentPath())) navigate(meta.menu[0]?.path ?? '/help', true);
   else renderRoute(main);
   void refreshBell();
 }

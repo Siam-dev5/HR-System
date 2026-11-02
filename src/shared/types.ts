@@ -23,6 +23,8 @@ export interface AuthPolicy {
   lockoutThreshold: number;
   lockoutMinutes: number;
   passwordMinLength: number;
+  /** self-registration open (new accounts are pending, without roles, until a Super Admin approves) */
+  selfRegistration: boolean;
 }
 
 export type LoginResponse =

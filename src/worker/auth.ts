@@ -3,6 +3,8 @@ import { getCookie, setCookie, deleteCookie } from 'hono/cookie';
 import type { AppEnv, AuthUser } from './env';
 import { base64url, randomBytes, sha256Hex } from '../shared/crypto';
 import { hasPermission } from '../shared/permissions';
+import type { ModuleDef } from '../shared/modules';
+import { canOpenModule, isSuperAdmin } from '../shared/modules';
 import { HttpError, forbidden, unauthorized } from './lib/http';
 import { sqlDateTime } from './lib/time';
 
@@ -113,6 +115,21 @@ export function requirePerm(...permissions: string[]): MiddlewareHandler<AppEnv>
     if (!permissions.some((p) => can(user, p))) throw forbidden(`ต้องมีสิทธิ์ ${permissions.join(' หรือ ')}`);
     await next();
   };
+}
+
+/**
+ * User / role / permission management: the super_admin role itself is required. Permission patterns are
+ * deliberately not enough, so a mis-configured role (e.g. "users.manage" granted by SQL) still gets 403.
+ */
+export const requireSuperAdmin: MiddlewareHandler<AppEnv> = async (c, next) => {
+  const user = c.get('user');
+  if (!user) throw unauthorized();
+  if (!isSuperAdmin(user.roles)) throw forbidden('เฉพาะ Super Admin เท่านั้นที่จัดการผู้ใช้ บทบาท และสิทธิ์ได้');
+  await next();
+};
+
+export function canOpen(user: AuthUser, m: ModuleDef): boolean {
+  return canOpenModule(m, user.permissions, user.roles);
 }
 
 export function currentUser(c: Context<AppEnv>): AuthUser {

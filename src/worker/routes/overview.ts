@@ -7,7 +7,7 @@ import { DATE_RE, badRequest, conflict, forbidden, intParam } from '../lib/http'
 import { audit } from '../lib/audit';
 import { loadSettings, settingText } from '../lib/settings';
 import { bangkokNow } from '../lib/time';
-import { can, currentUser, requireAuth, requirePerm } from '../auth';
+import { can, canOpen, currentUser, requireAuth, requirePerm } from '../auth';
 import { toMe } from './auth';
 import { modulePerms, treeOrder } from './crud';
 
@@ -17,7 +17,7 @@ export function linkIfAllowed(user: AuthUser, path: string): string | null {
   // longest module path that equals the link or is its parent ("/my/payslips/12" → "/my/payslips")
   const target = MODULES.filter((m) => base === m.path || base.startsWith(`${m.path}/`)).sort((a, b) => b.path.length - a.path.length)[0];
   if (!target) return null;
-  return can(user, viewPermission(target)) ? path : null;
+  return canOpen(user, target) ? path : null;
 }
 
 export const overviewRoutes = new Hono<AppEnv>();
@@ -25,7 +25,7 @@ overviewRoutes.use('*', requireAuth);
 
 overviewRoutes.get('/meta', (c) => {
   const user = currentUser(c);
-  const menu: MenuItem[] = MODULES.filter((m) => !(m.kind === 'page' && m.hidden) && can(user, viewPermission(m))).map((m) => ({ key: m.key, path: m.path, title: m.title, group: m.group }));
+  const menu: MenuItem[] = MODULES.filter((m) => !(m.kind === 'page' && m.hidden) && canOpen(user, m)).map((m) => ({ key: m.key, path: m.path, title: m.title, group: m.group }));
   const modules: Array<CrudMeta | PageMeta> = MODULES.map((m) =>
     m.kind === 'crud'
       ? {
@@ -33,7 +33,7 @@ overviewRoutes.get('/meta', (c) => {
           fields: [...m.fields], computed: (m.computed ?? []).map((x) => ({ name: x.name, label: x.label })),
           ownerField: m.ownerField ?? null, workflow: m.workflow ?? null, perms: modulePerms(user, m),
         }
-      : { kind: 'page', key: m.key, path: m.path, title: m.title, group: m.group, allowed: can(user, m.perm), perm: m.perm },
+      : { kind: 'page', key: m.key, path: m.path, title: m.title, group: m.group, allowed: canOpen(user, m), perm: m.superAdminOnly ? 'super_admin' : m.perm },
   );
   return c.json<MetaResponse>({ me: toMe(user), appName: c.env.APP_NAME || 'HR System', basePath: c.env.APP_BASE_PATH || '', menu, modules });
 });
@@ -315,6 +315,6 @@ overviewRoutes.get('/audit', requirePerm('audit.view'), async (c) => {
 overviewRoutes.get('/help', requirePerm('help.view'), (c) => {
   const user = currentUser(c);
   return c.json({
-    modules: MODULES.map((m) => ({ title: m.title, path: m.path, permission: viewPermission(m), allowed: can(user, viewPermission(m)) })),
+    modules: MODULES.map((m) => ({ title: m.title, path: m.path, permission: m.kind === 'page' && m.superAdminOnly ? 'บทบาท super_admin เท่านั้น' : viewPermission(m), allowed: canOpen(user, m) })),
   });
 });

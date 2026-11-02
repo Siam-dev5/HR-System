@@ -35,6 +35,7 @@ export const USERS = [
   { username: 'it_manager', roles: ['hr_manager', 'employee'], employee: 'E002' },
   { username: 'it_employee', roles: ['employee'], employee: 'E007' },
   { username: 'it_locktest', roles: ['employee'], employee: null },
+  { username: 'it_staff', roles: ['hr_staff'], employee: 'E005' },
 ] as const;
 
 export async function startHarness(): Promise<Harness> {

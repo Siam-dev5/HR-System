@@ -2,7 +2,7 @@ import type { DashboardResponse, LookupOption, NineBoxResponse, WorkflowRequestR
 import { get, post, qs } from '../api';
 import { h, mount, loading, errorBox, fmtDate, fmtMoney, fmtNum, toast, promptDialog } from '../dom';
 import { optionLabel } from '../labels';
-import { can, link, state } from '../app';
+import { can, isSuperAdmin, link, state } from '../app';
 import { optionText } from './crud';
 
 function bars(rows: Array<{ label: string; value: number }>): HTMLElement {
@@ -62,7 +62,7 @@ export async function renderEss(main: HTMLElement): Promise<void> {
     if (!d.linked) {
       mount(main, h('div', { class: 'card' }, h('h2', null, `สวัสดี ${state.meta?.me.displayName ?? ''}`),
         h('p', null, 'บัญชีนี้ยังไม่ได้ผูกกับข้อมูลพนักงาน จึงยังไม่มีข้อมูลส่วนตัว วันลา หรือสลิปเงินเดือนให้แสดง'),
-        h('p', { class: 'muted' }, can('users.manage') ? 'ผูกบัญชีกับพนักงานได้ที่เมนู ผู้ใช้ระบบ' : 'กรุณาติดต่อผู้ดูแลระบบเพื่อผูกบัญชีกับข้อมูลพนักงาน')));
+        h('p', { class: 'muted' }, isSuperAdmin() ? 'ผูกบัญชีกับพนักงานได้ที่เมนู ผู้ใช้ระบบ' : 'กรุณาติดต่อผู้ดูแลระบบเพื่อผูกบัญชีกับข้อมูลพนักงาน')));
       return;
     }
     const e = d.employee ?? {};

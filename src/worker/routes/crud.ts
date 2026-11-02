@@ -2,7 +2,7 @@ import { Hono } from 'hono';
 import type { Context } from 'hono';
 import type { AppEnv, AuthUser } from '../env';
 import type { CrudModule, FieldDef } from '../../shared/modules';
-import { crudModule } from '../../shared/modules';
+import { crudModule, isSuperAdmin } from '../../shared/modules';
 import type { ListResponse, LookupOption, ModulePerms, Row } from '../../shared/types';
 import { resolveLink } from '../../shared/links';
 import { DATE_RE, HttpError, badRequest, conflict, csv, forbidden, intParam, notFound, readJson } from '../lib/http';
@@ -329,7 +329,7 @@ lookupRoutes.get('/:key', async (c) => {
   const user = currentUser(c);
   const key = c.req.param('key');
   if (key === 'roles') {
-    if (!can(user, 'roles.manage') && !can(user, 'users.manage') && !can(user, 'workflow_definitions.view')) throw forbidden();
+    if (!isSuperAdmin(user.roles) && !can(user, 'workflow_definitions.view')) throw forbidden();
     const { results } = await c.env.DB.prepare('SELECT id, code, name FROM roles ORDER BY id').all<{ id: number; code: string; name: string }>();
     return c.json<LookupOption[]>(results.map((r) => ({ value: r.id, label: `${r.name} (${r.code})`, code: r.code, parentId: null, depth: 0 })));
   }

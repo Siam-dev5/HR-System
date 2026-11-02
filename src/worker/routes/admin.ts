@@ -2,12 +2,13 @@ import { Hono } from 'hono';
 import type { Context } from 'hono';
 import type { AppEnv } from '../env';
 import type { SettingItem } from '../../shared/types';
-import { permissionCatalogue } from '../../shared/modules';
+import { RESERVED_PERMISSIONS, permissionCatalogue } from '../../shared/modules';
+import { permissionMatches } from '../../shared/permissions';
 import { ROLE } from '../../shared/permissions';
 import { generatePassword, hashPassword } from '../../shared/crypto';
 import { badRequest, conflict, forbidden, intParam, notFound, readJson, str } from '../lib/http';
 import { audit } from '../lib/audit';
-import { currentUser, requireAuth, requirePerm } from '../auth';
+import { currentUser, requireAuth, requirePerm, requireSuperAdmin } from '../auth';
 
 const PERMISSION_PATTERN = /^(\*|\*\.[a-z_]+|[a-z_]+\.(\*|[a-z_]+))$/;
 
@@ -44,19 +45,20 @@ export const adminRoutes = new Hono<AppEnv>();
 adminRoutes.use('*', requireAuth);
 
 // ---- Users ----------------------------------------------------------------------------------
-adminRoutes.get('/users', requirePerm('users.manage'), async (c) => {
+adminRoutes.get('/users', requireSuperAdmin, async (c) => {
   const { results } = await c.env.DB.prepare(
     `SELECT u.id, u.username, u.display_name, u.email, u.active, u.mfa_enabled, u.must_change_password, u.last_login_at,
        CASE WHEN u.locked_until > datetime('now') THEN u.locked_until END AS locked_until,
        (SELECT group_concat(r.code) FROM user_roles ur JOIN roles r ON r.id = ur.role_id WHERE ur.user_id = u.id) AS roles,
        (SELECT e.id FROM employees e WHERE e.user_id = u.id) AS employee_id,
-       (SELECT e.emp_code || ' ' || e.first_name || ' ' || e.last_name FROM employees e WHERE e.user_id = u.id) AS employee
-     FROM users u ORDER BY u.username`,
+       (SELECT e.emp_code || ' ' || e.first_name || ' ' || e.last_name FROM employees e WHERE e.user_id = u.id) AS employee,
+       u.approval_status, u.requested_employee_code, u.created_at
+     FROM users u ORDER BY (u.approval_status = 'pending') DESC, u.username`,
   ).all<Record<string, string | number | null>>();
   return c.json(results.map((r) => ({ ...r, roles: r.roles ? String(r.roles).split(',') : [] })));
 });
 
-adminRoutes.post('/users', requirePerm('users.manage'), async (c) => {
+adminRoutes.post('/users', requireSuperAdmin, async (c) => {
   const body = await readJson(c);
   const username = str(body, 'username', { required: true, max: 50 }) as string;
   if (!/^[a-zA-Z0-9._-]{3,50}$/.test(username)) throw badRequest('ชื่อผู้ใช้ใช้ได้เฉพาะ a-z 0-9 . _ - (3-50 ตัว)');
@@ -92,7 +94,7 @@ adminRoutes.post('/users', requirePerm('users.manage'), async (c) => {
   return c.json({ id: userId, username, temporaryPassword }, 201);
 });
 
-adminRoutes.put('/users/:id', requirePerm('users.manage'), async (c) => {
+adminRoutes.put('/users/:id', requireSuperAdmin, async (c) => {
   const me = currentUser(c);
   const id = intParam(c.req.param('id'));
   const db = c.env.DB;
@@ -160,12 +162,51 @@ async function adminAction(c: Context<AppEnv>, action: 'reset-password' | 'unloc
   return c.json({ ok: true });
 }
 
-adminRoutes.post('/users/:id/reset-password', requirePerm('users.manage'), (c) => adminAction(c, 'reset-password'));
-adminRoutes.post('/users/:id/unlock', requirePerm('users.manage'), (c) => adminAction(c, 'unlock'));
-adminRoutes.post('/users/:id/reset-mfa', requirePerm('users.manage'), (c) => adminAction(c, 'reset-mfa'));
+adminRoutes.post('/users/:id/reset-password', requireSuperAdmin, (c) => adminAction(c, 'reset-password'));
+adminRoutes.post('/users/:id/unlock', requireSuperAdmin, (c) => adminAction(c, 'unlock'));
+adminRoutes.post('/users/:id/reset-mfa', requireSuperAdmin, (c) => adminAction(c, 'reset-mfa'));
+
+// ---- Self-registration approvals ------------------------------------------------------------
+async function pendingUser(db: D1Database, id: number): Promise<{ id: number; username: string }> {
+  const u = await db.prepare("SELECT id, username FROM users WHERE id = ? AND approval_status = 'pending'").bind(id).first<{ id: number; username: string }>();
+  if (!u) throw notFound('ไม่พบคำขอลงทะเบียนที่รออนุมัติ');
+  return u;
+}
+
+adminRoutes.post('/users/:id/approve', requireSuperAdmin, async (c) => {
+  const db = c.env.DB;
+  const u = await pendingUser(db, intParam(c.req.param('id')));
+  const body = await readJson(c);
+  const ids = await roleIds(db, body.roles ?? []);
+  if (!ids.length) throw badRequest('กรุณาเลือกบทบาทอย่างน้อย 1 บทบาทก่อนอนุมัติ');
+  if (body.employeeId !== undefined && body.employeeId !== null && body.employeeId !== '') {
+    const emp = await db.prepare('SELECT user_id FROM employees WHERE id = ?').bind(Number(body.employeeId)).first<{ user_id: number | null }>();
+    if (!emp) throw badRequest('ไม่พบพนักงานที่จะผูก');
+    if (emp.user_id !== null) throw conflict('พนักงานนี้ผูกกับบัญชีอื่นแล้ว');
+  }
+  await db.batch([
+    db.prepare("UPDATE users SET approval_status = 'approved', active = 1, updated_at = datetime('now') WHERE id = ?").bind(u.id),
+    db.prepare('DELETE FROM user_roles WHERE user_id = ?').bind(u.id),
+    ...ids.map((rid) => db.prepare('INSERT INTO user_roles (user_id, role_id) VALUES (?, ?)').bind(u.id, rid)),
+    ...(await linkEmployee(db, u.id, body.employeeId)),
+  ]);
+  await audit(c, 'user.registration_approved', 'user', u.id, { username: u.username, roles: body.roles });
+  return c.json({ ok: true });
+});
+
+adminRoutes.post('/users/:id/reject', requireSuperAdmin, async (c) => {
+  const db = c.env.DB;
+  const u = await pendingUser(db, intParam(c.req.param('id')));
+  await db.batch([
+    db.prepare("UPDATE users SET approval_status = 'rejected', active = 0, updated_at = datetime('now') WHERE id = ?").bind(u.id),
+    db.prepare('DELETE FROM sessions WHERE user_id = ?').bind(u.id),
+  ]);
+  await audit(c, 'user.registration_rejected', 'user', u.id, { username: u.username });
+  return c.json({ ok: true });
+});
 
 // ---- Roles & permissions --------------------------------------------------------------------
-adminRoutes.get('/roles', requirePerm('roles.manage'), async (c) => {
+adminRoutes.get('/roles', requireSuperAdmin, async (c) => {
   const { results } = await c.env.DB.prepare(
     `SELECT r.id, r.code, r.name, r.description, r.privileged, r.system,
        (SELECT group_concat(permission, ' ') FROM role_permissions p WHERE p.role_id = r.id) AS permissions,
@@ -177,10 +218,13 @@ adminRoutes.get('/roles', requirePerm('roles.manage'), async (c) => {
 
 function parsePermissions(raw: unknown): string[] {
   if (!Array.isArray(raw) || raw.some((p) => typeof p !== 'string' || !PERMISSION_PATTERN.test(p))) throw badRequest('รูปแบบสิทธิ์ไม่ถูกต้อง (ตัวอย่าง: employees.view, payroll.*, *.view)');
+  // user/role management stays with the super_admin role; no pattern may grant it to another role
+  const reserved = (raw as string[]).filter((p) => RESERVED_PERMISSIONS.some((r) => permissionMatches(p, r)));
+  if (reserved.length) throw badRequest(`สิทธิ์ ${reserved.join(', ')} สงวนไว้สำหรับ Super Admin เท่านั้น`);
   return [...new Set(raw as string[])];
 }
 
-adminRoutes.post('/roles', requirePerm('roles.manage'), async (c) => {
+adminRoutes.post('/roles', requireSuperAdmin, async (c) => {
   const body = await readJson(c);
   const code = str(body, 'code', { required: true, max: 50 }) as string;
   if (!/^[a-z][a-z0-9_]{2,49}$/.test(code)) throw badRequest('รหัสบทบาทใช้ได้เฉพาะ a-z 0-9 _');
@@ -201,7 +245,7 @@ adminRoutes.post('/roles', requirePerm('roles.manage'), async (c) => {
   }
 });
 
-adminRoutes.put('/roles/:id', requirePerm('roles.manage'), async (c) => {
+adminRoutes.put('/roles/:id', requireSuperAdmin, async (c) => {
   const id = intParam(c.req.param('id'));
   const db = c.env.DB;
   const role = await db.prepare('SELECT id, code FROM roles WHERE id = ?').bind(id).first<{ id: number; code: string }>();

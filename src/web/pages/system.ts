@@ -87,6 +87,9 @@ interface UserRow {
   roles: string[];
   employee_id: number | null;
   employee: string | null;
+  approval_status: 'approved' | 'pending' | 'rejected';
+  requested_employee_code: string | null;
+  created_at: string;
 }
 
 function showTempPassword(username: string, password: string): void {
@@ -135,6 +138,35 @@ async function userForm(u: UserRow | null, roles: LookupOption[], onDone: () => 
   ]);
 }
 
+async function approveForm(u: UserRow, roles: LookupOption[], onDone: () => void): Promise<void> {
+  const emps = await lookup('employees').catch(() => [] as LookupOption[]);
+  const suggested = emps.find((e) => !!u.requested_employee_code && e.code === u.requested_employee_code);
+  const emp = h('select', null, h('option', { value: '' }, '— ไม่ผูก —'), emps.map((e) => h('option', { value: String(e.value), selected: e.value === suggested?.value }, e.label)));
+  // default to the least-privileged role; the Super Admin chooses deliberately
+  const roleChecks = roles.map((r) => h('label', { class: 'check' }, h('input', { type: 'checkbox', value: r.code ?? '', checked: r.code === 'employee' }), r.label));
+  const msg = h('div', { class: 'form-msg', role: 'alert' });
+  const dlg = modal(`อนุมัติคำขอของ ${u.username}`, h('div', { class: 'grid-form' },
+    h('p', { class: 'span2' }, `${u.display_name}${u.email ? ` · ${u.email}` : ''}${u.requested_employee_code ? ` · แจ้งรหัสพนักงาน ${u.requested_employee_code}` : ''}`),
+    h('div', { class: 'field span2' }, h('span', null, 'บทบาทที่จะให้'), h('div', { class: 'checks' }, roleChecks)),
+    h('label', { class: 'field span2' }, h('span', null, 'ผูกกับพนักงาน'), emp), msg), [
+    h('button', { class: 'btn', onclick: () => dlg.close() }, 'ยกเลิก'),
+    h('button', { class: 'btn primary', onclick: async () => {
+      try {
+        await post(`/api/admin/users/${u.id}/approve`, {
+          roles: roleChecks.map((l) => l.querySelector('input') as HTMLInputElement).filter((i) => i.checked).map((i) => i.value),
+          employeeId: emp.value ? Number(emp.value) : null,
+        });
+        clearLookups();
+        dlg.close();
+        toast('อนุมัติแล้ว');
+        onDone();
+      } catch (e) {
+        msg.textContent = e instanceof Error ? e.message : String(e);
+      }
+    } }, 'อนุมัติ'),
+  ]);
+}
+
 export async function renderUsers(main: HTMLElement): Promise<void> {
   mount(main, loading());
   try {
@@ -151,12 +183,20 @@ export async function renderUsers(main: HTMLElement): Promise<void> {
         toast(e instanceof Error ? e.message : String(e), 'error');
       }
     };
+    const pending = users.filter((u) => u.approval_status === 'pending');
+    const accounts = users.filter((u) => u.approval_status !== 'pending');
     mount(main,
-      h('div', { class: 'toolbar' }, h('div', { class: 'spacer' }), h('button', { class: 'btn primary', onclick: () => void userForm(null, roles, reload) }, '+ เพิ่มผู้ใช้')),
+      h('div', { class: 'toolbar' }, h('p', { class: 'muted' }, 'เฉพาะ Super Admin เท่านั้นที่จัดการผู้ใช้ บทบาท และสิทธิ์ได้'), h('div', { class: 'spacer' }), h('button', { class: 'btn primary', onclick: () => void userForm(null, roles, reload) }, '+ เพิ่มผู้ใช้')),
+      pending.length ? h('section', { class: 'card pending-card' }, h('h2', null, `คำขอลงทะเบียนรออนุมัติ (${pending.length})`),
+        h('table', { class: 'table' }, h('thead', null, h('tr', null, ['ผู้ใช้', 'ชื่อ', 'อีเมล', 'รหัสพนักงานที่แจ้ง', 'วันที่ขอ', ''].map((t) => h('th', null, t)))),
+          h('tbody', null, pending.map((u) => h('tr', null, h('td', null, u.username), h('td', null, u.display_name), h('td', null, u.email ?? '-'), h('td', null, u.requested_employee_code ?? '-'), h('td', null, fmtDate(u.created_at)),
+            h('td', { class: 'actions' },
+              h('button', { class: 'btn small primary', onclick: () => void approveForm(u, roles, reload) }, 'อนุมัติ'),
+              h('button', { class: 'btn small danger', onclick: () => void action(u, 'reject', 'ปฏิเสธคำขอ') }, 'ปฏิเสธ'))))))) : null,
       h('table', { class: 'table' }, h('thead', null, h('tr', null, ['ผู้ใช้', 'ชื่อ', 'บทบาท', 'พนักงาน', 'MFA', 'สถานะ', 'เข้าระบบล่าสุด', ''].map((t) => h('th', null, t)))),
-        h('tbody', null, users.map((u) => h('tr', null, h('td', null, u.username), h('td', null, u.display_name), h('td', null, u.roles.join(', ') || '-'), h('td', null, u.employee ?? '-'),
+        h('tbody', null, accounts.map((u) => h('tr', null, h('td', null, u.username), h('td', null, u.display_name), h('td', null, u.roles.join(', ') || '-'), h('td', null, u.employee ?? '-'),
           h('td', null, u.mfa_enabled ? 'เปิด' : 'ปิด'),
-          h('td', null, !u.active ? 'ปิดใช้งาน' : u.locked_until ? `ล็อกถึง ${fmtDate(u.locked_until)}` : u.must_change_password ? 'รอเปลี่ยนรหัสผ่าน' : 'ใช้งาน'),
+          h('td', null, u.approval_status === 'rejected' ? 'ปฏิเสธคำขอ' : !u.active ? 'ปิดใช้งาน' : u.locked_until ? `ล็อกถึง ${fmtDate(u.locked_until)}` : u.must_change_password ? 'รอเปลี่ยนรหัสผ่าน' : 'ใช้งาน'),
           h('td', null, u.last_login_at ? fmtDate(u.last_login_at) : '-'),
           h('td', { class: 'actions' },
             h('button', { class: 'btn small', onclick: () => void userForm(u, roles, reload) }, 'แก้ไข'),

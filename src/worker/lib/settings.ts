@@ -29,6 +29,7 @@ export function authPolicy(s: Settings): AuthPolicy {
     lockoutThreshold: settingNumber(s, 'security.lockout_threshold', 5),
     lockoutMinutes: settingNumber(s, 'security.lockout_minutes', 15),
     passwordMinLength: settingNumber(s, 'security.password_min_length', 12),
+    selfRegistration: settingBool(s, 'security.self_registration', false),
   };
 }
 

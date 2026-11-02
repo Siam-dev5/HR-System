@@ -1,5 +1,6 @@
 import type { CrudMeta, MetaResponse, PageMeta } from '../shared/types';
 import { hasPermission } from '../shared/permissions';
+import { isSuperAdmin as isSuperAdminRole } from '../shared/modules';
 import { resolveLink } from '../shared/links';
 import { h, type Child } from './dom';
 
@@ -47,6 +48,11 @@ export function link(path: string, children: Child, attrs: Record<string, unknow
       navigate(path);
     },
   }, children);
+}
+
+/** User / role / permission management is restricted to the super_admin role (mirrors the API guard). */
+export function isSuperAdmin(): boolean {
+  return !!state.meta && isSuperAdminRole(state.meta.me.roles);
 }
 
 export function can(permission: string): boolean {
