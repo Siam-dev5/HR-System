@@ -2,7 +2,7 @@
 // The export writes INSERTs of a table (e.g. payslips) before the CREATE TABLE of its foreign-key parent
 // (employees), which fails with "no such table: main.employees". Output order:
 //   PRAGMA → every CREATE TABLE → every INSERT (sqlite_sequence last) → every CREATE INDEX.
-// Statement count and content are unchanged; only the order differs.
+// Statements are split outside quoted strings; count and content are unchanged, only the order differs.
 //
 // Usage: node scripts/prepare-d1-restore.mjs <export.sql> <restore.sql>
 // Then restore ONLY into a local or new database, e.g.:
@@ -15,11 +15,30 @@ if (!src || !out) {
   console.error('usage: node scripts/prepare-d1-restore.mjs <export.sql> <restore.sql>');
   process.exit(2);
 }
-const lines = readFileSync(src, 'utf8').split(/\r?\n/).filter((l) => l.trim() !== '');
-if (!lines.every((l) => l.trimEnd().endsWith(';'))) {
-  console.error('unexpected dump format: every statement must be on one line ending with ";"');
-  process.exit(1);
+// split on ";" outside quoted strings / identifiers (values may contain new lines and semicolons)
+function statements(sql) {
+  const out = [];
+  let start = 0;
+  let quote = null;
+  for (let i = 0; i < sql.length; i++) {
+    const ch = sql[i];
+    if (quote) {
+      if (ch === quote) {
+        if (sql[i + 1] === quote) i++; // doubled quote = escaped
+        else quote = null;
+      }
+    } else if (ch === "'" || ch === '"') quote = ch;
+    else if (ch === ';') {
+      const s = sql.slice(start, i + 1).trim();
+      if (s !== ';') out.push(s);
+      start = i + 1;
+    }
+  }
+  if (quote) throw new Error('unterminated quoted string in dump');
+  if (sql.slice(start).trim()) throw new Error('trailing text after the last statement');
+  return out;
 }
+const lines = statements(readFileSync(src, 'utf8'));
 const groups = { pragma: [], table: [], insert: [], sequence: [], index: [] };
 for (const l of lines) {
   if (/^PRAGMA /i.test(l)) groups.pragma.push(l);
