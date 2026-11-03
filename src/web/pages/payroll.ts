@@ -10,9 +10,15 @@ export async function renderPayroll(main: HTMLElement): Promise<void> {
   try {
     const periods = await get<PayrollPeriod[]>('/api/payroll/periods');
     const act = async (p: PayrollPeriod, action: 'calculate' | 'approve' | 'publish' | 'reopen', label: string) => {
-      if (!(await confirmDialog(label, `${label} งวด ${p.name}?`, label))) return;
+      const legacy = (action === 'calculate' || action === 'reopen') && p.legacy_slips > 0;
+      const ok = action === 'reopen'
+        ? await confirmDialog('เปิดแก้ไขงวด (กลับเป็นร่าง)', `สลิปที่คำนวณแล้ว ${p.employees} รายการ (ยอดสุทธิรวม ${fmtMoney(p.total_net)} บาท) จะถูกนำออกจากงวดนี้ และเก็บสำเนาไว้ในประวัติการคำนวณ${legacy ? ` — ในจำนวนนี้ ${p.legacy_slips} รายการคำนวณด้วยเวอร์ชันก่อนหน้า (Legacy) หากคำนวณใหม่ ยอดอาจเปลี่ยนตามกติกาปัจจุบัน` : ''} ยืนยันเปิดแก้ไข?`, 'ยืนยันเปิดแก้ไข', true)
+        : legacy
+        ? await confirmDialog('คำนวณงวด Legacy ใหม่', `งวด ${p.name} มีสลิป ${p.legacy_slips} รายการที่คำนวณด้วยเวอร์ชันก่อนหน้า (ยอดสุทธิรวมเดิม ${fmtMoney(p.total_net)} บาท) การคำนวณใหม่จะใช้กติกาปัจจุบัน (คิดตามวันมีสิทธิ์ แยกช่วงทดลองงาน ใช้ OT/ลาจาก Feishu ที่ยืนยันแล้ว) และยอดอาจเปลี่ยน สลิปเดิมจะถูกแทนที่ — แนะนำให้ Export ยอดเดิมเก็บไว้ก่อน ยืนยันคำนวณใหม่?`, 'ยืนยันคำนวณใหม่', true)
+        : await confirmDialog(label, `${label} งวด ${p.name}?`, label);
+      if (!ok) return;
       try {
-        await post(`/api/payroll/periods/${p.id}/${action}`);
+        await post(`/api/payroll/periods/${p.id}/${action}`, legacy ? { confirm_legacy_recalculation: true } : undefined);
         toast(`${label}เรียบร้อย`);
         void renderPayroll(main);
       } catch (e) {
@@ -28,7 +34,7 @@ export async function renderPayroll(main: HTMLElement): Promise<void> {
             h('thead', null, h('tr', null, ['รหัส', 'ชื่องวด', 'รอบ', 'บริษัท', 'ช่วงวันที่', 'วันจ่าย', 'สถานะ', 'จำนวนคน', 'ยอดสุทธิรวม', 'EWF นายจ้างสมทบ', ''].map((t) => h('th', null, t)))),
             h('tbody', null, periods.map((p) => h('tr', null,
               h('td', null, p.code), h('td', null, p.name), h('td', null, optionLabel(p.kind)), h('td', null, p.company ?? 'ทุกบริษัท'), h('td', null, `${fmtDate(p.start_date)} – ${fmtDate(p.end_date)}`), h('td', null, fmtDate(p.pay_date)),
-              h('td', null, h('span', { class: `badge-status s-${p.status}` }, optionLabel(p.status))), h('td', null, String(p.employees)), h('td', null, fmtMoney(p.total_net)), h('td', null, fmtMoney(p.total_ewf_employer)),
+              h('td', null, h('span', { class: `badge-status s-${p.status}` }, optionLabel(p.status)), p.legacy_slips ? h('span', { class: 'badge-status s-pending', title: 'คำนวณด้วยเวอร์ชันก่อน Migration 0005' }, ' Legacy') : null), h('td', null, String(p.employees)), h('td', null, fmtMoney(p.total_net)), h('td', null, fmtMoney(p.total_ewf_employer)),
               h('td', { class: 'actions' },
                 (p.status === 'draft' || p.status === 'calculated') && can('payroll.calculate') ? h('button', { class: 'btn small', onclick: () => void act(p, 'calculate', 'คำนวณ') }, p.status === 'draft' ? 'คำนวณ' : 'คำนวณใหม่') : null,
                 p.status === 'calculated' && can('payroll.calculate') ? h('button', { class: 'btn small', onclick: () => void act(p, 'reopen', 'เปิดแก้ไข (กลับเป็นร่าง)') }, 'เปิดแก้ไข') : null,

@@ -187,6 +187,8 @@ export interface PayrollPeriod {
   total_net: number;
   /** EWF employer contributions of the period (company cost, not deducted from employees) */
   total_ewf_employer: number;
+  /** payslips calculated before migration 0005 (calc_version 0): recalculation needs explicit confirmation */
+  legacy_slips: number;
 }
 
 export interface PayslipSummary {

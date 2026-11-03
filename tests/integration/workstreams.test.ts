@@ -505,6 +505,49 @@ describe('company-scoped payroll periods', () => {
   });
 });
 
+describe('legacy payroll protection', () => {
+  it('payslips from the pre-0005 engine are never recalculated without explicit confirmation', async () => {
+    const p = (await payroll().post('/api/payroll/periods', { code: '2027-03-LG', name: 'legacy', company_id: ids.zzb, start_date: '2027-02-26', end_date: '2027-03-25', pay_date: '2027-03-25' })).body.id;
+    await payroll().post(`/api/payroll/periods/${p}/calculate`);
+    H.sql(`UPDATE payslips SET calc_version = 0, calc_json = NULL, net = 1234.56 WHERE period_id = ${p}; UPDATE payroll_periods SET calc_version = 0 WHERE id = ${p}`);
+    const before = H.sql(`SELECT id, net, calc_version FROM payslips WHERE period_id = ${p} ORDER BY id`);
+    const list = (await payroll().get('/api/payroll/periods')).body.find((x: { id: number }) => x.id === p);
+    expect(list.legacy_slips).toBe(3);
+    const r = await payroll().post(`/api/payroll/periods/${p}/calculate`);
+    expect(r.status).toBe(409);
+    expect(r.body.error.code).toBe('legacy_recalculation');
+    expect(H.sql(`SELECT id, net, calc_version FROM payslips WHERE period_id = ${p} ORDER BY id`)).toEqual(before); // untouched
+    const pv = (await payroll().get(`/api/payroll/periods/${p}/preview?company=${ids.zzb}`)).body;
+    expect(pv.issues.map((i: { code: string }) => i.code)).toContain('legacy');
+    const ok = await payroll().post(`/api/payroll/periods/${p}/calculate`, { confirm_legacy_recalculation: true });
+    expect(ok.status).toBe(200);
+    expect(ok.body.legacy_slips).toBe(0);
+    const log = H.sql("SELECT details FROM audit_logs WHERE action = 'payroll.calculated' ORDER BY id DESC LIMIT 1")[0];
+    expect(JSON.parse(String(log?.details))).toMatchObject({ replacedLegacySlips: 3 });
+    // the replaced legacy rows are kept, byte for byte, in the archive
+    const arch = H.sql(`SELECT payslip_id, calc_version, net, row_json, reason FROM payslip_archive WHERE period_id = ${p} ORDER BY payslip_id`);
+    expect(arch.map((r) => [r.payslip_id, r.calc_version, r.net, r.reason])).toEqual(before.map((b) => [b.id, 0, 1234.56, 'recalculate']));
+    expect(JSON.parse(String(arch[0]?.row_json))).toMatchObject({ id: before[0]?.id, calc_version: 0, net: 1234.56 });
+  });
+
+  it('reopen of a legacy period needs confirmation and archives the payslips before removing them', async () => {
+    const p = (await payroll().post('/api/payroll/periods', { code: '2027-04-LG', name: 'legacy2', company_id: ids.zzb, start_date: '2027-03-26', end_date: '2027-04-25', pay_date: '2027-04-25' })).body.id;
+    await payroll().post(`/api/payroll/periods/${p}/calculate`);
+    H.sql(`UPDATE payslips SET calc_version = 0, calc_json = NULL WHERE period_id = ${p}`);
+    const before = H.sql(`SELECT id, net FROM payslips WHERE period_id = ${p} ORDER BY id`);
+    const r = await payroll().post(`/api/payroll/periods/${p}/reopen`);
+    expect(r.status).toBe(409);
+    expect(H.sql(`SELECT id, net FROM payslips WHERE period_id = ${p} ORDER BY id`)).toEqual(before);
+    expect((await payroll().post(`/api/payroll/periods/${p}/reopen`, { confirm_legacy_recalculation: true })).body.status).toBe('draft');
+    const arch = H.sql(`SELECT payslip_id, net, reason FROM payslip_archive WHERE period_id = ${p} ORDER BY payslip_id`);
+    expect(arch).toEqual(before.map((b) => ({ payslip_id: b.id, net: b.net, reason: 'reopen' })));
+    // non-legacy reopen still works without the flag and is archived too
+    await payroll().post(`/api/payroll/periods/${p}/calculate`);
+    expect((await payroll().post(`/api/payroll/periods/${p}/reopen`)).status).toBe(200);
+    expect(H.sql(`SELECT COUNT(*) AS n FROM payslip_archive WHERE period_id = ${p} AND reason = 'reopen'`)[0]?.n).toBe(before.length * 2);
+  });
+});
+
 describe('database integrity after the workflow', () => {
   it('payroll history is consistent: one slip per employee per period, published slips unchanged', () => {
     expect(H.sql('SELECT COUNT(*) AS n FROM (SELECT period_id, employee_id FROM payslips GROUP BY 1, 2 HAVING COUNT(*) > 1)')[0]?.n).toBe(0);

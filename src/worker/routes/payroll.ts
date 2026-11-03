@@ -6,7 +6,7 @@ import { round2 } from '../../shared/payroll';
 import { DEFAULT_LAYOUT, PREVIEW_COLUMNS, PROBATION_LABEL, normalizeLayout, type LayoutColumn } from '../../shared/payroll-columns';
 import { isSuperAdmin } from '../../shared/modules';
 import { writeXlsx, type Cell } from '../../shared/xlsx';
-import { DATE_RE, safeName, badRequest, conflict, csv, forbidden, intParam, notFound, readJson, str } from '../lib/http';
+import { DATE_RE, HttpError, safeName, badRequest, conflict, csv, forbidden, intParam, notFound, readJson, str } from '../lib/http';
 import { audit, notify } from '../lib/audit';
 import { ewfConfig, loadSettings, settingBool } from '../lib/settings';
 import { companyScope, requireCompany } from '../lib/companies';
@@ -17,7 +17,8 @@ const PERIOD_SELECT = `SELECT p.id, p.code, p.name, p.start_date, p.end_date, p.
   p.calc_version, p.calculated_by, p.approved_by, p.calculated_at,
   (SELECT COUNT(*) FROM payslips s WHERE s.period_id = p.id) AS employees,
   (SELECT COALESCE(SUM(net), 0) FROM payslips s WHERE s.period_id = p.id) AS total_net,
-  (SELECT COALESCE(SUM(ewf_employer), 0) FROM payslips s WHERE s.period_id = p.id) AS total_ewf_employer
+  (SELECT COALESCE(SUM(ewf_employer), 0) FROM payslips s WHERE s.period_id = p.id) AS total_ewf_employer,
+  (SELECT COUNT(*) FROM payslips s WHERE s.period_id = p.id AND s.calc_version = 0) AS legacy_slips
   FROM payroll_periods p`;
 
 const SLIP_SELECT = `SELECT s.id, p.code AS period_code, p.name AS period_name, p.pay_date, s.employee_id,
@@ -25,6 +26,24 @@ const SLIP_SELECT = `SELECT s.id, p.code AS period_code, p.name AS period_name, 
   FROM payslips s JOIN payroll_periods p ON p.id = s.period_id JOIN employees e ON e.id = s.employee_id`;
 
 type PeriodRow = PayrollPeriod & { calculated_by: number | null; approved_by: number | null; calculated_at: string | null };
+
+const SLIP_COLUMNS = ['id', 'period_id', 'employee_id', 'base_salary', 'ot_amount', 'earnings', 'unpaid_leave', 'gross', 'sso', 'tax', 'deductions', 'net', 'lines_json', 'published',
+  'created_at', 'ewf_employee', 'ewf_employer', 'ewf_employee_rate', 'ewf_employer_rate', 'ewf_status', 'company_id', 'advance', 'calc_json', 'calc_version'];
+
+/** Copies the period's payslips (full rows) into payslip_archive before they are replaced or removed. */
+function archiveSlips(db: D1Database, periodId: number, reason: 'recalculate' | 'reopen', userId: number): D1PreparedStatement {
+  return db.prepare(
+    `INSERT INTO payslip_archive (period_id, payslip_id, employee_id, calc_version, net, row_json, reason, archived_by)
+     SELECT period_id, id, employee_id, calc_version, net, json_object(${SLIP_COLUMNS.map((k) => `'${k}', ${k}`).join(', ')}), ?, ? FROM payslips WHERE period_id = ?`,
+  ).bind(reason, userId, periodId);
+}
+
+/** Legacy payslips (calculated before migration 0005) are only replaced or removed on explicit confirmation. */
+async function legacyConfirmed(c: Context<AppEnv>): Promise<boolean> {
+  if (!c.req.header('content-type')?.includes('application/json')) return false;
+  const body = (await c.req.json().catch(() => ({}))) as { confirm_legacy_recalculation?: unknown };
+  return body.confirm_legacy_recalculation === true;
+}
 
 async function period(db: D1Database, id: number): Promise<PeriodRow> {
   const p = await db.prepare(`${PERIOD_SELECT} WHERE p.id = ?`).bind(id).first<PeriodRow>();
@@ -89,11 +108,16 @@ payrollRoutes.post('/periods/:id/calculate', requirePerm('payroll.calculate'), a
   const db = c.env.DB;
   const p = await period(db, intParam(c.req.param('id')));
   if (p.status !== 'draft' && p.status !== 'calculated') throw conflict('คำนวณใหม่ได้เฉพาะงวดที่ยังไม่อนุมัติ');
+  // payslips produced by the engine before migration 0005 (calc_version 0) are never replaced silently:
+  // the new rules (proration, probation split, Feishu OT) can change the amounts, so HR must confirm explicitly
+  if (p.legacy_slips > 0 && !(await legacyConfirmed(c))) {
+    throw new HttpError(409, 'legacy_recalculation', `งวด ${p.code} มีสลิป ${p.legacy_slips} รายการที่คำนวณด้วยเวอร์ชันก่อนหน้า (Legacy) การคำนวณใหม่ใช้กติกาปัจจุบันและยอดอาจเปลี่ยน ต้องยืนยันการคำนวณใหม่อย่างชัดเจน`);
+  }
   await assertCalculable(db, p);
   const slips = await computePeriod(db, p);
   const version = p.calc_version + 1;
 
-  const stmts = [db.prepare('DELETE FROM payslips WHERE period_id = ?').bind(p.id)];
+  const stmts = [archiveSlips(db, p.id, 'recalculate', user.id), db.prepare('DELETE FROM payslips WHERE period_id = ?').bind(p.id)];
   let totalNet = 0;
   for (const s of slips) {
     const r = s.pay;
@@ -111,7 +135,7 @@ payrollRoutes.post('/periods/:id/calculate', requirePerm('payroll.calculate'), a
   // attendance used by the calculation is locked: re-import / rollback / OT changes need the period reopened first
   stmts.push(db.prepare("UPDATE attendance_imports SET locked = 1, locked_at = datetime('now') WHERE payroll_period_id = ? AND status = 'active' AND locked = 0").bind(p.id));
   await db.batch(stmts);
-  await audit(c, 'payroll.calculated', 'payroll_periods', p.id, { employees: slips.length, version, kind: p.kind });
+  await audit(c, 'payroll.calculated', 'payroll_periods', p.id, { employees: slips.length, version, kind: p.kind, archivedSlips: p.employees, ...(p.legacy_slips ? { replacedLegacySlips: p.legacy_slips, legacyTotalNet: p.total_net } : {}) });
   return c.json({ ...(await period(db, p.id)), totalNet: round2(totalNet) });
 });
 
@@ -121,13 +145,17 @@ payrollRoutes.post('/periods/:id/reopen', requirePerm('payroll.calculate'), asyn
   const db = c.env.DB;
   const p = await period(db, intParam(c.req.param('id')));
   if (p.status !== 'calculated') throw conflict('เปิดแก้ไขได้เฉพาะงวดที่คำนวณแล้วแต่ยังไม่อนุมัติ');
+  if (p.legacy_slips > 0 && !(await legacyConfirmed(c))) {
+    throw new HttpError(409, 'legacy_recalculation', `งวด ${p.code} มีสลิป ${p.legacy_slips} รายการที่คำนวณด้วยเวอร์ชันก่อนหน้า (Legacy) การเปิดแก้ไขจะนำสลิปเหล่านี้ออกจากงวด (เก็บสำเนาไว้ในประวัติ) ต้องยืนยันอย่างชัดเจน`);
+  }
   if (p.kind === 'mid_month') await assertCalculable(db, p);
   await db.batch([
+    archiveSlips(db, p.id, 'reopen', user.id),
     db.prepare('DELETE FROM payslips WHERE period_id = ?').bind(p.id),
     db.prepare("UPDATE payroll_periods SET status = 'draft', updated_at = datetime('now'), updated_by = ? WHERE id = ?").bind(user.id, p.id),
     db.prepare('UPDATE attendance_imports SET locked = 0, locked_at = NULL WHERE payroll_period_id = ?').bind(p.id),
   ]);
-  await audit(c, 'payroll.reopened', 'payroll_periods', p.id, { version: p.calc_version });
+  await audit(c, 'payroll.reopened', 'payroll_periods', p.id, { version: p.calc_version, archivedSlips: p.employees, archivedTotalNet: p.total_net, legacy: p.legacy_slips });
   return c.json(await period(db, p.id));
 });
 
@@ -326,6 +354,7 @@ async function buildPreview(c: Context<AppEnv>): Promise<PayrollPreviewResponse>
   }
   const negative = rows.filter((r) => typeof r.net_pay === 'number' && r.net_pay < 0).length;
   if (negative) issues.push({ level: 'error', code: 'net_negative', message: 'มีพนักงานที่เงินได้สุทธิติดลบ', count: negative });
+  if (source === 'snapshot' && p.legacy_slips > 0) issues.push({ level: 'warning', code: 'legacy', message: 'สลิปงวดนี้คำนวณด้วยเวอร์ชันก่อนหน้า (Legacy, ก่อน Migration 0005) จึงไม่มีข้อมูลเวลาทำงาน/สถานะทดลองงานใน Preview ยอดเงินคงเดิมจนกว่าจะยืนยันคำนวณใหม่', count: p.legacy_slips });
   if (missingBank) issues.push({ level: 'warning', code: 'no_bank_account', message: 'พนักงานไม่มีเลขบัญชีธนาคาร', count: missingBank });
   if (!active.length) issues.push({ level: 'warning', code: 'no_attendance', message: 'ยังไม่มีข้อมูลเวลาทำงานจาก Feishu สำหรับงวดนี้: ใช้คำขอ OT / การลาที่อนุมัติในระบบแทน', count: 1 });
   if (p.kind === 'monthly') {
