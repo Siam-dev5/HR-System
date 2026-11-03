@@ -38,11 +38,19 @@ export const TAX_BRACKETS: ReadonlyArray<readonly [number, number]> = [
 export interface PayInput {
   baseSalary: number;
   overtime: Array<{ hours: number; rate: number }>;
-  earnings: Array<{ code: string; name: string; amount: number; taxable: boolean }>;
-  deductions: Array<{ code: string; name: string; amount: number }>;
+  earnings: Array<{ code: string; name: string; amount: number; taxable: boolean; category?: string }>;
+  deductions: Array<{ code: string; name: string; amount: number; category?: string }>;
   unpaidLeaveDays: number;
   /** Employee Welfare Fund rates (%) resolved by resolveEwf(); null = not applicable */
   ewf?: { employeeRate: number; employerRate: number; wageCap: number } | null;
+  /** wage actually earned in the period (prorated / split by wageSegments); defaults to baseSalary */
+  earnedWage?: number;
+  /** salary lines replacing the single BASE line (e.g. probation / passed segments) */
+  wageLines?: Array<{ code: string; name: string; amount: number }>;
+  /** mid-month advance already paid in this month: deducted from net pay */
+  advance?: number;
+  /** mid-month round: an advance of earned wage only, statutory deductions happen at month-end */
+  advanceOnly?: boolean;
 }
 
 export interface PayLine {
@@ -50,6 +58,8 @@ export interface PayLine {
   name: string;
   kind: 'earning' | 'deduction';
   amount: number;
+  /** payroll preview column group of a pay component (allowance, commission, bonus, provident_fund, other) */
+  category?: string;
 }
 
 export interface PayResult {
@@ -66,6 +76,8 @@ export interface PayResult {
   ewfEmployee: number;
   /** EWF employer contribution: recorded separately, never deducted from net pay */
   ewfEmployer: number;
+  /** mid-month advance deducted (part of deductions) */
+  advance: number;
   lines: PayLine[];
 }
 
@@ -98,32 +110,157 @@ export function monthlyWithholding(monthlyTaxable: number, monthlySso: number, c
 
 export function calculatePay(input: PayInput, cfg: PayrollConfig = DEFAULT_PAYROLL_CONFIG): PayResult {
   const base = round2(input.baseSalary);
+  const wage = round2(input.earnedWage ?? base);
+  const statutory = !input.advanceOnly;
   const dailyRate = base / cfg.otDivisorDays;
   const hourly = dailyRate / cfg.hoursPerDay;
   const otAmount = round2(input.overtime.reduce((s, o) => s + o.hours * o.rate * hourly, 0));
-  const unpaidLeave = round2(Math.min(input.unpaidLeaveDays * dailyRate, base));
+  const unpaidLeave = round2(Math.min(input.unpaidLeaveDays * dailyRate, wage));
   const earnings = round2(input.earnings.reduce((s, e) => s + e.amount, 0));
   const taxableEarnings = input.earnings.filter((e) => e.taxable).reduce((s, e) => s + e.amount, 0);
-  const gross = round2(base - unpaidLeave + otAmount + earnings);
-  const sso = socialSecurity(base - unpaidLeave, cfg);
-  const taxable = base - unpaidLeave + otAmount + taxableEarnings;
-  const tax = monthlyWithholding(taxable, sso, cfg);
+  const gross = round2(wage - unpaidLeave + otAmount + earnings);
+  const sso = statutory ? socialSecurity(wage - unpaidLeave, cfg) : 0;
+  const taxable = wage - unpaidLeave + otAmount + taxableEarnings;
+  const tax = statutory ? monthlyWithholding(taxable, sso, cfg) : 0;
   const other = round2(input.deductions.reduce((s, d) => s + d.amount, 0));
-  const ewfWage = input.ewf ? (input.ewf.wageCap > 0 ? Math.min(base - unpaidLeave, input.ewf.wageCap) : base - unpaidLeave) : 0;
-  const ewfEmployee = input.ewf ? round2(Math.max(ewfWage, 0) * input.ewf.employeeRate / 100) : 0;
-  const ewfEmployer = input.ewf ? round2(Math.max(ewfWage, 0) * input.ewf.employerRate / 100) : 0;
-  const deductions = round2(sso + tax + other + ewfEmployee);
+  const ewfWage = input.ewf && statutory ? (input.ewf.wageCap > 0 ? Math.min(wage - unpaidLeave, input.ewf.wageCap) : wage - unpaidLeave) : 0;
+  const ewfEmployee = input.ewf && statutory ? round2(Math.max(ewfWage, 0) * input.ewf.employeeRate / 100) : 0;
+  const ewfEmployer = input.ewf && statutory ? round2(Math.max(ewfWage, 0) * input.ewf.employerRate / 100) : 0;
+  const advance = round2(input.advance ?? 0);
+  const deductions = round2(sso + tax + other + ewfEmployee + advance);
 
-  const lines: PayLine[] = [{ code: 'BASE', name: 'เงินเดือน', kind: 'earning', amount: base }];
+  const lines: PayLine[] = input.wageLines?.length
+    ? input.wageLines.map((l) => ({ code: l.code, name: l.name, kind: 'earning' as const, amount: round2(l.amount) }))
+    : [{ code: 'BASE', name: 'เงินเดือน', kind: 'earning', amount: wage }];
   if (otAmount) lines.push({ code: 'OT', name: 'ค่าล่วงเวลา', kind: 'earning', amount: otAmount });
-  for (const e of input.earnings) lines.push({ code: e.code, name: e.name, kind: 'earning', amount: round2(e.amount) });
+  for (const e of input.earnings) lines.push({ code: e.code, name: e.name, kind: 'earning', amount: round2(e.amount), ...(e.category ? { category: e.category } : {}) });
   if (unpaidLeave) lines.push({ code: 'UNPAID', name: 'หักลาไม่รับค่าจ้าง', kind: 'deduction', amount: unpaidLeave });
-  lines.push({ code: 'SSO', name: 'ประกันสังคม', kind: 'deduction', amount: sso });
+  if (statutory) lines.push({ code: 'SSO', name: 'ประกันสังคม', kind: 'deduction', amount: sso });
   if (ewfEmployee) lines.push({ code: 'EWF', name: 'เงินสะสมกองทุนสงเคราะห์ลูกจ้าง', kind: 'deduction', amount: ewfEmployee });
-  lines.push({ code: 'TAX', name: 'ภาษีหัก ณ ที่จ่าย', kind: 'deduction', amount: tax });
-  for (const d of input.deductions) lines.push({ code: d.code, name: d.name, kind: 'deduction', amount: round2(d.amount) });
+  if (statutory) lines.push({ code: 'TAX', name: 'ภาษีหัก ณ ที่จ่าย', kind: 'deduction', amount: tax });
+  for (const d of input.deductions) lines.push({ code: d.code, name: d.name, kind: 'deduction', amount: round2(d.amount), ...(d.category ? { category: d.category } : {}) });
+  if (advance) lines.push({ code: 'ADV', name: 'หักเงินจ่ายล่วงหน้ากลางเดือน (Mid-month Advance)', kind: 'deduction', amount: advance });
 
-  return { baseSalary: base, otAmount, earnings, unpaidLeave, gross, sso, tax, deductions, net: round2(gross - deductions), ewfEmployee, ewfEmployer, lines };
+  return { baseSalary: base, otAmount, earnings, unpaidLeave, gross, sso, tax, deductions, net: round2(gross - deductions), ewfEmployee, ewfEmployer, advance, lines };
+}
+
+// ---- Dates (calendar days, timezone independent) ------------------------------------------------
+function utc(date: string): number {
+  const [y, m, d] = date.split('-').map(Number) as [number, number, number];
+  return Date.UTC(y, m - 1, d);
+}
+export function addDays(date: string, n: number): string {
+  return new Date(utc(date) + n * 86_400_000).toISOString().slice(0, 10);
+}
+/** Inclusive number of calendar days from a to b (0 when b < a). */
+export function daysInclusive(a: string, b: string): number {
+  return b < a ? 0 : Math.round((utc(b) - utc(a)) / 86_400_000) + 1;
+}
+
+// ---- Probation and earned wage ------------------------------------------------------------------
+// Probation lasts 90 calendar days: the hire date is day 1, day 90 is the last probation day, day 91 is "passed".
+export const PROBATION_DAYS = 90;
+export function probationEndDate(hireDate: string): string {
+  return addDays(hireDate, PROBATION_DAYS - 1);
+}
+
+export type ProbationStatus = 'probation' | 'passed' | 'passed_in_period';
+
+export interface WageSegment {
+  status: 'probation' | 'passed';
+  start: string;
+  end: string;
+  /** calendar days in the segment */
+  days: number;
+  /** days paid on the 30-day base (a full period is always 30 paid days) */
+  paidDays: number;
+  rate: number;
+  amount: number;
+}
+
+export interface WageInput {
+  periodStart: string;
+  periodEnd: string;
+  hireDate: string;
+  terminationDate: string | null;
+  /** rate used when no salary-history row applies */
+  baseSalary: number;
+  /** approved salary history, any order: the rate in force on a day is the latest row with from <= day */
+  history: ReadonlyArray<{ from: string; amount: number }>;
+  /** mid_month pays only the probation days of the round (an advance) */
+  mode: 'monthly' | 'mid_month';
+  divisorDays: number;
+}
+
+export interface WageResult {
+  segments: WageSegment[];
+  wage: number;
+  /** calendar days employed (and, for mid_month, still on probation) in the period */
+  eligibleDays: number;
+  periodDays: number;
+  fullPeriod: boolean;
+  probationEnd: string;
+  probationStatus: ProbationStatus;
+  /** monthly rate in force on the last eligible day (OT / unpaid-leave daily rate) */
+  rate: number;
+}
+
+/**
+ * Splits a period into wage segments at the probation boundary and at salary changes, and prices each segment on a
+ * 30-day base. A fully employed monthly period always pays exactly 30 days, so splitting never over- or under-pays:
+ * the last segment receives the remaining paid days. Partial periods (joiner / leaver) pay calendar days, capped at 30.
+ */
+export function wageSegments(w: WageInput): WageResult {
+  const history = [...w.history].sort((a, b) => (a.from < b.from ? -1 : a.from > b.from ? 1 : 0));
+  const rateOn = (day: string) => {
+    let r = w.baseSalary;
+    for (const x of history) if (x.from <= day) r = x.amount;
+    return round2(r);
+  };
+  const probationEnd = probationEndDate(w.hireDate);
+  const probationStatus: ProbationStatus = probationEnd >= w.periodEnd ? 'probation' : probationEnd < w.periodStart ? 'passed' : 'passed_in_period';
+  const periodDays = daysInclusive(w.periodStart, w.periodEnd);
+  const start = w.hireDate > w.periodStart ? w.hireDate : w.periodStart;
+  let end = w.terminationDate && w.terminationDate < w.periodEnd ? w.terminationDate : w.periodEnd;
+  if (w.mode === 'mid_month' && probationEnd < end) end = probationEnd;
+  if (start > end) return { segments: [], wage: 0, eligibleDays: 0, periodDays, fullPeriod: false, probationEnd, probationStatus, rate: rateOn(w.periodEnd) };
+
+  const cuts = new Set<string>();
+  const passed = addDays(probationEnd, 1);
+  if (passed > start && passed <= end) cuts.add(passed);
+  for (const x of history) if (x.from > start && x.from <= end) cuts.add(x.from);
+  const starts = [start, ...[...cuts].sort()];
+  const segments: WageSegment[] = starts.map((s, i) => {
+    const e = i + 1 < starts.length ? addDays(starts[i + 1] as string, -1) : end;
+    const days = daysInclusive(s, e);
+    return { status: s <= probationEnd ? 'probation' : 'passed', start: s, end: e, days, paidDays: days, rate: rateOn(s), amount: 0 };
+  });
+
+  const D = w.divisorDays;
+  const fullPeriod = w.mode === 'monthly' && start === w.periodStart && end === w.periodEnd;
+  if (fullPeriod) {
+    const before = segments.slice(0, -1).reduce((a, x) => a + x.paidDays, 0);
+    (segments[segments.length - 1] as WageSegment).paidDays = Math.max(0, D - before);
+  } else {
+    let excess = segments.reduce((a, x) => a + x.paidDays, 0) - D;
+    for (let i = segments.length - 1; i >= 0 && excess > 0; i--) {
+      const seg = segments[i] as WageSegment;
+      const cut = Math.min(seg.paidDays, excess);
+      seg.paidDays -= cut;
+      excess -= cut;
+    }
+  }
+  for (const seg of segments) seg.amount = seg.paidDays === D ? seg.rate : round2((seg.rate / D) * seg.paidDays);
+  return {
+    segments,
+    wage: round2(segments.reduce((a, x) => a + x.amount, 0)),
+    eligibleDays: daysInclusive(start, end),
+    periodDays,
+    fullPeriod,
+    probationEnd,
+    probationStatus,
+    rate: rateOn(end),
+  };
 }
 
 // ---- Employee Welfare Fund (กองทุนสงเคราะห์ลูกจ้าง) -----------------------------------------------

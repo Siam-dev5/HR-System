@@ -149,6 +149,7 @@ export const MODULES: readonly ModuleDef[] = [
       ref('company_id', 'บริษัท', 'companies', { required: true }), ref('branch_id', 'สาขา', 'branches'), ref('department_id', 'หน่วยงาน', 'departments', L), ref('position_id', 'ตำแหน่ง', 'positions', L), ref('manager_id', 'หัวหน้า', 'employees'),
       date('hire_date', 'วันเริ่มงาน', { required: true }), date('probation_end', 'ครบทดลองงาน'), sel('employment_type', 'ประเภทการจ้าง', ['permanent', 'contract', 'probation', 'intern'], { required: true }),
       sel('status', 'สถานะ', ['active', 'probation', 'resigned', 'terminated'], RL),
+      date('termination_date', 'วันพ้นสภาพ (วันทำงานวันสุดท้าย)'), ref('person_id', 'ตัวตนเดียวกับพนักงาน (กรณีโอนย้ายบริษัท)', 'employees'),
       money('base_salary', 'เงินเดือนฐาน', { sensitive: true }), bool('ewf_equivalent_welfare', 'มีสวัสดิการเทียบเท่า (ยกเว้นกองทุนสงเคราะห์ลูกจ้าง)'), text('bank_name', 'ธนาคาร', { sensitive: true }), text('bank_account', 'เลขบัญชี', { sensitive: true }), text('tax_id', 'เลขประจำตัวผู้เสียภาษี', { sensitive: true }),
     ],
   }),
@@ -205,6 +206,8 @@ export const MODULES: readonly ModuleDef[] = [
     key: 'performance', path: '/performance', title: 'ประเมินผล (KPI/OKR)', group: 'hrm', table: 'performance_reviews', description: 'ผลประเมินรายบุคคล', labelExpr: "'PR-' || id", ownerField: 'employee_id',
     fields: [ref('cycle_id', 'รอบประเมิน', 'performance_cycles', RL), ref('employee_id', 'พนักงาน', 'employees', RL), ref('reviewer_employee_id', 'ผู้ประเมิน', 'employees'), num('kpi_score', 'คะแนน KPI (0-5)', { list: true, min: 0, max: 5 }), num('okr_progress', 'ความคืบหน้า OKR (%)', { list: true, min: 0, max: 100 }), sel('rating', 'เกรด', ['1', '2', '3', '4', '5'], L), area('comment', 'ความเห็น'), sel('status', 'สถานะ', ['draft', 'submitted', 'calibrated'], RL)],
   }),
+  page('attendance_import', '/attendance/import', 'นำเข้าเวลาทำงาน (Feishu)', 'hrm', 'attendance_import.view', '/api/attendance/imports'),
+  page('ot_review', '/attendance/ot-review', 'ตรวจสอบ OT (Feishu)', 'hrm', 'ot_review.view', '/api/attendance/ot'),
   page('talent', '/talent', 'Talent 9-Box', 'hrm', 'talent.view', '/api/talent/ninebox'),
   crud({
     key: 'talent_assessments', path: '/talent/assessments', title: 'ประเมิน Talent', group: 'hrm', table: 'talent_assessments', description: 'ผลงาน × ศักยภาพ (1-3)', labelExpr: "'TA-' || id",
@@ -255,8 +258,9 @@ export const MODULES: readonly ModuleDef[] = [
   }),
 
   // HROD
+  page('org_chart', '/org-chart', 'Organization Design · ผังองค์กร', 'hrod', 'org_chart.view', '/api/org-design'),
   crud({
-    key: 'org_design', path: '/org-design', title: 'Organization Design', group: 'hrod', table: 'org_design_scenarios', description: 'Scenario การออกแบบโครงสร้าง', labelExpr: codeName, codeField: 'code',
+    key: 'org_design', path: '/org-design', title: 'Org Design Scenario', group: 'hrod', table: 'org_design_scenarios', description: 'Scenario การออกแบบโครงสร้าง', labelExpr: codeName, codeField: 'code',
     fields: [text('code', 'รหัส', { ...RL, unique: true }), text('name', 'ชื่อ Scenario', RL), area('description', 'รายละเอียด'), date('effective_date', 'มีผล', L), sel('status', 'สถานะ', ['draft', 'review', 'approved', 'rejected'], RL)],
   }),
   crud({
@@ -279,10 +283,16 @@ export const MODULES: readonly ModuleDef[] = [
 
   // Payroll
   page('payroll', '/payroll', 'งวดเงินเดือน', 'payroll', 'payroll.view', '/api/payroll/periods'),
+  page('payroll_preview', '/payroll/preview', 'Payroll Preview', 'payroll', 'payroll_preview.view', '/api/payroll/periods'),
   page('payslips', '/payroll/payslips', 'สลิปเงินเดือน (HR)', 'payroll', 'payroll.view', '/api/payroll/payslips'),
   crud({
     key: 'pay_components', path: '/payroll/components', title: 'รายการเงินได้/เงินหัก', group: 'payroll', table: 'pay_components', description: 'Master รายการเงินได้และเงินหัก', labelExpr: codeName, codeField: 'code', defaultSort: 'code',
-    fields: [text('code', 'รหัส', { ...RL, unique: true }), text('name', 'ชื่อรายการ', RL), sel('kind', 'ประเภท', ['earning', 'deduction'], RL), bool('taxable', 'คิดภาษี', L), bool('active', 'ใช้งาน', L)],
+    fields: [text('code', 'รหัส', { ...RL, unique: true }), text('name', 'ชื่อรายการ', RL), sel('kind', 'ประเภท', ['earning', 'deduction'], RL), sel('category', 'กลุ่มใน Payroll Preview', ['allowance', 'commission', 'bonus', 'provident_fund', 'other'], RL), bool('taxable', 'คิดภาษี', L), bool('active', 'ใช้งาน', L)],
+  }),
+  crud({
+    key: 'salary_history', path: '/payroll/salary-history', title: 'ประวัติอัตราเงินเดือน', group: 'payroll', table: 'employee_salary_history',
+    description: 'อัตราเงินเดือนที่อนุมัติพร้อมวันที่มีผล (ใช้คำนวณแยกช่วงก่อน/หลังผ่านทดลองงาน) — บันทึกอัตราเดิมตั้งแต่วันเริ่มงานด้วย', labelExpr: "'SH-' || id", defaultSort: 'effective_date DESC',
+    fields: [ref('employee_id', 'พนักงาน', 'employees', RL), date('effective_date', 'มีผลตั้งแต่', RL), money('base_salary', 'อัตราเงินเดือน', { ...RL, sensitive: true }), text('reason', 'เหตุผล / เลขที่อนุมัติ', L)],
   }),
   crud({
     key: 'employee_pay_items', path: '/payroll/items', title: 'เงินได้/เงินหักประจำ', group: 'payroll', table: 'employee_pay_items', description: 'รายการประจำรายพนักงาน', labelExpr: "'PI-' || id",
@@ -344,7 +354,7 @@ export function viewPermission(m: ModuleDef): string {
  * never grantable through the role editor, and the API checks the role itself, not just the permission.
  */
 export const SUPER_ADMIN_ROLE = 'super_admin';
-export const RESERVED_PERMISSIONS: readonly string[] = ['users.manage', 'roles.manage', 'settings.manage'];
+export const RESERVED_PERMISSIONS: readonly string[] = ['users.manage', 'roles.manage', 'settings.manage', 'payroll_layout.manage'];
 
 export function isSuperAdmin(roles: readonly string[]): boolean {
   return roles.includes(SUPER_ADMIN_ROLE);
@@ -365,7 +375,8 @@ export function permissionCatalogue(): string[] {
     if (m.fields.some((f) => f.sensitive)) perms.add(`${m.key}.sensitive`);
   }
   for (const p of PAGE_MODULES) perms.add(p.perm);
-  for (const extra of ['payroll.calculate', 'payroll.approve', 'payroll.publish', 'payroll.export', 'workflow.approve', 'workflow.approve_any', 'reports.export']) perms.add(extra);
+  for (const extra of ['payroll.calculate', 'payroll.approve', 'payroll.publish', 'payroll.export', 'workflow.approve', 'workflow.approve_any', 'reports.export',
+    'attendance_import.create', 'attendance_import.update', 'ot_review.update', 'payroll_preview.export', 'org_chart.update', 'org_chart.import', 'org_chart.export', 'payslip_ytd.view']) perms.add(extra);
   for (const r of RESERVED_PERMISSIONS) perms.delete(r);
   return [...perms].sort();
 }

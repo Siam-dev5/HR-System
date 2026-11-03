@@ -177,6 +177,12 @@ export interface PayrollPeriod {
   end_date: string;
   pay_date: string;
   status: 'draft' | 'calculated' | 'approved' | 'published';
+  /** monthly: normal cycle · mid_month: probation advance round (26th – 10th) */
+  kind: 'monthly' | 'mid_month';
+  /** company whose employees the period pays; null = every company */
+  company_id: number | null;
+  company: string | null;
+  calc_version: number;
   employees: number;
   total_net: number;
   /** EWF employer contributions of the period (company cost, not deducted from employees) */
@@ -209,9 +215,224 @@ export interface PayslipDetail extends PayslipSummary {
   /** present only for payroll staff (payroll.view); omitted from the employee's own payslip */
   ewf_employer?: number;
   ewf_employer_rate?: number | null;
-  lines: Array<{ code: string; name: string; kind: 'earning' | 'deduction'; amount: number }>;
+  lines: Array<{ code: string; name: string; kind: 'earning' | 'deduction'; amount: number; category?: string }>;
   department: string | null;
   position: string | null;
+  period_kind: 'monthly' | 'mid_month';
+  company: string | null;
+  advance: number;
+  /** calculation snapshot (wage segments, probation, attendance used); null for slips calculated before 0005 */
+  calc: PayslipCalc | null;
+  /** year-to-date totals from published monthly payslips; present with payslip_ytd.view */
+  ytd?: PayslipYtd;
+}
+
+export interface WageSegmentView {
+  status: 'probation' | 'passed';
+  start: string;
+  end: string;
+  days: number;
+  paidDays: number;
+  rate: number;
+  amount: number;
+}
+
+export interface PayslipCalc {
+  segments: WageSegmentView[];
+  probationEnd: string;
+  probationStatus: 'probation' | 'passed' | 'passed_in_period';
+  eligibleDays: number;
+  fullPeriod: boolean;
+  department: string | null;
+  position: string | null;
+  attendance: {
+    source: 'feishu' | 'requests';
+    importId: number | null;
+    importVersion: number | null;
+    workDays: number | null;
+    expectedWorkDays: number | null;
+    actualWorkHours: number | null;
+    otHours: number;
+    unpaidLeaveDays: number;
+    unpaidLeaveHours: number | null;
+  };
+}
+
+export interface YtdTotals {
+  gross: number;
+  sso: number;
+  tax: number;
+  ewf_employee: number;
+  slips: number;
+}
+
+export interface PayslipYtd {
+  year: number;
+  /** false when the slip being viewed is not published yet (unpublished payroll is never counted) */
+  includesCurrent: boolean;
+  company: YtdTotals & { company_id: number | null; company: string | null };
+  employee: YtdTotals & { companies: number; records: number };
+  byCompany: Array<YtdTotals & { company_id: number | null; company: string | null }>;
+}
+
+export interface PreviewIssue {
+  level: 'error' | 'warning';
+  code: string;
+  message: string;
+  count: number;
+}
+
+export interface PayrollPreviewResponse {
+  period: PayrollPeriod;
+  company: CompanyOption | null;
+  /** snapshot: stored payslips (calculated / approved / published) · live: draft period computed without saving */
+  source: 'snapshot' | 'live';
+  columns: Array<{ key: string; label: string; group: string; type: string }>;
+  layout: Array<{ key: string; visible: boolean }>;
+  layoutSaved: boolean;
+  canManageLayout: boolean;
+  rows: Array<Record<string, string | number | null>>;
+  totals: Record<string, number>;
+  issues: PreviewIssue[];
+  exportable: boolean;
+}
+
+export interface AttendanceImportSummary {
+  id: number;
+  company_id: number;
+  company: string;
+  payroll_period_id: number;
+  period: string;
+  version: number;
+  file_name: string;
+  format: 'days' | 'hours';
+  layout: 'summary' | 'daily';
+  source_start: string | null;
+  source_end: string | null;
+  row_count: number;
+  imported_count: number;
+  excluded_count: number;
+  status: 'active' | 'superseded' | 'rolled_back';
+  locked: number;
+  created_at: string;
+  created_by_name: string | null;
+  rollback_reason: string | null;
+  ot_pending: number;
+}
+
+export interface AttendancePreviewRow {
+  rowNo: number;
+  employee_code: string | null;
+  employee_name: string | null;
+  employee_id: number | null;
+  values: Record<string, string | number | null>;
+  issues: Array<{ code: string; level: 'error' | 'warning'; message: string }>;
+  included: boolean;
+}
+
+export interface AttendanceAnalysis {
+  fileName: string;
+  sha256: string;
+  format: 'days' | 'hours' | null;
+  layout: 'summary' | 'daily';
+  headerRow: number;
+  headers: string[];
+  mapping: Record<string, number | null>;
+  sourceStart: string | null;
+  sourceEnd: string | null;
+  fileIssues: Array<{ code: string; message: string; level: 'error' | 'warning' }>;
+  rows: AttendancePreviewRow[];
+  stats: {
+    total: number;
+    matched: number;
+    unknown: number;
+    wrongCompany: number;
+    duplicates: number;
+    invalidDates: number;
+    invalidNumbers: number;
+    otPending: number;
+    leaveAbnormal: number;
+    errors: number;
+    warnings: number;
+    importable: number;
+  };
+  reconciliation: {
+    activeEmployees: number;
+    inFile: number;
+    missingInFile: Array<{ id: number; emp_code: string; name: string }>;
+    totals: Record<string, number>;
+    previous: { id: number; version: number; rows: number; totals: Record<string, number> } | null;
+  };
+  duplicateFile: { id: number; version: number; company: string; period: string; status: string } | null;
+  canImport: boolean;
+  nextVersion: number;
+  locked: boolean;
+}
+
+export interface OtReviewRow {
+  id: number;
+  import_id: number;
+  version: number;
+  company: string;
+  period: string;
+  employee_id: number | null;
+  employee_code: string;
+  employee_name: string | null;
+  feishu_overtime_hours: number | null;
+  ot_status: 'pending' | 'confirmed' | 'rejected' | 'revised';
+  ot_confirmed_hours: number | null;
+  ot_rate: number | null;
+  ot_reason: string | null;
+  reviewer: string | null;
+  ot_reviewed_at: string | null;
+  locked: number;
+}
+
+export interface OrgEmployeeNode {
+  id: number;
+  emp_code: string;
+  name: string;
+  company_id: number;
+  department_id: number | null;
+  position_id: number | null;
+  manager_id: number | null;
+  status: string;
+  hire_date: string;
+  email: string | null;
+}
+
+export interface OrgPositionRow {
+  id: number;
+  code: string;
+  title: string;
+  department_id: number | null;
+  job_grade: string | null;
+  approved: number;
+  occupied: number;
+  vacant: number;
+  over: number;
+}
+
+export interface OrgDepartmentRow {
+  id: number;
+  code: string;
+  name: string;
+  company_id: number;
+  parent_id: number | null;
+  level: number;
+  employees: number;
+}
+
+export interface OrgDesignResponse {
+  company: CompanyOption | null;
+  companies: CompanyOption[];
+  departments: OrgDepartmentRow[];
+  positions: OrgPositionRow[];
+  employees: OrgEmployeeNode[];
+  stats: { employees: number; departments: number; levels: number; positions: number; occupiedPositions: number; approved: number; occupied: number; vacant: number; over: number };
+  canUpdate: boolean;
+  canImport: boolean;
+  canExport: boolean;
 }
 
 export interface NineBoxResponse {
