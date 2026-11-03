@@ -15,6 +15,9 @@ const LABELS: Record<string, string> = {
   engagement: 'Engagement', enps: 'eNPS', pulse: 'Pulse', earning: 'เงินได้', deduction: 'เงินหัก',
   policy: 'นโยบาย', form: 'แบบฟอร์ม', certificate: 'หนังสือรับรอง', access: 'ขอเข้าถึง', rectify: 'ขอแก้ไข', erase: 'ขอลบ', object: 'คัดค้าน', portability: 'ขอโอนย้าย',
   received: 'รับเรื่อง', overtime: 'OT', time_correction: 'แก้ไขเวลา', calculated: 'คำนวณแล้ว', published: 'เผยแพร่แล้ว',
+  allowance: 'ค่าตอบแทน / Allowance', commission: 'Commission', bonus: 'Bonus', provident_fund: 'กองทุนสำรองเลี้ยงชีพ',
+  monthly: 'รายเดือน (สิ้นเดือน)', mid_month: 'กลางเดือน (ทดลองงาน)', superseded: 'ถูกแทนที่', rolled_back: 'ย้อนกลับแล้ว',
+  confirmed: 'ยืนยันแล้ว', revised: 'ปรับแก้แล้ว', none: '-', days: 'Expected Working Days', hours: 'Expected Working Hours', summary: 'สรุปรายคน', daily: 'รายวัน (รวมยอดอัตโนมัติ)',
 };
 
 export const optionLabel = (code: string | number | null | undefined): string => (code === null || code === undefined ? '-' : (LABELS[String(code)] ?? String(code)));

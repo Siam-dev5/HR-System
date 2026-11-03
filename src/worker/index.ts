@@ -9,6 +9,8 @@ import { overviewRoutes } from './routes/overview';
 import { workflowRoutes } from './routes/workflow';
 import { payrollRoutes, payslipRoutes } from './routes/payroll';
 import { adminRoutes } from './routes/admin';
+import { attendanceRoutes } from './routes/attendance';
+import { orgRoutes } from './routes/org';
 
 const app = new Hono<AppEnv>();
 
@@ -41,6 +43,8 @@ app.route('/api/lookup', lookupRoutes);
 app.route('/api/workflow', workflowRoutes);
 app.route('/api/payroll', payrollRoutes);
 app.route('/api/admin', adminRoutes);
+app.route('/api/attendance', attendanceRoutes);
+app.route('/api/org-design', orgRoutes);
 app.route('/api', payslipRoutes);
 app.route('/api', overviewRoutes);
 
