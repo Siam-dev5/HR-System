@@ -126,6 +126,8 @@ adminRoutes.put('/users/:id', requireSuperAdmin, async (c) => {
     if (!keepsSuper && (await activeSuperAdmins(db, id)) === 0) throw conflict('ต้องมี Super Admin ที่ใช้งานได้อย่างน้อย 1 บัญชี');
     stmts.push(db.prepare('DELETE FROM user_roles WHERE user_id = ?').bind(id));
     for (const rid of ids) stmts.push(db.prepare('INSERT INTO user_roles (user_id, role_id) VALUES (?, ?)').bind(id, rid));
+    // new roles need a fresh sign-in (and MFA enrolment when they are privileged); the acting admin keeps this session
+    stmts.push(db.prepare('DELETE FROM sessions WHERE user_id = ? AND id <> ?').bind(id, me.sessionId));
   }
   stmts.push(...(await linkEmployee(db, id, body.employeeId)));
   if (sets.length) stmts.unshift(db.prepare(`UPDATE users SET ${sets.join(', ')}, updated_at = datetime('now') WHERE id = ?`).bind(...params, id));
@@ -263,6 +265,8 @@ adminRoutes.put('/roles/:id', requireSuperAdmin, async (c) => {
       typeof body.privileged === 'boolean' ? (body.privileged ? 1 : 0) : null,
       id,
     ),
+    // holders of the changed role sign in again (the acting admin keeps this session)
+    db.prepare('DELETE FROM sessions WHERE user_id IN (SELECT user_id FROM user_roles WHERE role_id = ?) AND id <> ?').bind(id, currentUser(c).sessionId),
   ]);
   await audit(c, 'role.updated', 'role', id, { code: role.code, permissions: perms });
   return c.json({ ok: true });

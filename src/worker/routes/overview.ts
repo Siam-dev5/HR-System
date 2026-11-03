@@ -93,7 +93,7 @@ overviewRoutes.get('/dashboard', requirePerm('dashboard.view'), async (c) => {
   // recruitment, training and payroll periods are not tied to a company in this data model
   if (can(user, 'requisitions.view')) kpis.push({ label: 'ใบขอสรรหาที่เปิด', value: await count("SELECT COUNT(*) n FROM requisitions WHERE status = 'open'"), href: linkIfAllowed(user, '/recruitment'), companyScoped: false });
   if (can(user, 'training.view')) kpis.push({ label: 'รอบอบรมที่เปิดรับ', value: await count("SELECT COUNT(*) n FROM training_sessions WHERE status IN ('planned','open')"), href: linkIfAllowed(user, '/training'), companyScoped: false });
-  if (can(user, 'payroll.view')) kpis.push({ label: 'งวดเงินเดือนรอดำเนินการ', value: await count("SELECT COUNT(*) n FROM payroll_periods WHERE status <> 'published'"), href: linkIfAllowed(user, '/payroll'), companyScoped: false });
+  if (can(user, 'payroll.view')) kpis.push({ label: 'งวดเงินเดือนรอดำเนินการ', value: await count("SELECT COUNT(*) n FROM payroll_periods WHERE status <> 'published' AND deleted_at IS NULL"), href: linkIfAllowed(user, '/payroll'), companyScoped: false });
 
   let headcountByDepartment: DashboardResponse['headcountByDepartment'] = [];
   if (can(user, 'employees.all') && can(user, 'employees.view')) {

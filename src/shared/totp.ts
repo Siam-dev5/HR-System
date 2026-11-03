@@ -57,12 +57,17 @@ export async function totpCode(secret: string, timeMs = Date.now(), step = 30): 
 
 /** Accepts the current code and one step either side for clock drift. */
 export async function verifyTotp(secret: string, code: string, timeMs = Date.now()): Promise<boolean> {
+  return (await totpCounter(secret, code, timeMs)) !== null;
+}
+
+/** The time-step counter the code belongs to (current ± 1 step), or null — lets a caller make a code single-use. */
+export async function totpCounter(secret: string, code: string, timeMs = Date.now()): Promise<number | null> {
   const c = code.replace(/\s/g, '');
-  if (!/^\d{6}$/.test(c)) return false;
+  if (!/^\d{6}$/.test(c)) return null;
   for (const drift of [-1, 0, 1]) {
-    if ((await totpCode(secret, timeMs + drift * 30_000)) === c) return true;
+    if ((await totpCode(secret, timeMs + drift * 30_000)) === c) return Math.floor(timeMs / 30_000) + drift;
   }
-  return false;
+  return null;
 }
 
 export function otpauthUrl(secret: string, account: string, issuer: string): string {

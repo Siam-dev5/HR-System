@@ -1,7 +1,7 @@
 // Single source of truth for modules: database table, fields, menu placement and permissions.
 // The API (generic CRUD, lookups, menu) and the SPA (forms, tables, router) are both driven from here,
 // and an integration test checks every table/column below exists in the D1 schema.
-import { hasPermission } from './permissions';
+import { PERIOD_ADMIN, hasPermission } from './permissions';
 
 export type MenuGroup = 'overview' | 'hrm' | 'hrd' | 'hrod' | 'payroll' | 'system';
 
@@ -354,7 +354,7 @@ export function viewPermission(m: ModuleDef): string {
  * never grantable through the role editor, and the API checks the role itself, not just the permission.
  */
 export const SUPER_ADMIN_ROLE = 'super_admin';
-export const RESERVED_PERMISSIONS: readonly string[] = ['users.manage', 'roles.manage', 'settings.manage', 'payroll_layout.manage'];
+export const RESERVED_PERMISSIONS: readonly string[] = ['users.manage', 'roles.manage', 'settings.manage', 'payroll_layout.manage', ...Object.values(PERIOD_ADMIN)];
 
 export function isSuperAdmin(roles: readonly string[]): boolean {
   return roles.includes(SUPER_ADMIN_ROLE);

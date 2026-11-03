@@ -69,6 +69,8 @@ npx wrangler d1 migrations apply hr-system-db --local --persist-to .tmp/restore-
 |---|---|
 | ต้องการดูหรือเทียบข้อมูลเก่า | Restore ลง Local (ข้อ 3) แล้ว Query เทียบ ไม่แตะ Production |
 | สลิปถูกแทนที่จากการคำนวณใหม่หรือเปิดแก้ไข (ตั้งแต่ Migration 0006) | สำเนาเดิมอยู่ใน `payslip_archive` ค้นด้วย `period_id` และ `calc_version` ไม่ต้อง Restore ทั้งฐาน |
+| งวดเงินเดือนถูกลบ (ตั้งแต่ Migration 0007) | การลบเป็นแบบ Soft delete: Super Admin กู้คืนได้ที่ งวดเงินเดือน → "งวดที่ลบแล้ว" (ต้องมีเหตุผลและรหัส MFA) ประวัติ Archive และ Audit ไม่หาย |
+| งวดที่ปิดแล้วถูกเปิดใหม่หรือคำนวณใหม่ (ตั้งแต่ Migration 0007) | สลิปก่อนเปิดงวดอยู่ใน `payslip_archive` (`reason = 'reopen'`, `op_token` ตาม Audit `payroll.period_reopened_closed`) รวมสถานะการเผยแพร่เดิม |
 | ข้อมูลบางตารางเสียหาย | Restore ลง Local → Export เฉพาะแถวที่ต้องการ → ตรวจโดย HR → นำเข้าเฉพาะแถวนั้นผ่านขั้นตอนที่อนุมัติ |
 | ฐานข้อมูลเสียหายทั้งระบบ | `npx wrangler d1 time-travel restore hr-system-db --bookmark=<bookmark>` โดยเจ้าของระบบอนุมัติเป็นลายลักษณ์อักษร ข้อมูลหลังจุดนั้นจะหายทั้งหมด ให้สำรองสถานะปัจจุบันก่อนเสมอ |
 | Deploy ใหม่มีปัญหา (ไม่เกี่ยวกับข้อมูล) | `npx wrangler rollback` กลับ Worker Version ก่อนหน้า ไม่แตะฐานข้อมูล |

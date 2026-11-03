@@ -189,6 +189,37 @@ export interface PayrollPeriod {
   total_ewf_employer: number;
   /** payslips calculated before migration 0005 (calc_version 0): recalculation needs explicit confirmation */
   legacy_slips: number;
+  approved_at?: string | null;
+  published_at?: string | null;
+  /** set while a Super Admin has reopened a closed (approved / published) period; cleared when approved again */
+  reopened_from?: 'approved' | 'published' | null;
+}
+
+/** What a Super Admin period action would touch (shown before confirmation; blockers refuse the action). */
+export interface PeriodImpact {
+  period: PayrollPeriod;
+  payslips: { count: number; gross: number; net: number; published: number; withAdvance: number; advance: number };
+  archive: { count: number; versions: number; lastArchivedAt: string | null };
+  attendance: { active: number; locked: number; total: number };
+  approval: { status: PayrollPeriod['status']; calculatedAt: string | null; approvedAt: string | null; publishedAt: string | null; everPublished: boolean };
+  /** monthly: its mid-month rounds · mid_month: the month-end that deducts it */
+  dependencies: Array<{ id: number; code: string; kind: PayrollPeriod['kind']; status: PayrollPeriod['status']; relation: 'mid_month_round' | 'month_end'; advance: number }>;
+  blockers: { reopen: string[]; delete: string[]; editCalculation: string[] };
+}
+
+export interface DeletedPeriod {
+  id: number;
+  code: string;
+  name: string;
+  kind: PayrollPeriod['kind'];
+  company: string | null;
+  start_date: string;
+  end_date: string;
+  pay_date: string;
+  deleted_at: string;
+  deleted_by: string | null;
+  delete_reason: string | null;
+  archived: number;
 }
 
 export interface PayslipSummary {

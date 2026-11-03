@@ -35,7 +35,7 @@ const fmt = (d: string) => `${d.slice(8, 10)}/${d.slice(5, 7)}`;
 /** Mid-month periods inside a monthly period (their slips are advances deducted at month-end). */
 export async function advancePeriods(db: D1Database, p: PeriodRowLike): Promise<Array<{ id: number; code: string; status: string }>> {
   const { results } = await db
-    .prepare(`SELECT id, code, status FROM payroll_periods WHERE kind = 'mid_month' AND start_date >= ?1 AND end_date <= ?2 AND ${sameScope(3)} ORDER BY start_date`)
+    .prepare(`SELECT id, code, status FROM payroll_periods WHERE kind = 'mid_month' AND deleted_at IS NULL AND start_date >= ?1 AND end_date <= ?2 AND ${sameScope(3)} ORDER BY start_date`)
     .bind(p.start_date, p.end_date, p.company_id)
     .all<{ id: number; code: string; status: string }>();
   return results;
@@ -44,7 +44,7 @@ export async function advancePeriods(db: D1Database, p: PeriodRowLike): Promise<
 /** The monthly period covering a mid-month round (null if none has been created yet). */
 export async function coveringMonthly(db: D1Database, p: PeriodRowLike): Promise<{ id: number; code: string; status: string } | null> {
   return db
-    .prepare(`SELECT id, code, status FROM payroll_periods WHERE kind = 'monthly' AND start_date <= ?1 AND end_date >= ?2 AND ${sameScope(3)} ORDER BY start_date LIMIT 1`)
+    .prepare(`SELECT id, code, status FROM payroll_periods WHERE kind = 'monthly' AND deleted_at IS NULL AND start_date <= ?1 AND end_date >= ?2 AND ${sameScope(3)} ORDER BY start_date LIMIT 1`)
     .bind(p.start_date, p.end_date, p.company_id)
     .first<{ id: number; code: string; status: string }>();
 }

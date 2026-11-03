@@ -90,7 +90,7 @@ interface EmpLite {
 async function prepare(c: Context<AppEnv>, body: Record<string, unknown>): Promise<Prepared> {
   const db = c.env.DB;
   const company = await scopedCompany(c, body.company_id);
-  const period = await db.prepare('SELECT id, code, name, start_date, end_date, status, company_id FROM payroll_periods WHERE id = ?').bind(intParam(String(body.period_id ?? ''), 'period_id')).first<PeriodLite>();
+  const period = await db.prepare('SELECT id, code, name, start_date, end_date, status, company_id FROM payroll_periods WHERE id = ? AND deleted_at IS NULL').bind(intParam(String(body.period_id ?? ''), 'period_id')).first<PeriodLite>();
   if (!period) throw notFound('ไม่พบงวดเงินเดือน');
   const fileName = str(body, 'file_name', { required: true, max: 255 }) as string;
   const sha256 = str(body, 'sha256', { required: true, max: 64 }) as string;
@@ -237,7 +237,7 @@ async function prepare(c: Context<AppEnv>, body: Record<string, unknown>): Promi
 
 /** Payroll periods to attach attendance to (read-only list; HR Staff do not hold payroll.view). */
 attendanceRoutes.get('/periods', requirePerm('attendance_import.view', 'ot_review.view'), async (c) => {
-  const { results } = await c.env.DB.prepare('SELECT id, code, name, start_date, end_date, status, kind, company_id FROM payroll_periods ORDER BY start_date DESC, kind LIMIT 120').all();
+  const { results } = await c.env.DB.prepare('SELECT id, code, name, start_date, end_date, status, kind, company_id FROM payroll_periods WHERE deleted_at IS NULL ORDER BY start_date DESC, kind LIMIT 120').all();
   return c.json(results);
 });
 

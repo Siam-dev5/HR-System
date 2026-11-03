@@ -5,6 +5,7 @@
 // Usage: node scripts/check-feishu-file.mjs "<path to For Payroll System_YYYYMMDD_YYYYMMDD.xlsx>" [more files…]
 import { build } from 'esbuild';
 import { readFileSync } from 'node:fs';
+import { TextDecoder } from 'node:util';
 import { basename, dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 

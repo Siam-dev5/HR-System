@@ -64,6 +64,14 @@ export async function loadAuthUser(db: D1Database, userId: number, sessionId: st
     .prepare('SELECT DISTINCT rp.permission FROM role_permissions rp JOIN user_roles ur ON ur.role_id = rp.role_id WHERE ur.user_id = ?')
     .bind(userId)
     .all<{ permission: string }>();
+  const privileged = roles.some((r) => r.privileged === 1);
+  // Re-evaluated on every request, not only at login: a session whose user became privileged later (role change,
+  // role made privileged, policy switched on) is restricted until MFA is enrolled.
+  let pending = row.mfa_pending === 1;
+  if (!pending && sessionId && privileged && row.mfa_enabled !== 1) {
+    const s = await db.prepare("SELECT value FROM settings WHERE key = 'security.mfa_enforce_privileged'").first<{ value: string }>();
+    pending = (s?.value ?? 'true') === 'true';
+  }
   return {
     id: row.id,
     username: row.username,
@@ -71,10 +79,10 @@ export async function loadAuthUser(db: D1Database, userId: number, sessionId: st
     employeeId: row.employee_id,
     roles: roles.map((r) => r.code),
     permissions: perms.map((p) => p.permission),
-    privileged: roles.some((r) => r.privileged === 1),
+    privileged,
     mfaEnabled: row.mfa_enabled === 1,
     mustChangePassword: row.must_change_password === 1,
-    mfaPending: row.mfa_pending === 1,
+    mfaPending: pending,
     sessionId,
   };
 }
@@ -127,6 +135,20 @@ export const requireSuperAdmin: MiddlewareHandler<AppEnv> = async (c, next) => {
   if (!isSuperAdmin(user.roles)) throw forbidden('เฉพาะ Super Admin เท่านั้นที่จัดการผู้ใช้ บทบาท และสิทธิ์ได้');
   await next();
 };
+
+/**
+ * Payroll period management outside the normal workflow: the super_admin role itself (current roles, read on every
+ * request), the explicit permission, and MFA enrolled. Each action additionally needs a fresh TOTP (lib/step-up).
+ */
+export function requirePeriodAdmin(...permissions: string[]): MiddlewareHandler<AppEnv> {
+  return async (c, next) => {
+    const user = c.get('user');
+    if (!user) throw unauthorized();
+    if (!isSuperAdmin(user.roles) || !permissions.some((p) => can(user, p))) throw forbidden(`เฉพาะ Super Admin ที่มีสิทธิ์ ${permissions.join(' หรือ ')} เท่านั้น`);
+    if (!user.mfaEnabled || user.mfaPending) throw new HttpError(403, 'mfa_enrollment_required', 'ต้องเปิดใช้ MFA ก่อนจัดการงวดเงินเดือน');
+    await next();
+  };
+}
 
 export function canOpen(user: AuthUser, m: ModuleDef): boolean {
   return canOpenModule(m, user.permissions, user.roles);
