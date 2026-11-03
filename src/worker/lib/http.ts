@@ -48,6 +48,9 @@ export function str(body: Record<string, unknown>, key: string, opts: { required
   return t;
 }
 
+/** Download file names built from user-entered codes: keep them header-safe. */
+export const safeName = (s: string): string => s.replace(/[^A-Za-z0-9._-]+/g, '_').slice(0, 120);
+
 export const DATE_RE = /^\d{4}-\d{2}-\d{2}$/;
 
 export function csv(rows: Array<Array<string | number | null>>): string {

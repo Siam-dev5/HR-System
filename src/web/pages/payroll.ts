@@ -1,14 +1,15 @@
-import type { PayrollPeriod, PayslipDetail, PayslipSummary } from '../../shared/types';
+import type { PayrollPeriod, PayslipDetail, PayslipSummary, PayslipYtd, WageSegmentView } from '../../shared/types';
+import { PROBATION_LABEL } from '../../shared/payroll-columns';
 import { get, post, qs } from '../api';
 import { h, mount, loading, errorBox, fmtDate, fmtMoney, modal, toast, confirmDialog } from '../dom';
 import { optionLabel } from '../labels';
-import { basePath, can, link } from '../app';
+import { basePath, can, link, state } from '../app';
 
 export async function renderPayroll(main: HTMLElement): Promise<void> {
   mount(main, loading());
   try {
     const periods = await get<PayrollPeriod[]>('/api/payroll/periods');
-    const act = async (p: PayrollPeriod, action: 'calculate' | 'approve' | 'publish', label: string) => {
+    const act = async (p: PayrollPeriod, action: 'calculate' | 'approve' | 'publish' | 'reopen', label: string) => {
       if (!(await confirmDialog(label, `${label} งวด ${p.name}?`, label))) return;
       try {
         await post(`/api/payroll/periods/${p.id}/${action}`);
@@ -19,18 +20,20 @@ export async function renderPayroll(main: HTMLElement): Promise<void> {
       }
     };
     mount(main,
-      h('p', { class: 'muted lead' }, 'ขั้นตอน: สร้างงวด → คำนวณ → อนุมัติ (ผู้อนุมัติต้องไม่ใช่ผู้คำนวณ) → เผยแพร่สลิปให้พนักงาน'),
+      h('p', { class: 'muted lead' }, 'ขั้นตอน: สร้างงวด → คำนวณ → Preview → อนุมัติ (ผู้อนุมัติต้องไม่ใช่ผู้คำนวณ) → เผยแพร่สลิปให้พนักงาน · พนักงานทดลองงานจ่าย 2 รอบ: กลางเดือน (26–10, จ่ายไม่เกินวันที่ 15) และสิ้นเดือน (หักยอดจ่ายกลางเดือน)'),
       h('div', { class: 'toolbar' }, h('div', { class: 'spacer' }),
         can('payroll.calculate') ? h('button', { class: 'btn primary', onclick: () => newPeriod(() => void renderPayroll(main)) }, '+ สร้างงวด') : null),
       periods.length
         ? h('table', { class: 'table' },
-            h('thead', null, h('tr', null, ['รหัส', 'ชื่องวด', 'ช่วงวันที่', 'วันจ่าย', 'สถานะ', 'จำนวนคน', 'ยอดสุทธิรวม', 'EWF นายจ้างสมทบ', ''].map((t) => h('th', null, t)))),
+            h('thead', null, h('tr', null, ['รหัส', 'ชื่องวด', 'รอบ', 'บริษัท', 'ช่วงวันที่', 'วันจ่าย', 'สถานะ', 'จำนวนคน', 'ยอดสุทธิรวม', 'EWF นายจ้างสมทบ', ''].map((t) => h('th', null, t)))),
             h('tbody', null, periods.map((p) => h('tr', null,
-              h('td', null, p.code), h('td', null, p.name), h('td', null, `${fmtDate(p.start_date)} – ${fmtDate(p.end_date)}`), h('td', null, fmtDate(p.pay_date)),
+              h('td', null, p.code), h('td', null, p.name), h('td', null, optionLabel(p.kind)), h('td', null, p.company ?? 'ทุกบริษัท'), h('td', null, `${fmtDate(p.start_date)} – ${fmtDate(p.end_date)}`), h('td', null, fmtDate(p.pay_date)),
               h('td', null, h('span', { class: `badge-status s-${p.status}` }, optionLabel(p.status))), h('td', null, String(p.employees)), h('td', null, fmtMoney(p.total_net)), h('td', null, fmtMoney(p.total_ewf_employer)),
               h('td', { class: 'actions' },
                 (p.status === 'draft' || p.status === 'calculated') && can('payroll.calculate') ? h('button', { class: 'btn small', onclick: () => void act(p, 'calculate', 'คำนวณ') }, p.status === 'draft' ? 'คำนวณ' : 'คำนวณใหม่') : null,
+                p.status === 'calculated' && can('payroll.calculate') ? h('button', { class: 'btn small', onclick: () => void act(p, 'reopen', 'เปิดแก้ไข (กลับเป็นร่าง)') }, 'เปิดแก้ไข') : null,
                 p.status === 'calculated' && can('payroll.approve') ? h('button', { class: 'btn small primary', onclick: () => void act(p, 'approve', 'อนุมัติ') }, 'อนุมัติ') : null,
+                can('payroll_preview.view') ? link(`/payroll/preview?period_id=${p.id}`, 'Preview', { class: 'btn small' }) : null,
                 p.status === 'approved' && can('payroll.publish') ? h('button', { class: 'btn small primary', onclick: () => void act(p, 'publish', 'เผยแพร่') }, 'เผยแพร่') : null,
                 p.employees ? link(`/payroll/payslips?period_id=${p.id}`, 'ดูสลิป', { class: 'btn small' }) : null,
                 p.employees && can('payroll.export') ? h('a', { class: 'btn small', href: `${basePath()}/api/payroll/periods/${p.id}/export.csv`, download: true }, 'Export') : null)))))
@@ -43,23 +46,39 @@ export async function renderPayroll(main: HTMLElement): Promise<void> {
 
 function newPeriod(onDone: () => void): void {
   const now = new Date();
+  const ym = (y: number, m: number) => `${y}-${String(m).padStart(2, '0')}`;
   const y = now.getFullYear();
-  const mo = String(now.getMonth() + 1).padStart(2, '0');
-  const last = new Date(y, now.getMonth() + 1, 0).getDate();
-  const code = h('input', { value: `${y}-${mo}`, required: true, maxlength: 20 });
-  const name = h('input', { value: `เงินเดือน ${mo}/${y + 543}`, required: true });
-  const start = h('input', { type: 'date', value: `${y}-${mo}-01`, required: true });
-  const end = h('input', { type: 'date', value: `${y}-${mo}-${last}`, required: true });
-  const pay = h('input', { type: 'date', value: `${y}-${mo}-${last}`, required: true });
+  const m = now.getMonth() + 1;
+  const prev = m === 1 ? ym(y - 1, 12) : ym(y, m - 1);
+  const cur = ym(y, m);
+  const companies = state.meta?.companies.items ?? [];
+  const company = h('select', null, state.meta?.companies.scope === 'all' ? h('option', { value: '' }, 'ทุกบริษัท') : null, companies.map((c) => h('option', { value: String(c.id), selected: c.id === state.companyId }, c.name)));
+  const kind = h('select', { onchange: () => fill() }, h('option', { value: 'monthly' }, 'รายเดือน (สิ้นเดือน) 26 – 25'), h('option', { value: 'mid_month' }, 'กลางเดือน (พนักงานทดลองงาน) 26 – 10'));
+  const code = h('input', { required: true, maxlength: 20 });
+  const name = h('input', { required: true });
+  const start = h('input', { type: 'date', required: true });
+  const end = h('input', { type: 'date', required: true });
+  const pay = h('input', { type: 'date', required: true });
+  const fill = () => {
+    const mid = kind.value === 'mid_month';
+    code.value = mid ? `${cur}-M` : cur;
+    name.value = `${mid ? 'จ่ายกลางเดือน' : 'เงินเดือน'} ${String(m).padStart(2, '0')}/${y + 543}`;
+    start.value = `${prev}-26`;
+    end.value = mid ? `${cur}-10` : `${cur}-25`;
+    pay.value = mid ? `${cur}-15` : `${cur}-25`;
+  };
+  fill();
   const msg = h('div', { class: 'form-msg', role: 'alert' });
   const dlg = modal('สร้างงวดเงินเดือน', h('div', { class: 'grid-form' },
+    h('label', { class: 'field' }, h('span', null, 'ประเภทรอบ *'), kind),
+    h('label', { class: 'field' }, h('span', null, 'บริษัท'), company),
     h('label', { class: 'field' }, h('span', null, 'รหัสงวด *'), code), h('label', { class: 'field' }, h('span', null, 'ชื่องวด *'), name),
     h('label', { class: 'field' }, h('span', null, 'ตั้งแต่ *'), start), h('label', { class: 'field' }, h('span', null, 'ถึง *'), end),
     h('label', { class: 'field' }, h('span', null, 'วันจ่าย *'), pay), msg), [
     h('button', { class: 'btn', onclick: () => dlg.close() }, 'ยกเลิก'),
     h('button', { class: 'btn primary', onclick: async () => {
       try {
-        await post('/api/payroll/periods', { code: code.value, name: name.value, start_date: start.value, end_date: end.value, pay_date: pay.value });
+        await post('/api/payroll/periods', { kind: kind.value, company_id: company.value || null, code: code.value, name: name.value, start_date: start.value, end_date: end.value, pay_date: pay.value });
         dlg.close();
         toast('สร้างงวดแล้ว');
         onDone();
@@ -117,16 +136,43 @@ export async function renderPayslipView(main: HTMLElement, id: number, back: str
       h('div', { class: 'toolbar no-print' }, link(back, '‹ กลับ', { class: 'btn' }), h('div', { class: 'spacer' }), h('button', { class: 'btn primary', onclick: () => window.print() }, 'พิมพ์ / บันทึก PDF')),
       h('article', { class: 'card payslip' },
         h('header', null, h('h2', null, 'สลิปเงินเดือน'), h('div', { class: 'muted' }, `${s.period_name} · วันจ่าย ${fmtDate(s.pay_date)}`)),
-        h('dl', { class: 'dl' }, h('dt', null, 'พนักงาน'), h('dd', null, s.employee), h('dt', null, 'หน่วยงาน'), h('dd', null, s.department ?? '-'), h('dt', null, 'ตำแหน่ง'), h('dd', null, s.position ?? '-')),
+        h('dl', { class: 'dl' }, h('dt', null, 'พนักงาน'), h('dd', null, s.employee), h('dt', null, 'บริษัท'), h('dd', null, s.company ?? '-'), h('dt', null, 'หน่วยงาน'), h('dd', null, s.calc?.department ?? s.department ?? '-'), h('dt', null, 'ตำแหน่ง'), h('dd', null, s.calc?.position ?? s.position ?? '-'),
+          s.calc ? [h('dt', null, 'สถานะทดลองงาน'), h('dd', null, `${PROBATION_LABEL[s.calc.probationStatus] ?? s.calc.probationStatus} (ครบ 90 วัน ${fmtDate(s.calc.probationEnd)})`)] : null),
+        s.period_kind === 'mid_month' ? h('div', { class: 'alert' }, 'รอบจ่ายกลางเดือน (ทดลองงาน): เป็นการจ่ายล่วงหน้าตามวันที่มีสิทธิ์ และจะถูกหักในงวดสิ้นเดือน (Mid-month Advance)') : null,
+        s.calc && (s.calc.segments.length > 1 || !s.calc.fullPeriod) ? segmentTable(s.calc.segments) : null,
         h('div', { class: 'grid2' }, col('รายได้', earn, earn.reduce((a, l) => a + l.amount, 0)), col('รายการหัก', ded, s.deductions + s.unpaid_leave)),
         h('div', { class: 'net' }, 'เงินได้สุทธิ ', h('strong', null, `${fmtMoney(s.net)} บาท`)),
         // employer contribution is returned only to payroll staff; it is informational and never part of net pay
         s.ewf_employer !== undefined && s.ewf_employer > 0
           ? h('div', { class: 'alert employer-note no-print' }, `เงินสมทบกองทุนสงเคราะห์ลูกจ้างของนายจ้าง ${fmtMoney(s.ewf_employer)} บาท (อัตรา ${s.ewf_employer_rate ?? '-'}%) — ไม่หักจากเงินได้ของพนักงาน แสดงเฉพาะฝ่ายเงินเดือน`)
           : null,
+        s.ytd ? ytdBlock(s.ytd) : null,
         s.published ? null : h('div', { class: 'alert' }, 'สลิปนี้ยังไม่ได้เผยแพร่ให้พนักงาน')),
     );
   } catch (e) {
     mount(main, errorBox(e));
   }
+}
+
+function segmentTable(segments: WageSegmentView[]): HTMLElement {
+  return h('div', null, h('h3', null, 'ค่าจ้างตามช่วงเวลา (ฐาน 30 วัน)'),
+    h('table', { class: 'table compact' },
+      h('thead', null, h('tr', null, ['ช่วง', 'สถานะ', 'วันตามปฏิทิน', 'วันที่คิดค่าจ้าง', 'อัตรา/เดือน', 'จำนวนเงิน'].map((t) => h('th', null, t)))),
+      h('tbody', null, segments.map((g) => h('tr', null, h('td', null, `${fmtDate(g.start)} – ${fmtDate(g.end)}`), h('td', null, g.status === 'probation' ? 'ทดลองงาน' : 'ผ่านทดลองงาน'),
+        h('td', { class: 'num' }, String(g.days)), h('td', { class: 'num' }, String(g.paidDays)), h('td', { class: 'num' }, fmtMoney(g.rate)), h('td', { class: 'num' }, fmtMoney(g.amount)))),
+        h('tr', { class: 'total' }, h('td', { colspan: 5 }, 'รวมค่าจ้าง'), h('td', { class: 'num' }, fmtMoney(segments.reduce((a, g) => a + g.amount, 0)))))));
+}
+
+function ytdBlock(y: PayslipYtd): HTMLElement {
+  const row = (label: string, t: { gross: number; sso: number; tax: number; ewf_employee: number }) =>
+    h('tr', null, h('td', null, label), h('td', { class: 'num' }, fmtMoney(t.gross)), h('td', { class: 'num' }, fmtMoney(t.sso)), h('td', { class: 'num' }, fmtMoney(t.tax)), h('td', { class: 'num' }, fmtMoney(t.ewf_employee)));
+  const multi = y.employee.companies > 1 || y.byCompany.some((c) => c.company_id !== y.company.company_id);
+  return h('section', { class: 'ytd' }, h('h3', null, `ยอดสะสมตั้งแต่ต้นปี ${y.year + 543} (YTD)`),
+    h('div', { class: 'table-wrap' }, h('table', { class: 'table compact' },
+      h('thead', null, h('tr', null, ['', 'เงินได้สะสม', 'ประกันสังคมสะสม', 'ภาษีสะสม', 'กองทุนสงเคราะห์ลูกจ้างสะสม (พนักงาน)'].map((t) => h('th', null, t)))),
+      h('tbody', null,
+        row(`บริษัทนี้${y.company.company ? ` (${y.company.company})` : ''}`, y.company),
+        multi ? y.byCompany.filter((c) => c.company_id !== y.company.company_id).map((c) => row(c.company ?? 'บริษัทอื่น', c)) : null,
+        h('tr', { class: 'total' }, h('td', null, multi ? 'รวมทุกบริษัท (ตัวพนักงาน)' : 'รวม'), h('td', { class: 'num' }, fmtMoney(y.employee.gross)), h('td', { class: 'num' }, fmtMoney(y.employee.sso)), h('td', { class: 'num' }, fmtMoney(y.employee.tax)), h('td', { class: 'num' }, fmtMoney(y.employee.ewf_employee)))))),
+    h('p', { class: 'muted small' }, `นับเฉพาะสลิปที่เผยแพร่แล้วตั้งแต่ 1 ม.ค. ถึงงวดนี้ (ไม่รวมรอบจ่ายกลางเดือนซึ่งรวมอยู่ในงวดสิ้นเดือนแล้ว และไม่รวมเงินสมทบของนายจ้าง)${y.includesCurrent ? '' : ' · สลิปนี้ยังไม่เผยแพร่ จึงยังไม่ถูกนับ'}`));
 }
