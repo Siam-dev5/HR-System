@@ -36,6 +36,12 @@ npx wrangler d1 time-travel info hr-system-db --timestamp=2026-11-03T14:50:00Z  
 | SHA-256 | `8560a25ecda32f158dc4addb477539eb7b89759f3d4fee7a92139bf9dbc7ed1b` |
 | Time Travel ณ เวลาสำรองก่อน 0006 | `00000055-00000000-00005118-4becd2ea97cb151665ed35f58a3ad52c` |
 | เนื้อหาที่ตรวจแล้ว | งวด 2 งวด (ทั้งคู่เป็นร่าง), สลิป 0 ใบ (สลิป 45 ใบเดิมถูกนำออกเมื่อ 15:07:26 UTC ด้วยการ "เปิดแก้ไข" ยังกู้ได้จากไฟล์ก่อน 0005 และ Time Travel), พนักงาน 46, ผู้ใช้ 7 |
+| ไฟล์ก่อน Migration 0007 (4 พ.ย. 2569) | `.secrets/backups/hr-system-db-pre-0007-20261104-152020.sql` (1,061 คำสั่ง, 269,069 bytes) |
+| SHA-256 | `a1e73f895346ddb07c408be528dae75bf65bdc4061c94dde2d318a2ba9ed96ef` |
+| ไฟล์พร้อม Restore | `.secrets/backups/hr-system-db-pre-0007-20261104-152020.restore.sql` |
+| Time Travel ก่อน 0007 (15:20 UTC; 0007 ถูก Apply 15:30:16 UTC) | `00000073-00000000-00005119-48b25975fe7672a49081950348c1881b` |
+| เนื้อหาที่ตรวจแล้ว | 59 ตาราง 896 แถว, งวด 2 งวด (ร่าง), สลิป 0, Archive 0, role_permissions 160, Audit 487, พนักงาน 46, ผู้ใช้ 7 — Restore ลง Local ตรงทุกตาราง, `foreign_key_check` ว่าง, `quick_check` ok, ทดสอบ Apply 0007 ผ่าน |
+| Worker ก่อน / หลัง Deploy 0007 | `b984f052-6300-4392-818f-f8580e1a104e` → `6cd27abe-6dab-478f-a92d-0fd55c6f24b1` (15:31:14 UTC, จาก `main` @ `b947f6a`) |
 
 ## 3. ทดสอบ Restore (ทำบน Local D1 แยกต่างหากเท่านั้น)
 

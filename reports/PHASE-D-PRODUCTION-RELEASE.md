@@ -1,6 +1,8 @@
 # Phase D Production Release — Record
 
-**Final status: COMMIT and PUSH done. PRODUCTION DEPLOY NOT PERFORMED (blocked; see §4). Production unchanged and healthy.**
+**Superseded (2026-11-04 15:31Z):** after approval of migration 0007 and the credential refresh, the release was completed: Worker `6cd27abe-6dab-478f-a92d-0fd55c6f24b1` from `main` @ `b947f6a`. See `reports/PRODUCTION-RELEASE-FINAL.md`. The record below describes the earlier blocked attempt.
+
+**Status at the time: COMMIT and PUSH done. PRODUCTION DEPLOY NOT PERFORMED (blocked; see §4).**
 
 | Item | Value |
 |---|---|
