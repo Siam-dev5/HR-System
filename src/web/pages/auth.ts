@@ -32,7 +32,7 @@ function icon(d: string, cls = 'ico'): SVGSVGElement {
 function authShell(opts: { icon: string; title: string; subtitle: string; body: Child }): HTMLElement {
   return h('div', { class: 'auth' },
     h('aside', { class: 'auth-brand' },
-      h('div', { class: 'auth-logo' }, h('span', { class: 'auth-logo-mark' }, 'HR'), h('span', { class: 'auth-logo-text' }, 'HR SYSTEM')),
+      h('div', { class: 'auth-logo' }, h('img', { class: 'auth-logo-img', src: '/assets/siamhrbp-logo.png', srcset: '/assets/siamhrbp-logo.png 1x, /assets/siamhrbp-logo@2x.png 2x', width: 254, height: 128, alt: 'โลโก้ SIAM HRBP' })),
       h('div', { class: 'auth-hero' },
         h('p', { class: 'auth-eyebrow' }, 'PEOPLE · PERFORMANCE · PAYROLL'),
         h('h1', null, 'บริหารคนอย่างมืออาชีพ', h('br'), h('span', { class: 'auth-accent' }, 'ครบในระบบเดียว')),

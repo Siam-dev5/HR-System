@@ -7,6 +7,7 @@ import { renderLogin, renderRegister, renderForcedMfa, renderForcedPassword } fr
 import { renderCrud } from './pages/crud';
 import { PAGES, renderPayslipView } from './pages/registry';
 import { closeMenus, closeNotifications, headerMenus } from './header';
+import { icon, menuIcon } from './icons';
 import { applyTheme, watchSystemTheme } from './theme';
 
 applyTheme();
@@ -57,22 +58,27 @@ function renderSignedOut(policy: AuthPolicy): void {
 function renderShell(): void {
   const meta = state.meta as MetaResponse;
   const nav = h('nav', { class: 'sidebar', 'aria-label': 'เมนูหลัก' },
-    h('div', { class: 'brand' }, h('span', { class: 'brand-mark' }, 'HR'), h('span', null, meta.appName)),
+    h('div', { class: 'brand' },
+      h('img', { class: 'brand-logo', src: '/assets/siamhrbp-logo.png', srcset: '/assets/siamhrbp-logo.png 1x, /assets/siamhrbp-logo@2x.png 2x', width: 254, height: 128, alt: 'โลโก้ SIAM HRBP' }),
+      h('span', { class: 'brand-name' }, meta.appName)),
     MENU_GROUPS.map((g) => {
       const items = meta.menu.filter((m) => m.group === g.key);
       if (!items.length) return null;
-      return h('div', { class: 'nav-group' }, h('div', { class: 'nav-group-title' }, g.title), items.map((i) => link(i.path, i.title, { class: 'nav-item', 'data-path': i.path })));
+      return h('div', { class: 'nav-group' }, h('div', { class: 'nav-group-title' }, g.title),
+        items.map((i) => link(i.path, [menuIcon(i.key), h('span', null, i.title)], { class: 'nav-item', 'data-path': i.path })));
     }),
   );
-  const bell = h('button', { class: 'icon-btn bell', 'aria-label': 'การแจ้งเตือน', onclick: () => void openNotifications() }, '🔔', h('span', { class: 'badge', id: 'bell-count', hidden: true }));
-  const menuToggle = h('button', { class: 'icon-btn menu-toggle', 'aria-label': 'เปิด/ปิดเมนู', onclick: () => { closeMenus(); closeNotifications(); document.body.classList.toggle('nav-open'); } }, '☰');
+  const bell = h('button', { class: 'icon-btn bell', 'aria-label': 'การแจ้งเตือน', onclick: () => void openNotifications() }, icon('bell'), h('span', { class: 'badge', id: 'bell-count', hidden: true }));
+  const menuToggle = h('button', { class: 'icon-btn menu-toggle', 'aria-label': 'เปิด/ปิดเมนู', onclick: () => { closeMenus(); closeNotifications(); document.body.classList.toggle('nav-open'); } }, icon('menu'));
   const main = h('main', { id: 'main', tabindex: '-1' });
+  // keyboard users jump past the menu; focus moves directly (a #main hash would trigger the router's popstate)
+  const skip = h('a', { class: 'skip-link no-print', href: '#main', onclick: (e: Event) => { e.preventDefault(); main.focus(); } }, 'ข้ามไปยังเนื้อหาหลัก');
   // mobile: the open menu covers the toggle, so a scrim (tap outside) and Escape close it
   const scrim = h('div', { class: 'nav-scrim', 'aria-hidden': 'true', onclick: () => document.body.classList.remove('nav-open') });
   document.addEventListener('keydown', (e) => {
     if (e.key === 'Escape') document.body.classList.remove('nav-open');
   });
-  mount(root, h('div', { class: 'shell' }, nav, scrim, h('div', { class: 'content' }, h('header', { class: 'topbar' }, menuToggle, h('h1', { id: 'page-title' }, ''), h('div', { class: 'topbar-actions' }, headerMenus(meta, bell, () => void logout()))), main)));
+  mount(root, skip, h('div', { class: 'shell' }, nav, scrim, h('div', { class: 'content' }, h('header', { class: 'topbar' }, menuToggle, h('h1', { id: 'page-title' }, ''), h('div', { class: 'topbar-actions' }, headerMenus(meta, bell, () => void logout()))), main)));
   setRouteRenderer(() => renderRoute(main));
   window.onpopstate = () => renderRoute(main);
   if (['/', '/login', '/register'].includes(currentPath())) navigate(meta.menu[0]?.path ?? '/help', true);
@@ -126,7 +132,12 @@ function renderRoute(main: HTMLElement): void {
   closeNotifications();
   const path = currentPath();
   const params = new URLSearchParams(location.search);
-  for (const a of document.querySelectorAll<HTMLAnchorElement>('.nav-item')) a.classList.toggle('active', a.dataset.path === path);
+  for (const a of document.querySelectorAll<HTMLAnchorElement>('.nav-item')) {
+    const active = a.dataset.path === path;
+    a.classList.toggle('active', active);
+    if (active) a.setAttribute('aria-current', 'page');
+    else a.removeAttribute('aria-current');
+  }
 
   const slip = /^\/(my\/payslips|payroll\/payslips)\/(\d+)$/.exec(path);
   if (slip) {

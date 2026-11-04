@@ -7,7 +7,7 @@
 | API | [Hono](https://hono.dev) บน Cloudflare Workers (TypeScript) |
 | ฐานข้อมูล | Cloudflare D1 (SQLite) — migrations ใน `migrations/` |
 | หน้าเว็บ | SPA เขียนด้วย TypeScript ล้วน (ไม่มี framework) bundle ด้วย esbuild → `public/assets/app.js` |
-| ทดสอบ | Vitest — unit tests และ integration tests ที่รัน `wrangler dev` กับ D1 ภายในเครื่องจริง |
+| ทดสอบ | Vitest — unit tests และ integration tests ที่รัน `wrangler dev` กับ D1 ภายในเครื่องจริง · Browser tests (Playwright / `playwright-core`) ใน `tests/ui/` |
 
 ## โครงสร้างโปรเจกต์
 
@@ -28,7 +28,7 @@ src/
 migrations/        D1 schema + reference data
 seeds/demo.sql     ข้อมูลตัวอย่าง (สมมุติ) สำหรับทดลอง/ทดสอบ — ไม่ถูกใช้ใน production โดยอัตโนมัติ
 scripts/           build SPA, สร้างผู้ใช้ (รหัสผ่านสุ่ม ไม่พิมพ์ออกหน้าจอ)
-tests/             unit + integration
+tests/             unit + integration (Vitest) · ui/ = browser tests (ดู tests/ui/README.md)
 ```
 
 ## โมดูล
@@ -49,7 +49,7 @@ tests/             unit + integration
 - **Payroll**: ผู้อนุมัติต้องไม่ใช่ผู้คำนวณ (ตั้งค่าได้) อัตราประกันสังคม/ฐานค่าจ้างปรับได้ในหน้า ตั้งค่าระบบ
 - **ความปลอดภัย**: รหัสผ่าน PBKDF2-SHA256 (100k), session token เก็บเป็น SHA-256 ใน D1 และ cookie HttpOnly/SameSite=Strict, CSRF header, ล็อกบัญชีตามนโยบาย, MFA (TOTP) บังคับสำหรับบทบาทสิทธิ์สูงตามค่าตั้ง (ข้อความหน้า Login มาจากค่าตั้งจริง), secret TOTP เข้ารหัส AES-GCM, ข้อมูลอ่อนไหว (เงินเดือน บัญชีธนาคาร เลขภาษี) ถูกปิดบังหากไม่มีสิทธิ์ `*.sensitive`, CSP เข้มงวด
 - **กองทุนสงเคราะห์ลูกจ้าง (EWF)**: ตั้งค่าที่ ตั้งค่าระบบ → การ์ด "กองทุนสงเคราะห์ลูกจ้าง" (สถานะ, วันที่มีผล, อัตราพนักงาน/นายจ้าง, อัตราหลังวันที่เปลี่ยน, เพดานค่าจ้าง, เงื่อนไขการเข้าเกณฑ์) — Payroll Engine ไม่มีอัตรากฎหมายฝังในโค้ด อ่านค่าจาก Settings ทั้งหมด และเลือกอัตราตาม *วันจ่าย* ของงวด เงินสะสมพนักงานเป็นรายการหักในสลิป ส่วนเงินสมทบนายจ้างเก็บแยก (`payslips.ewf_employer`) ไม่หักจากเงินสุทธิและไม่แสดงในสลิปของพนักงาน งวดที่อนุมัติ/เผยแพร่แล้วไม่ถูกคำนวณใหม่
-- **แถบด้านบน (Header)**: 🏢 เลือกบริษัท · 🔔 การแจ้งเตือน · ⚙️ ธีม · บัญชีผู้ใช้ — dropdown เปิดได้ครั้งละหนึ่งตัว ปิดเมื่อคลิกภายนอกหรือกด Escape และใช้ลูกศรเลื่อนได้
+- **แถบด้านบน (Header)**: เลือกบริษัท · การแจ้งเตือน · ธีม · บัญชีผู้ใช้ (ไอคอน SVG ใน `src/web/icons.ts`) — dropdown เปิดได้ครั้งละหนึ่งตัว ปิดเมื่อคลิกภายนอกหรือกด Escape และใช้ลูกศรเลื่อนได้
   - **บริษัท**: รายชื่อมาจากตาราง `companies` (เฉพาะที่ active) ตามขอบเขตจริงของผู้ใช้ — บทบาทที่มี `employees.all` เห็นทุกบริษัท (+ "ทุกบริษัท") ผู้ใช้อื่นเห็นเฉพาะบริษัทต้นสังกัดของข้อมูลพนักงานที่ผูกไว้ บริษัทที่เลือกใช้กรอง Executive Dashboard (`/api/dashboard?company=<id>`) ซึ่ง API ตรวจขอบเขตทุกครั้ง (นอกขอบเขต = 403) ตัวเลขที่ไม่ผูกกับบริษัทในโครงสร้างข้อมูล (สรรหา อบรม งวดเงินเดือน) ระบุว่า "ทุกบริษัท" ส่วนหน้าอื่นแสดงข้อมูลตามสิทธิ์ของบทบาทเช่นเดิม
   - **ธีม**: สว่าง / มืด / อัตโนมัติ (`prefers-color-scheme`) บันทึกใน `localStorage` ของเบราว์เซอร์ (ระบบไม่มีตาราง preference ของผู้ใช้) และใช้ก่อนวาดหน้าจอผ่าน `public/assets/theme-init.js` — การพิมพ์ใช้โทนสว่างเสมอ
   - **บัญชีผู้ใช้**: ชื่อ อีเมล Badge บทบาทจริง ขอบเขตบริษัท และลิงก์ โปรไฟล์ของฉัน (ESS) · ความปลอดภัย & MFA · คู่มือ · ออกจากระบบ
@@ -84,7 +84,12 @@ npm run typecheck   # tsc: worker, web, tests
 npm run lint        # eslint
 npm run build       # bundle SPA + wrangler deploy --dry-run
 npm test            # unit + integration (สร้าง D1 ชั่วคราวและรัน wrangler dev อัตโนมัติ)
+npm run test:ui     # browser tests ทีละชุด (Chromium; สร้าง D1 + wrangler dev ภายในเครื่องเอง)
 ```
+
+Browser tests ไม่แตะฐานข้อมูลจริง: ทุกชุดสร้าง D1 ชั่วคราวใน `.tmp/` ผู้ใช้ทดสอบรหัสผ่านสุ่ม และหยุด server เมื่อจบ
+การเปรียบเทียบภาพกับ baseline (`npm run test:ui:baseline -- <git-ref>` แล้ว `npm run test:ui -- --baseline <dir>`)
+วิธีรันใน Local / CI และรายละเอียดแต่ละชุดอยู่ที่ [tests/ui/README.md](tests/ui/README.md)
 
 ## Deploy (Cloudflare)
 

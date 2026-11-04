@@ -3,6 +3,7 @@ import type { CompanyOption, MetaResponse } from '../shared/types';
 import { h, mount, toast, type Child } from './dom';
 import { link, refreshRoute, state } from './app';
 import { resolvedTheme, setThemePref, themePref, type ThemePref } from './theme';
+import { icon, type IconName } from './icons';
 
 // ---- dropdown primitive: one menu open at a time, outside click / Escape close, arrow-key navigation ----
 
@@ -101,15 +102,17 @@ function dropdown(opts: { id: string; label: () => string; className: string; bu
   return { el: wrap, refresh };
 }
 
-const radio = (checked: boolean, icon: string, label: string, sub: string | null, onSelect: () => void) =>
+const radio = (checked: boolean, ico: IconName, label: string, sub: string | null, onSelect: () => void) =>
   h('button', { type: 'button', role: 'menuitemradio', 'aria-checked': String(checked), tabindex: '-1', class: 'dd-item', onclick: onSelect },
-    h('span', { class: 'dd-ico', 'aria-hidden': 'true' }, icon),
+    h('span', { class: 'dd-ico', 'aria-hidden': 'true' }, icon(ico)),
     h('span', { class: 'dd-text' }, h('span', null, label), sub ? h('small', null, sub) : null),
-    h('span', { class: 'dd-check', 'aria-hidden': 'true' }, checked ? '✓' : ''));
+    h('span', { class: 'dd-check', 'aria-hidden': 'true' }, checked ? icon('check') : ''));
 
-const menuLink = (path: string, icon: string, label: string, sub: string | null) =>
-  link(path, [h('span', { class: 'dd-ico', 'aria-hidden': 'true' }, icon), h('span', { class: 'dd-text' }, h('span', null, label), sub ? h('small', null, sub) : null)],
+const menuLink = (path: string, ico: IconName, label: string, sub: string | null) =>
+  link(path, [h('span', { class: 'dd-ico', 'aria-hidden': 'true' }, icon(ico)), h('span', { class: 'dd-text' }, h('span', null, label), sub ? h('small', null, sub) : null)],
     { role: 'menuitem', tabindex: '-1', class: 'dd-item' });
+
+const caret = () => h('span', { class: 'caret', 'aria-hidden': 'true' }, icon('chevronDown'));
 
 const divider = () => h('div', { class: 'dd-sep', role: 'separator' });
 
@@ -157,7 +160,7 @@ function companyMenu(meta: MetaResponse) {
     id: 'company-menu',
     className: 'company-btn',
     label: () => `บริษัท: ${companyLabel(meta)}`,
-    button: () => [h('span', { class: 'hdr-ico', 'aria-hidden': 'true' }, '🏢'), h('span', { class: 'hdr-label' }, companyLabel(meta)), h('span', { class: 'caret', 'aria-hidden': 'true' }, '▾')],
+    button: () => [h('span', { class: 'hdr-ico', 'aria-hidden': 'true' }, icon('building')), h('span', { class: 'hdr-label' }, companyLabel(meta)), caret()],
     panel: (close) => {
       const select = (id: number | null) => {
         close();
@@ -176,10 +179,10 @@ function companyMenu(meta: MetaResponse) {
       const sub = (c: CompanyOption) => (c.id === ownCompanyId ? `${c.code} · บริษัทต้นสังกัด` : c.code);
       return [
         h('div', { class: 'dd-head' }, h('strong', null, 'เลือกบริษัท'), h('small', null, scopeSummary(meta))),
-        scope === 'all' && items.length ? radio(state.companyId === null, '🌐', 'ทุกบริษัท', `${items.length} บริษัทที่เข้าถึงได้`, () => select(null)) : null,
-        items.map((c) => radio(state.companyId === c.id, '🏢', c.name, sub(c), () => select(c.id))),
+        scope === 'all' && items.length ? radio(state.companyId === null, 'globe', 'ทุกบริษัท', `${items.length} บริษัทที่เข้าถึงได้`, () => select(null)) : null,
+        items.map((c) => radio(state.companyId === c.id, 'building', c.name, sub(c), () => select(c.id))),
         !items.length ? h('div', { class: 'dd-note' }, scope === 'all' ? 'ยังไม่มีข้อมูลบริษัทในระบบ' : 'บัญชีนี้ยังไม่ได้ผูกกับข้อมูลพนักงาน จึงไม่มีบริษัทให้เลือก') : null,
-        !items.length && canSetup ? menuLink('/setup/companies', '⚙️', 'ตั้งค่าข้อมูลบริษัท', null) : null,
+        !items.length && canSetup ? menuLink('/setup/companies', 'settings', 'ตั้งค่าข้อมูลบริษัท', null) : null,
         scope === 'own' ? h('div', { class: 'dd-note' }, 'บัญชีนี้เข้าถึงได้เฉพาะบริษัทต้นสังกัด') : null,
         items.length ? [divider(), h('div', { class: 'dd-note' }, 'บริษัทที่เลือกใช้กรองข้อมูลใน Executive Dashboard · หน้าอื่นแสดงข้อมูลตามสิทธิ์ของบทบาท')] : null,
       ];
@@ -190,10 +193,10 @@ function companyMenu(meta: MetaResponse) {
 
 // ---- theme ---------------------------------------------------------------------------------
 
-const THEMES: Array<{ value: ThemePref; icon: string; label: string }> = [
-  { value: 'light', icon: '☀️', label: 'สว่าง' },
-  { value: 'dark', icon: '🌙', label: 'มืด' },
-  { value: 'auto', icon: '◐', label: 'อัตโนมัติ' },
+const THEMES: Array<{ value: ThemePref; icon: IconName; label: string }> = [
+  { value: 'light', icon: 'sun', label: 'สว่าง' },
+  { value: 'dark', icon: 'moon', label: 'มืด' },
+  { value: 'auto', icon: 'monitor', label: 'อัตโนมัติ' },
 ];
 
 function themeMenu() {
@@ -201,7 +204,8 @@ function themeMenu() {
     id: 'theme-menu',
     className: 'icon-only',
     label: () => `ธีม: ${THEMES.find((t) => t.value === themePref())?.label ?? ''}`,
-    button: () => h('span', { 'aria-hidden': 'true' }, '⚙️'),
+    // the button shows the chosen theme (sun / moon / monitor); refreshed after every change
+    button: () => h('span', { 'aria-hidden': 'true' }, icon(THEMES.find((t) => t.value === themePref())?.icon ?? 'monitor')),
     panel: (close) => [
       h('div', { class: 'dd-head' }, h('strong', null, 'ธีมการแสดงผล'), h('small', null, 'บันทึกไว้ในเบราว์เซอร์นี้')),
       THEMES.map((t) => radio(themePref() === t.value, t.icon, t.label, t.value === 'auto' ? `ตามระบบ (ตอนนี้: ${resolvedTheme('auto') === 'dark' ? 'มืด' : 'สว่าง'})` : null, () => {
@@ -227,21 +231,21 @@ function userMenu(meta: MetaResponse, onLogout: () => void) {
     id: 'user-menu',
     className: 'avatar-btn',
     label: () => `บัญชีผู้ใช้: ${me.displayName}`,
-    button: () => [h('span', { class: 'avatar', 'aria-hidden': 'true' }, initial(me.displayName)), h('span', { class: 'caret', 'aria-hidden': 'true' }, '▾')],
+    button: () => [h('span', { class: 'avatar', 'aria-hidden': 'true' }, initial(me.displayName)), caret()],
     panel: () => [
       h('div', { class: 'dd-profile' },
         h('span', { class: 'avatar lg', 'aria-hidden': 'true' }, initial(me.displayName)),
         h('div', { class: 'dd-who' }, h('strong', null, me.displayName), h('small', null, profile.email ?? `@${me.username}`))),
       h('div', { class: 'dd-badges' },
         profile.roles.length ? profile.roles.map((r) => h('span', { class: 'role-badge' }, `Role: ${r.name}`)) : h('span', { class: 'role-badge muted' }, 'Role: -'),
-        h('span', { class: 'scope-badge' }, `🏢 ${scopeSummary(meta)}`)),
+        h('span', { class: 'scope-badge' }, icon('building'), ` ${scopeSummary(meta)}`)),
       divider(),
-      can('/ess') ? menuLink('/ess', '👤', 'โปรไฟล์ของฉัน', 'ข้อมูลพนักงาน · ESS') : null,
-      can('/security') ? menuLink('/security', '🛡️', 'ความปลอดภัย & MFA', me.mfaEnabled ? 'MFA เปิดใช้งานแล้ว' : 'ยังไม่ได้เปิด MFA') : null,
-      can('/help') ? menuLink('/help', '📘', 'คู่มือการใช้งาน', null) : null,
+      can('/ess') ? menuLink('/ess', 'user', 'โปรไฟล์ของฉัน', 'ข้อมูลพนักงาน · ESS') : null,
+      can('/security') ? menuLink('/security', 'shield', 'ความปลอดภัย & MFA', me.mfaEnabled ? 'MFA เปิดใช้งานแล้ว' : 'ยังไม่ได้เปิด MFA') : null,
+      can('/help') ? menuLink('/help', 'book', 'คู่มือการใช้งาน', null) : null,
       divider(),
       h('button', { type: 'button', role: 'menuitem', tabindex: '-1', class: 'dd-item danger', onclick: onLogout },
-        h('span', { class: 'dd-ico', 'aria-hidden': 'true' }, '🚪'), h('span', { class: 'dd-text' }, h('span', null, 'ออกจากระบบ'))),
+        h('span', { class: 'dd-ico', 'aria-hidden': 'true' }, icon('logout')), h('span', { class: 'dd-text' }, h('span', null, 'ออกจากระบบ'))),
     ],
   }).el;
 }

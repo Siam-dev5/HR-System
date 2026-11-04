@@ -28,4 +28,15 @@ export default tseslint.config(
     files: ['scripts/**/*.mjs', 'eslint.config.js'],
     languageOptions: { globals: { console: 'readonly', process: 'readonly', Buffer: 'readonly', TextEncoder: 'readonly' } },
   },
+  {
+    // browser suites: Node code plus callbacks that Playwright runs inside the page (page.evaluate / waitForFunction)
+    files: ['tests/ui/**/*.mjs'],
+    languageOptions: {
+      globals: {
+        console: 'readonly', process: 'readonly', Buffer: 'readonly', fetch: 'readonly', URL: 'readonly', URLSearchParams: 'readonly', setTimeout: 'readonly',
+        document: 'readonly', window: 'readonly', location: 'readonly', localStorage: 'readonly', getComputedStyle: 'readonly', matchMedia: 'readonly',
+        innerWidth: 'readonly', innerHeight: 'readonly', scrollX: 'readonly', scrollY: 'readonly', HTMLElement: 'readonly', Image: 'readonly', OffscreenCanvas: 'readonly', createImageBitmap: 'readonly',
+      },
+    },
+  },
 );
