@@ -1,6 +1,6 @@
 # Final Execution Report — Siam HRBP HR System UI Redesign (Phase D finalized)
 
-**Status: Phase D finalized and verified locally: all suites pass (1,083 / 0). Not committed, not deployed. Phase E not started.**
+**Status: Phase D finalized and verified (1,083 / 0). Committed as `dca8701` and pushed to `origin/ui-redesign`. NOT deployed: the deploy is blocked because this branch needs migration 0007, which is not on production, and D1 credentials are missing (see `reports/PHASE-D-PRODUCTION-RELEASE.md`). Phase E not started.**
 
 ## 1. Project and branch
 
@@ -8,7 +8,7 @@
 |---|---|
 | Repository | `D:\Programe Files\HR-3-in-1` (remote `Siam-dev5/HR-System`) |
 | Branch | `ui-redesign` (local) |
-| Commit before / after | `9f6748e` / `9f6748e`: **nothing committed**; all work is in the working tree |
+| Commit before / after | `9f6748e` / `dca8701` (Phase D), pushed to `origin/ui-redesign` |
 | Relation to `main` | `main` = `eb1fc11`, an ancestor; `ui-redesign` = `main` + 3 reviewed release commits + this uncommitted UI work |
 
 ## 2. Work completed
