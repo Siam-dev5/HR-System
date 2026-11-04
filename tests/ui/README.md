@@ -16,6 +16,8 @@ Nothing touches a remote database or production. `ui-footer` refuses any non-loc
 | `ui-footer` | Fixed solid footer on every layout, nothing hidden behind it, LINE link, EWF card |
 | `ui-workstreams` | Feishu import (synthetic fixtures), OT review, payroll preview and export, payslip YTD, org design, RBAC |
 | `ui-period-admin` | Super Admin payroll-period management with step-up MFA |
+| `ui-org` | Organization chart: employee photos (private API, initials fallback, broken photo, self-contained SVG export), floating zoom toolbar (zoom, wheel, drag-pan, fit, reset, expand / collapse all), node expand / collapse, department chips (API counts, cross-department context, no double counting), search + filter, reports-to loop, multi-company, 1440 / 1024 / 768 / 375, light / dark, keyboard, read-only (fails on any write to `/api/org-design`) |
+| `ui-avatar` | Employee photo in the employee form: initials fallback, pick → preview → upload with progress → replace → remove (confirmed), client-side rejection, view-only users without controls, org chart picks up the photo, light / dark, 1440 / 768 / 375 |
 | `ui-c3` | Sign-in screens (logo, overflow, hooks, stacking); **page content** vs a baseline (shell hidden) |
 | `ui-d` | App shell: sidebar, header, footer, drawer, skip link, focus, contrast, reduced motion, print, 2× logo; content and sign-in screens vs a baseline |
 | `ui-design-shots` | Screenshot harness for design review (no assertions) |

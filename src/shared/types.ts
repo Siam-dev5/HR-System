@@ -432,6 +432,8 @@ export interface OrgEmployeeNode {
   status: string;
   hire_date: string;
   email: string | null;
+  /** photo version (changes with every upload), null = no photo; bytes come from /api/employees/:id/avatar */
+  avatar: string | null;
 }
 
 export interface OrgPositionRow {

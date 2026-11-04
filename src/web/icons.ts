@@ -42,6 +42,13 @@ const PATHS = {
   globe: 'M12 22a10 10 0 1 0 0-20 10 10 0 0 0 0 20zM2 12h20M12 2a15.3 15.3 0 0 1 4 10 15.3 15.3 0 0 1-4 10 15.3 15.3 0 0 1-4-10 15.3 15.3 0 0 1 4-10z',
   logout: 'M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4M16 17l5-5-5-5M21 12H9',
   dot: 'M12 15a3 3 0 1 0 0-6 3 3 0 0 0 0 6z',
+  // organization chart controls
+  plus: 'M12 5v14M5 12h14',
+  minus: 'M5 12h14',
+  fitScreen: 'M8 3H5a2 2 0 0 0-2 2v3M21 8V5a2 2 0 0 0-2-2h-3M3 16v3a2 2 0 0 0 2 2h3M16 21h3a2 2 0 0 0 2-2v-3',
+  expandAll: 'M7 15l5 5 5-5M7 9l5-5 5 5',
+  collapseAll: 'M7 20l5-5 5 5M7 4l5 5 5-5',
+  locate: 'M12 2v3M12 19v3M2 12h3M19 12h3M12 17a5 5 0 1 0 0-10 5 5 0 0 0 0 10z',
 } as const;
 
 export type IconName = keyof typeof PATHS;

@@ -11,6 +11,7 @@ import { payrollRoutes, payslipRoutes } from './routes/payroll';
 import { adminRoutes } from './routes/admin';
 import { attendanceRoutes } from './routes/attendance';
 import { orgRoutes } from './routes/org';
+import { avatarRoutes } from './routes/avatars';
 
 const app = new Hono<AppEnv>();
 
@@ -24,7 +25,8 @@ app.use('/api/*', async (c, next) => {
     }
   }
   await next();
-  c.header('cache-control', 'no-store');
+  // every API response is uncacheable; a handler may only tighten this (the avatar image sends "private, no-store")
+  if (!c.res.headers.get('cache-control')?.includes('no-store')) c.header('cache-control', 'no-store');
   c.header('x-content-type-options', 'nosniff');
   c.header('referrer-policy', 'same-origin');
   c.header('x-frame-options', 'DENY');
@@ -45,6 +47,7 @@ app.route('/api/payroll', payrollRoutes);
 app.route('/api/admin', adminRoutes);
 app.route('/api/attendance', attendanceRoutes);
 app.route('/api/org-design', orgRoutes);
+app.route('/api/employees', avatarRoutes);
 app.route('/api', payslipRoutes);
 app.route('/api', overviewRoutes);
 
