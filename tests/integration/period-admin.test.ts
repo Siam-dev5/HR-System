@@ -12,18 +12,31 @@ const admin = () => c.admin as Client;
 const payroll = () => c.payroll as Client;
 const hrAdmin = () => c.hrAdmin as Client;
 
-// step-up codes are single-use per action + period: pick a time step (current ± 1) not used yet for that key
+// step-up codes are single-use per user (whatever the operation): a pool of synthetic Super Admins, each with its own
+// TOTP secret, lets the suite run several step-up operations within one 30-second step. Key = admin + time step.
+const SA_PASSWORD = 'Super-Admin-Pass-2026!';
+const admins: Client[] = [];
 const used = new Set<string>();
-async function mfa(action: string, id: number): Promise<string> {
-  const now = Math.floor(Date.now() / 30_000);
-  for (const s of [0, 1, -1]) {
-    const key = `${action}:${id}:${now + s}`;
-    if (!used.has(key)) {
-      used.add(key);
-      return totpCode(admin().totpSecret as string, (now + s) * 30_000 + 15_000);
+async function stepUp(only?: Client): Promise<{ who: Client; totp: string }> {
+  for (;;) {
+    const now = Math.floor(Date.now() / 30_000);
+    for (const [i, who] of admins.entries()) {
+      if (only && who !== only) continue;
+      for (const s of [0, 1, -1]) {
+        const key = `${i}:${now + s}`;
+        if (!used.has(key)) {
+          used.add(key);
+          return { who, totp: await totpCode(who.totpSecret as string, (now + s) * 30_000 + 15_000) };
+        }
+      }
     }
+    await new Promise((r) => setTimeout(r, 1000));
   }
-  throw new Error(`no unused TOTP step left for ${action}:${id}`);
+}
+/** One step-up request, sent as the next Super Admin that has an unused code. */
+async function asAdmin<T>(send: (who: Client, totp: string) => Promise<T>): Promise<T> {
+  const { who, totp } = await stepUp();
+  return send(who, totp);
 }
 const one = (sql: string) => H.sql(sql)[0] as Record<string, any>;
 const status = (id: number) => one(`SELECT status, reopened_from, calc_version, code, deleted_at FROM payroll_periods WHERE id = ${id}`);
@@ -45,7 +58,24 @@ beforeAll(async () => {
   await hrAdmin().login('it_hradmin', u.body.temporaryPassword);
   expect((await hrAdmin().post('/api/auth/change-password', { currentPassword: u.body.temporaryPassword, newPassword: 'Hr-Admin-Pass-2026!' })).status).toBe(200);
   expect((await hrAdmin().get('/api/meta')).status).toBe(200);
+  // Super Admin pool for step-up codes (it_admin + it_sa2..it_sa12) and an employee login for ZP1
+  admins.push(admin());
+  for (const n of [2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12]) {
+    const sa = await admin().post('/api/admin/users', { username: `it_sa${n}`, displayName: `it_sa${n}`, roles: ['super_admin'] });
+    expect(sa.status, sa.text).toBe(201);
+    const who = new Client(H.baseUrl);
+    await who.login(`it_sa${n}`, sa.body.temporaryPassword);
+    expect((await who.post('/api/auth/change-password', { currentPassword: sa.body.temporaryPassword, newPassword: SA_PASSWORD })).status).toBe(200);
+    admins.push(who);
+  }
+  const e = await admin().post('/api/admin/users', { username: 'it_zp1', displayName: 'it_zp1', roles: ['employee'] });
+  expect(e.status, e.text).toBe(201);
+  c.zp1 = new Client(H.baseUrl);
+  await c.zp1.login('it_zp1', e.body.temporaryPassword);
+  expect((await c.zp1.post('/api/auth/change-password', { currentPassword: e.body.temporaryPassword, newPassword: 'Zp1-Employee-Pass-2026!' })).status).toBe(200);
 });
+const zp1 = () => c.zp1 as Client;
+const notified = () => Number(one("SELECT COUNT(*) AS n FROM notifications WHERE user_id = (SELECT id FROM users WHERE username = 'it_zp1') AND link LIKE '/my/payslips/%'").n);
 afterAll(async () => {
   await H?.stop();
 });
@@ -59,6 +89,7 @@ describe('setup (synthetic company ZZP)', () => {
       admin().post('/api/m/employees', { emp_code: code, first_name: 'zz_test', last_name: code, company_id: ids.co, hire_date: hire, employment_type: 'permanent', status: 'active', base_salary: 30000, ...x });
     expect((await emp('ZP1', '2020-01-01')).status).toBe(201);
     expect((await emp('ZP2', '2026-09-01', { employment_type: 'probation', status: 'probation' })).status).toBe(201);
+    H.sql("UPDATE employees SET user_id = (SELECT id FROM users WHERE username = 'it_zp1') WHERE emp_code = 'ZP1'");
     const mk = async (code: string, kind: string, start: string, end: string, pay: string) => {
       const r = await payroll().post('/api/payroll/periods', { company_id: ids.co, code, name: `zz ${code}`, kind, start_date: start, end_date: end, pay_date: pay });
       expect(r.status, r.text).toBe(201);
@@ -73,6 +104,8 @@ describe('setup (synthetic company ZZP)', () => {
     expect((await payroll().post(`/api/payroll/periods/${ids.a}/publish`)).status).toBe(200);
     expect(status(ids.a!).status).toBe('published');
     expect(slipStats(ids.a!)).toMatchObject({ n: 2, pub: 2 });
+    expect((await zp1().get('/api/my/payslips')).body.rows).toHaveLength(1);
+    expect(notified()).toBe(1);
   });
 });
 
@@ -117,8 +150,8 @@ describe('reopen a closed (published) period', () => {
   it('requires reason, the exact period code and a valid step-up MFA code', async () => {
     const before = JSON.stringify([status(ids.a!), slipStats(ids.a!), archived(ids.a!)]);
     const url = `/api/payroll/periods/${ids.a}/reopen-closed`;
-    expect((await admin().post(url, { confirm_code: 'ZP-2026-09', totp: await mfa('x', 0) })).status).toBe(400); // no reason
-    expect((await admin().post(url, { reason: 'แก้ยอดผิด', confirm_code: 'ZP-2026-0', totp: await mfa('x', 1) })).status).toBe(400); // wrong code
+    expect((await asAdmin((who, totp) => who.post(url, { confirm_code: 'ZP-2026-09', totp }))).status).toBe(400); // no reason
+    expect((await asAdmin((who, totp) => who.post(url, { reason: 'แก้ยอดผิด', confirm_code: 'ZP-2026-0', totp }))).status).toBe(400); // wrong code
     const noMfa = await admin().post(url, { reason: 'แก้ยอดผิด', confirm_code: 'ZP-2026-09' });
     expect([noMfa.status, noMfa.body.error.code]).toEqual([403, 'mfa_step_up_required']);
     const bad = await admin().post(url, { reason: 'แก้ยอดผิด', confirm_code: 'ZP-2026-09', totp: '123456' });
@@ -128,7 +161,7 @@ describe('reopen a closed (published) period', () => {
 
   it('archive integrity failure rolls the whole operation back', async () => {
     H.sql("CREATE TRIGGER zz_corrupt_archive AFTER INSERT ON payslip_archive BEGIN UPDATE payslip_archive SET net = net + 1 WHERE id = NEW.id; END;");
-    const r = await admin().post(`/api/payroll/periods/${ids.a}/reopen-closed`, { reason: 'ทดสอบ integrity', confirm_code: 'ZP-2026-09', totp: await mfa('period.reopen', ids.a!) });
+    const r = await asAdmin((who, totp) => who.post(`/api/payroll/periods/${ids.a}/reopen-closed`, { reason: 'ทดสอบ integrity', confirm_code: 'ZP-2026-09', totp }));
     H.sql('DROP TRIGGER zz_corrupt_archive;');
     expect(r.status).toBe(500);
     expect(status(ids.a!)).toMatchObject({ status: 'published', reopened_from: null });
@@ -140,8 +173,10 @@ describe('reopen a closed (published) period', () => {
   it('Super Admin reopens: published → calculated, payslips archived then unpublished (kept), nothing recalculated', async () => {
     const before = slipStats(ids.a!);
     const v = status(ids.a!).calc_version;
-    const totp = await mfa('period.reopen', ids.a!);
-    const r = await admin().post(`/api/payroll/periods/${ids.a}/reopen-closed`, { reason: 'HR ขอแก้ไขยอด OT', confirm_code: 'ZP-2026-09', totp });
+    const slipId = Number(one(`SELECT s.id FROM payslips s JOIN employees e ON e.id = s.employee_id WHERE s.period_id = ${ids.a} AND e.emp_code = 'ZP1'`).id);
+    expect((await zp1().get(`/api/payslips/${slipId}`)).status).toBe(200);
+    const { who, totp } = await stepUp();
+    const r = await who.post(`/api/payroll/periods/${ids.a}/reopen-closed`, { reason: 'HR ขอแก้ไขยอด OT', confirm_code: 'ZP-2026-09', totp });
     expect(r.status, r.text).toBe(200);
     expect(status(ids.a!)).toMatchObject({ status: 'calculated', reopened_from: 'published', calc_version: v });
     expect(slipStats(ids.a!)).toMatchObject({ n: before.n, net: before.net, pub: 0 });
@@ -153,49 +188,70 @@ describe('reopen a closed (published) period', () => {
     expect(d).toMatchObject({ from: 'published', to: 'calculated', reason: 'HR ขอแก้ไขยอด OT', archivedSlips: 2, unpublished: 2 });
     expect(log!.user_id).toBeGreaterThan(0);
     expect(audits(ids.a!, 'payroll.published')).toHaveLength(1); // history kept
+    // the employee no longer sees the unpublished payslip, and YTD (HR view) leaves it out
+    expect((await zp1().get('/api/my/payslips')).body.rows).toHaveLength(0);
+    expect((await zp1().get(`/api/payslips/${slipId}`)).status).toBe(404);
+    const ytd = (await payroll().get(`/api/payslips/${slipId}`)).body.ytd;
+    expect(ytd).toMatchObject({ includesCurrent: false, employee: { slips: 0, gross: 0 } });
     // the same request again (same code) cannot act twice
-    const again = await admin().post(`/api/payroll/periods/${ids.a}/reopen-closed`, { reason: 'HR ขอแก้ไขยอด OT', confirm_code: 'ZP-2026-09', totp });
+    const again = await who.post(`/api/payroll/periods/${ids.a}/reopen-closed`, { reason: 'HR ขอแก้ไขยอด OT', confirm_code: 'ZP-2026-09', totp });
     expect(again.status).toBe(409);
     expect(archived(ids.a!)).toBe(2);
-  });
+  }, 60_000); // several direct D1 reads (each one a wrangler process)
 
   it('a reopened period is recalculated / reverted only by Super Admin with reason + MFA (archive first)', async () => {
     expect((await payroll().post(`/api/payroll/periods/${ids.a}/calculate`)).status).toBe(403);
     expect((await payroll().post(`/api/payroll/periods/${ids.a}/reopen`)).status).toBe(403);
     expect((await admin().post(`/api/payroll/periods/${ids.a}/calculate`, { reason: 'คำนวณใหม่' })).status).toBe(403);
     const v = status(ids.a!).calc_version;
-    const r = await admin().post(`/api/payroll/periods/${ids.a}/calculate`, { reason: 'คำนวณใหม่หลังแก้ OT', totp: await mfa('period.force_recalculate', ids.a!) });
+    const { who, totp } = await stepUp();
+    const r = await who.post(`/api/payroll/periods/${ids.a}/calculate`, { reason: 'คำนวณใหม่หลังแก้ OT', totp });
     expect(r.status, r.text).toBe(200);
     expect(status(ids.a!)).toMatchObject({ status: 'calculated', reopened_from: 'published', calc_version: v + 1 });
     expect(archived(ids.a!, 'recalculate')).toBe(2);
     expect(JSON.parse(audits(ids.a!, 'payroll.calculated').at(-1)!.details)).toMatchObject({ forced: true, reopenedFrom: 'published', reason: 'คำนวณใหม่หลังแก้ OT', archivedSlips: 2 });
     // approval (normal workflow, segregation of duties: not the Super Admin who recalculated) closes the reopened state
-    expect((await admin().post(`/api/payroll/periods/${ids.a}/approve`)).status).toBe(403);
+    expect((await who.post(`/api/payroll/periods/${ids.a}/approve`)).status).toBe(403);
     expect((await payroll().post(`/api/payroll/periods/${ids.a}/approve`)).status).toBe(200);
     expect(status(ids.a!)).toMatchObject({ status: 'approved', reopened_from: null });
     expect((await payroll().post(`/api/payroll/periods/${ids.a}/publish`)).status).toBe(200);
     expect((await payroll().post(`/api/payroll/periods/${ids.a}/publish`)).status).toBe(409); // duplicate publish
+    // recalculated payslips are new: announced once more; visible again with YTD
+    expect(notified()).toBe(2);
+    expect((await zp1().get('/api/my/payslips')).body.rows).toHaveLength(1);
+  });
+
+  it('re-publishing an unchanged reopened period sends no duplicate notification', async () => {
+    const r = await asAdmin((who, totp) => who.post(`/api/payroll/periods/${ids.a}/reopen-closed`, { reason: 'เปิดตรวจซ้ำ ไม่แก้ยอด', confirm_code: 'ZP-2026-09', totp }));
+    expect(r.status, r.text).toBe(200);
+    expect((await payroll().post(`/api/payroll/periods/${ids.a}/approve`)).status).toBe(200);
+    expect((await payroll().post(`/api/payroll/periods/${ids.a}/publish`)).status).toBe(200);
+    expect(notified()).toBe(2);
+    expect(JSON.parse(audits(ids.a!, 'payroll.published').at(-1)!.details)).toMatchObject({ notified: 0 });
+    expect(slipStats(ids.a!)).toMatchObject({ n: 2, pub: 2 });
+    const [mine] = (await zp1().get('/api/my/payslips')).body.rows;
+    expect((await zp1().get(`/api/payslips/${mine.id}`)).body.ytd).toMatchObject({ includesCurrent: true, employee: { slips: 1 } });
   });
 });
 
 describe('edit period information', () => {
   it('closed period: name / code only, payslips and snapshots untouched; calculation fields refused', async () => {
     const before = H.sql(`SELECT id, net, gross, calc_version, calc_json FROM payslips WHERE period_id = ${ids.a} ORDER BY id`);
-    const r = await admin().put(`/api/payroll/periods/${ids.a}`, { name: 'zz เงินเดือน ก.ย. (แก้ชื่อ)', code: 'ZP-2026-09A', reason: 'แก้ชื่องวดให้ตรงเอกสาร', totp: await mfa('period.edit', ids.a!) });
+    const r = await asAdmin((who, totp) => who.put(`/api/payroll/periods/${ids.a}`, { name: 'zz เงินเดือน ก.ย. (แก้ชื่อ)', code: 'ZP-2026-09A', reason: 'แก้ชื่องวดให้ตรงเอกสาร', totp }));
     expect(r.status, r.text).toBe(200);
     expect(status(ids.a!)).toMatchObject({ status: 'published', code: 'ZP-2026-09A' });
     expect(H.sql(`SELECT id, net, gross, calc_version, calc_json FROM payslips WHERE period_id = ${ids.a} ORDER BY id`)).toEqual(before);
     const d = JSON.parse(audits(ids.a!, 'payroll.period_edited')[0]!.details);
     expect(d.changes).toMatchObject({ code: { from: 'ZP-2026-09', to: 'ZP-2026-09A' } });
-    const dates = await admin().put(`/api/payroll/periods/${ids.a}`, { pay_date: '2026-09-29', reason: 'เลื่อนวันจ่าย', totp: await mfa('period.edit', ids.a!) });
+    const dates = await asAdmin((who, totp) => who.put(`/api/payroll/periods/${ids.a}`, { pay_date: '2026-09-29', reason: 'เลื่อนวันจ่าย', totp }));
     expect(dates.status).toBe(409);
     expect((await hrAdmin().put(`/api/payroll/periods/${ids.a}`, { name: 'x', reason: 'xxxxx' })).status).toBe(403);
   });
 
   it('empty draft: dates editable with the same overlap rules as creation', async () => {
-    const ok = await admin().put(`/api/payroll/periods/${ids.d}`, { start_date: '2026-12-27', reason: 'ปรับช่วงวันที่', totp: await mfa('period.edit', ids.d!) });
+    const ok = await asAdmin((who, totp) => who.put(`/api/payroll/periods/${ids.d}`, { start_date: '2026-12-27', reason: 'ปรับช่วงวันที่', totp }));
     expect(ok.status, ok.text).toBe(200);
-    const overlap = await admin().put(`/api/payroll/periods/${ids.d}`, { start_date: '2026-10-01', reason: 'ทดสอบซ้อน', totp: await mfa('period.edit', ids.d!) });
+    const overlap = await asAdmin((who, totp) => who.put(`/api/payroll/periods/${ids.d}`, { start_date: '2026-10-01', reason: 'ทดสอบซ้อน', totp }));
     expect(overlap.status).toBe(409);
   });
 });
@@ -206,24 +262,24 @@ describe('advance dependencies (mid-month ↔ month-end)', () => {
     expect((await admin().post(`/api/payroll/periods/${ids.mid}/approve`)).status).toBe(200);
     const imp = (await admin().get(`/api/payroll/periods/${ids.b}/impact`)).body;
     expect(imp.dependencies).toEqual([expect.objectContaining({ code: 'ZP-2026-10-M', relation: 'mid_month_round', status: 'approved' })]);
-    expect((await admin().post(`/api/payroll/periods/${ids.b}/delete`, { reason: 'ลองลบ', confirm_code: 'ZP-2026-10', totp: await mfa('period.delete', ids.b!) })).status).toBe(409);
-    expect((await admin().put(`/api/payroll/periods/${ids.b}`, { end_date: '2026-10-20', reason: 'ลองย่อ', totp: await mfa('period.edit', ids.b!) })).status).toBe(409);
+    expect((await asAdmin((who, totp) => who.post(`/api/payroll/periods/${ids.b}/delete`, { reason: 'ลองลบ', confirm_code: 'ZP-2026-10', totp }))).status).toBe(409);
+    expect((await asAdmin((who, totp) => who.put(`/api/payroll/periods/${ids.b}`, { end_date: '2026-10-20', reason: 'ลองย่อ', totp }))).status).toBe(409);
   });
 
   it('an advance round already deducted by a calculated month-end cannot be reopened', async () => {
     expect((await payroll().post(`/api/payroll/periods/${ids.b}/calculate`)).status).toBe(200);
     expect((await admin().post(`/api/payroll/periods/${ids.b}/approve`)).status).toBe(200);
-    const r = await admin().post(`/api/payroll/periods/${ids.mid}/reopen-closed`, { reason: 'ลองเปิดรอบกลางเดือน', confirm_code: 'ZP-2026-10-M', totp: await mfa('period.reopen', ids.mid!) });
+    const r = await asAdmin((who, totp) => who.post(`/api/payroll/periods/${ids.mid}/reopen-closed`, { reason: 'ลองเปิดรอบกลางเดือน', confirm_code: 'ZP-2026-10-M', totp }));
     expect(r.status).toBe(409);
     expect(status(ids.mid!).status).toBe('approved');
   });
 
   it('concurrent duplicate reopen requests: exactly one acts, archive written once', async () => {
     const n = slipStats(ids.b!).n;
-    const body = async () => ({ reason: 'เปิดงวดสิ้นเดือน ต.ค.', confirm_code: 'ZP-2026-10', totp: await mfa('period.reopen', ids.b!) });
-    const [b1, b2] = [await body(), await body()];
-    const rs = await Promise.all([admin().post(`/api/payroll/periods/${ids.b}/reopen-closed`, b1), admin().post(`/api/payroll/periods/${ids.b}/reopen-closed`, b2)]);
-    expect(rs.map((x) => x.status).sort()).toEqual([200, 409]);
+    const [s1, s2] = [await stepUp(), await stepUp()];
+    const send = (s: { who: Client; totp: string }) => s.who.post(`/api/payroll/periods/${ids.b}/reopen-closed`, { reason: 'เปิดงวดสิ้นเดือน ต.ค.', confirm_code: 'ZP-2026-10', totp: s.totp });
+    const rs = await Promise.all([send(s1), send(s2)]);
+    expect(rs.map((x) => x.status).sort(), rs.map((x) => x.text).join(' | ')).toEqual([200, 409]);
     expect(archived(ids.b!, 'reopen')).toBe(n);
     expect(audits(ids.b!, 'payroll.period_reopened_closed')).toHaveLength(1);
     expect(status(ids.mid!).status).toBe('approved'); // the paid round is untouched
@@ -233,34 +289,35 @@ describe('advance dependencies (mid-month ↔ month-end)', () => {
 describe('delete (soft, recoverable) and restore', () => {
   it('an eligible empty draft: reason, exact code and MFA; hidden, listed as deleted, code reusable', async () => {
     const url = `/api/payroll/periods/${ids.d}/delete`;
-    expect((await admin().post(url, { reason: 'สร้างผิด', confirm_code: 'zp-2027-01', totp: await mfa('x', 2) })).status).toBe(400);
+    expect((await asAdmin((who, totp) => who.post(url, { reason: 'สร้างผิด', confirm_code: 'zp-2027-01', totp }))).status).toBe(400);
     expect((await admin().post(url, { reason: 'สร้างผิด', confirm_code: 'ZP-2027-01' })).status).toBe(403);
-    const totp = await mfa('period.delete', ids.d!);
-    const r = await admin().post(url, { reason: 'สร้างงวดผิดช่วง', confirm_code: 'ZP-2027-01', totp });
+    const { who, totp } = await stepUp();
+    const r = await who.post(url, { reason: 'สร้างงวดผิดช่วง', confirm_code: 'ZP-2027-01', totp });
     expect(r.status, r.text).toBe(200);
     expect(status(ids.d!).deleted_at).toBeTruthy(); // row kept (soft delete)
-    expect((await admin().post(url, { reason: 'สร้างงวดผิดช่วง', confirm_code: 'ZP-2027-01', totp })).status).toBe(404); // duplicate
+    expect((await who.post(url, { reason: 'สร้างงวดผิดช่วง', confirm_code: 'ZP-2027-01', totp })).status).toBe(404); // duplicate
     expect((await admin().get('/api/payroll/periods')).body.some((p: { id: number }) => p.id === ids.d)).toBe(false);
     expect((await admin().get('/api/payroll/deleted-periods')).body).toEqual([expect.objectContaining({ id: ids.d, code: 'ZP-2027-01', delete_reason: 'สร้างงวดผิดช่วง' })]);
     expect(JSON.parse(audits(ids.d!, 'payroll.period_deleted')[0]!.details)).toMatchObject({ code: 'ZP-2027-01', reason: 'สร้างงวดผิดช่วง', softDelete: true });
     // the code is free again; restoring while it is taken is refused, then works once it is free
     const again = await payroll().post('/api/payroll/periods', { company_id: ids.co, code: 'ZP-2027-01', name: 'zz again', start_date: '2027-03-26', end_date: '2027-04-25', pay_date: '2027-04-30' });
     expect(again.status).toBe(201);
-    expect((await admin().post(`/api/payroll/periods/${ids.d}/restore`, { reason: 'กู้คืน', totp: await mfa('period.restore', ids.d!) })).status).toBe(409);
-    expect((await admin().post(`/api/payroll/periods/${again.body.id}/delete`, { reason: 'ซ้ำ ลบออก', confirm_code: 'ZP-2027-01', totp: await mfa('period.delete', again.body.id) })).status).toBe(200);
-    const back = await admin().post(`/api/payroll/periods/${ids.d}/restore`, { reason: 'กู้คืนงวดที่ลบผิด', totp: await mfa('period.restore', ids.d!) });
+    expect((await asAdmin((who, totp) => who.post(`/api/payroll/periods/${ids.d}/restore`, { reason: 'กู้คืน', totp }))).status).toBe(409);
+    expect((await asAdmin((who, totp) => who.post(`/api/payroll/periods/${again.body.id}/delete`, { reason: 'ซ้ำ ลบออก', confirm_code: 'ZP-2027-01', totp }))).status).toBe(200);
+    const back = await asAdmin((who, totp) => who.post(`/api/payroll/periods/${ids.d}/restore`, { reason: 'กู้คืนงวดที่ลบผิด', totp }));
     expect(back.status, back.text).toBe(200);
-    expect(status(ids.d!)).toMatchObject({ code: 'ZP-2027-01', deleted_at: null });
+    expect(status(ids.d!)).toMatchObject({ status: 'draft', code: 'ZP-2027-01', deleted_at: null }); // its state before the delete
+    expect((await asAdmin((who, totp) => who.post(`/api/payroll/periods/${ids.d}/restore`, { reason: 'กู้คืนซ้ำ', totp }))).status).toBe(404); // duplicate
     expect(audits(ids.d!, 'payroll.period_restored')).toHaveLength(1);
   });
 
   it('published payroll evidence can never be deleted, even after reopening back to an empty draft', async () => {
-    expect((await admin().post(`/api/payroll/periods/${ids.a}/delete`, { reason: 'ลองลบ', confirm_code: 'ZP-2026-09A', totp: await mfa('period.delete', ids.a!) })).status).toBe(409);
-    expect((await admin().post(`/api/payroll/periods/${ids.a}/reopen-closed`, { reason: 'เปิดเพื่อทดสอบการลบ', confirm_code: 'ZP-2026-09A', totp: await mfa('period.reopen', ids.a!) })).status).toBe(200);
-    expect((await admin().post(`/api/payroll/periods/${ids.a}/reopen`, { reason: 'กลับเป็นร่าง', totp: await mfa('period.force_reopen', ids.a!) })).status).toBe(200);
+    expect((await asAdmin((who, totp) => who.post(`/api/payroll/periods/${ids.a}/delete`, { reason: 'ลองลบ', confirm_code: 'ZP-2026-09A', totp }))).status).toBe(409);
+    expect((await asAdmin((who, totp) => who.post(`/api/payroll/periods/${ids.a}/reopen-closed`, { reason: 'เปิดเพื่อทดสอบการลบ', confirm_code: 'ZP-2026-09A', totp }))).status).toBe(200);
+    expect((await asAdmin((who, totp) => who.post(`/api/payroll/periods/${ids.a}/reopen`, { reason: 'กลับเป็นร่าง', totp }))).status).toBe(200);
     expect(slipStats(ids.a!).n).toBe(0);
     const archiveBefore = archived(ids.a!);
-    const r = await admin().post(`/api/payroll/periods/${ids.a}/delete`, { reason: 'ลองลบหลังเปิด', confirm_code: 'ZP-2026-09A', totp: await mfa('period.delete', ids.a!) });
+    const r = await asAdmin((who, totp) => who.post(`/api/payroll/periods/${ids.a}/delete`, { reason: 'ลองลบหลังเปิด', confirm_code: 'ZP-2026-09A', totp }));
     expect(r.status).toBe(409);
     expect(r.body.error.message).toContain('เคยเผยแพร่');
     expect(status(ids.a!).deleted_at).toBeNull();
@@ -272,11 +329,11 @@ describe('delete (soft, recoverable) and restore', () => {
            VALUES (${ids.co}, ${ids.d}, 1, 'zz.xlsx', 'zz', 'days', 'summary', '[]', '{}', '{}', 'active')`);
     const counts = () => one('SELECT (SELECT COUNT(*) FROM employees) e, (SELECT COUNT(*) FROM attendance_imports) a, (SELECT COUNT(*) FROM employee_salary_history) s, (SELECT COUNT(*) FROM payroll_periods) p');
     const before = counts();
-    const r = await admin().post(`/api/payroll/periods/${ids.d}/delete`, { reason: 'ลองลบ', confirm_code: 'ZP-2027-01', totp: await mfa('period.delete', ids.d!) });
+    const r = await asAdmin((who, totp) => who.post(`/api/payroll/periods/${ids.d}/delete`, { reason: 'ลองลบ', confirm_code: 'ZP-2027-01', totp }));
     expect(r.status).toBe(409);
     expect(r.body.error.message).toContain('เวลาทำงาน');
     H.sql(`UPDATE attendance_imports SET status = 'rolled_back' WHERE payroll_period_id = ${ids.d}`);
-    expect((await admin().post(`/api/payroll/periods/${ids.d}/delete`, { reason: 'ลบหลัง rollback', confirm_code: 'ZP-2027-01', totp: await mfa('period.delete', ids.d!) })).status).toBe(200);
+    expect((await asAdmin((who, totp) => who.post(`/api/payroll/periods/${ids.d}/delete`, { reason: 'ลบหลัง rollback', confirm_code: 'ZP-2027-01', totp }))).status).toBe(200);
     expect(counts()).toEqual(before); // soft delete: no row of any table removed
     expect(H.sql('PRAGMA foreign_key_check')).toEqual([]);
   });
@@ -323,5 +380,71 @@ describe('MFA session security', () => {
       last = (await admin().put(`/api/payroll/periods/${ids.b}`, { name: 'x', reason: 'brute force', totp: '000001' })).status;
     }
     expect(last).toBe(429);
+  });
+});
+
+describe('step-up code = one-time authorisation', () => {
+  const rename = (who: Client, id: number, name: string, totp: string) => who.put(`/api/payroll/periods/${id}`, { name, reason: 'ทดสอบรหัสใช้ครั้งเดียว', totp });
+  const secondSession = async (n: number) => {
+    const other = new Client(H.baseUrl);
+    other.totpSecret = admins[n - 1]!.totpSecret;
+    await other.login(`it_sa${n}`, SA_PASSWORD);
+    expect((await other.get('/api/auth/me')).status).toBe(200);
+    return other;
+  };
+  const stepUps = () => H.sql('SELECT COUNT(*) AS n FROM mfa_step_up')[0] as { n: number };
+
+  it('one code authorises one operation: not twice, not another operation or period, not from another session', async () => {
+    const sa = admins[1]!;
+    const other = await secondSession(2);
+    const { totp } = await stepUp(sa);
+    expect((await rename(sa, ids.b!, 'zz ZP-2026-10 (1)', totp)).status).toBe(200);
+    const replays = [
+      await rename(sa, ids.b!, 'zz ZP-2026-10 (2)', totp), // same operation again
+      await rename(sa, ids.mid!, 'zz ZP-2026-10-M (x)', totp), // another period
+      await sa.post(`/api/payroll/periods/${ids.b}/calculate`, { reason: 'ใช้รหัสซ้ำ', totp }), // another action (forced recalculation)
+      await rename(other, ids.b!, 'zz ZP-2026-10 (3)', totp), // another session of the same user
+    ];
+    for (const r of replays) expect([r.status, r.body.error?.code]).toEqual([409, 'mfa_code_used']);
+    expect(one(`SELECT name FROM payroll_periods WHERE id = ${ids.b}`).name).toBe('zz ZP-2026-10 (1)');
+    expect(one(`SELECT name FROM payroll_periods WHERE id = ${ids.mid}`).name).toBe('zz ZP-2026-10-M');
+    expect(status(ids.b!).status).toBe('calculated');
+  });
+
+  it('a revoked session cannot use a code (and does not use it up)', async () => {
+    const sa = admins[2]!;
+    const other = await secondSession(3);
+    const { totp } = await stepUp(sa);
+    const stale = other.cookie;
+    expect((await other.post('/api/auth/logout')).status).toBe(200);
+    const ghost = new Client(H.baseUrl);
+    ghost.cookie = stale;
+    const before = stepUps().n;
+    expect((await rename(ghost, ids.b!, 'zz revoked', totp)).status).toBe(401);
+    expect(stepUps().n).toBe(before);
+    expect((await rename(sa, ids.b!, 'zz ZP-2026-10 (4)', totp)).status).toBe(200); // still valid for the live session
+  });
+
+  it('concurrent requests with one code: exactly one is authorised', async () => {
+    const sa = admins[3]!;
+    const other = await secondSession(4);
+    const { totp } = await stepUp(sa);
+    const rs = await Promise.all([
+      rename(sa, ids.b!, 'zz race 1', totp),
+      rename(other, ids.mid!, 'zz race 2', totp),
+      rename(sa, ids.a!, 'zz race 3', totp),
+      other.post(`/api/payroll/periods/${ids.b}/calculate`, { reason: 'race recalculation', totp }),
+    ]);
+    expect(rs.map((r) => r.status).sort()).toEqual([200, 409, 409, 409]);
+    expect(rs.filter((r) => r.status === 409).every((r) => r.body.error.code === 'mfa_code_used')).toBe(true);
+  });
+
+  it('state-changing requests without the CSRF header or from another origin are refused', async () => {
+    const sa = admins[0]!;
+    const { totp } = await stepUp(sa);
+    const body = { name: 'zz csrf', reason: 'csrf test', totp };
+    expect((await sa.req('PUT', `/api/payroll/periods/${ids.b}`, body, { 'x-hr-requested': '0' })).status).toBe(403);
+    expect((await sa.req('PUT', `/api/payroll/periods/${ids.b}`, body, { 'x-hr-requested': '1', origin: 'https://evil.example' })).status).toBe(403);
+    expect(one(`SELECT name FROM payroll_periods WHERE id = ${ids.b}`).name).not.toBe('zz csrf');
   });
 });

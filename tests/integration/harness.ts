@@ -2,6 +2,7 @@
 import { spawn, execFileSync, type ChildProcess } from 'node:child_process';
 import { mkdirSync, rmSync, readFileSync, writeFileSync } from 'node:fs';
 import { randomBytes } from 'node:crypto';
+import { createServer } from 'node:net';
 import { join, resolve } from 'node:path';
 import { totpCode } from '../../src/shared/totp';
 
@@ -66,7 +67,14 @@ export async function startHarness(): Promise<Harness> {
   };
   const sql = (command: string) => sqlEach(command).flat();
 
-  const port = 8800 + Math.floor(Math.random() * 500);
+  // a port the OS reports free: parallel test files must never share (or probe) another file's server
+  const port = await new Promise<number>((res, rej) => {
+    const srv = createServer().once('error', rej);
+    srv.listen(0, '127.0.0.1', () => {
+      const p = (srv.address() as { port: number }).port;
+      srv.close(() => res(p));
+    });
+  });
   const key = randomBytes(32).toString('base64');
   const child: ChildProcess = spawn(
     process.execPath,
@@ -76,6 +84,13 @@ export async function startHarness(): Promise<Harness> {
   let log = '';
   child.stdout?.on('data', (d) => (log += String(d)));
   child.stderr?.on('data', (d) => (log += String(d)));
+  // diagnostics only: if the dev server dies or logs an error mid-run, the reason reaches the test output
+  let stopping = false;
+  child.on('exit', (code) => {
+    if (!stopping) process.stderr.write(`[harness] wrangler dev (port ${port}) exited unexpectedly, code ${code}:
+${log.slice(-4000)}
+`);
+  });
   const baseUrl = `http://127.0.0.1:${port}`;
   const started = Date.now();
   for (;;) {
@@ -96,6 +111,10 @@ export async function startHarness(): Promise<Harness> {
     sql,
     sqlEach,
     stop: async () => {
+      stopping = true;
+      if (/error|exception|crash/i.test(log)) process.stderr.write(`[harness] wrangler dev (port ${port}) logged:
+${log.slice(-4000)}
+`);
       if (child.pid) {
         if (process.platform === 'win32') {
           try {

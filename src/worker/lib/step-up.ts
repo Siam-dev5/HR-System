@@ -1,4 +1,5 @@
-// Step-up MFA for high-impact actions: a fresh TOTP code with every request, accepted once per action and target,
+// Step-up MFA for high-impact actions: a fresh TOTP code with every request, accepted once per user
+// (a code that authorised one operation can never authorise another, from any session),
 // and repeated failures are throttled. Verified against the secret stored now, not the state captured at login.
 import type { Context } from 'hono';
 import type { AppEnv } from '../env';
@@ -32,7 +33,7 @@ export async function verifyStepUp(c: Context<AppEnv>, code: unknown, action: st
     await db.prepare('INSERT INTO mfa_step_up (user_id, counter, action, target) VALUES (?, ?, ?, ?)').bind(user.id, counter, action, String(target)).run();
   } catch (e) {
     if (e instanceof Error && /UNIQUE|PRIMARY KEY|constraint/i.test(e.message)) {
-      throw new HttpError(409, 'mfa_code_used', 'รหัส MFA นี้ถูกใช้กับรายการนี้แล้ว (ป้องกันการทำซ้ำ) กรุณารอรหัสถัดไป');
+      throw new HttpError(409, 'mfa_code_used', 'รหัส MFA นี้ถูกใช้ไปแล้ว (ใช้ได้ครั้งเดียว) กรุณารอรหัสถัดไป');
     }
     throw e;
   }

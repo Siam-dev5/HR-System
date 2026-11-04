@@ -16,14 +16,14 @@ ALTER TABLE payroll_periods ADD COLUMN op_token TEXT;
 ALTER TABLE payslip_archive ADD COLUMN op_token TEXT;
 CREATE INDEX idx_payslip_archive_op ON payslip_archive(op_token);
 
--- a step-up TOTP code is accepted once per action and target
+-- a step-up TOTP code is accepted once per user, whatever the operation (action / target kept for the audit trail)
 CREATE TABLE mfa_step_up (
   user_id INTEGER NOT NULL REFERENCES users(id),
   counter INTEGER NOT NULL,
   action TEXT NOT NULL,
   target TEXT NOT NULL,
   used_at TEXT NOT NULL DEFAULT (datetime('now')),
-  PRIMARY KEY (user_id, counter, action, target)
+  PRIMARY KEY (user_id, counter)
 );
 
 -- explicit grants (super_admin already holds "*"); reserved — the role editor cannot grant them to other roles

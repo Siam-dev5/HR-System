@@ -209,7 +209,14 @@ payrollRoutes.post('/periods/:id/publish', requirePerm('payroll.publish'), async
   ]);
   if (!res[0]?.meta.changes) throw conflict('งวดนี้ถูกเผยแพร่หรือเปลี่ยนสถานะไปแล้ว');
   const { results } = await db
-    .prepare('SELECT s.id, e.user_id FROM payslips s JOIN employees e ON e.id = s.employee_id WHERE s.period_id = ? AND e.user_id IS NOT NULL')
+    // re-publishing after a Super Admin reopen does not notify again for a payslip that was already published
+    // unchanged (same row and calc version archived as published); a recalculated payslip is announced
+    .prepare(
+      `SELECT s.id, e.user_id FROM payslips s JOIN employees e ON e.id = s.employee_id
+       WHERE s.period_id = ?1 AND e.user_id IS NOT NULL
+         AND NOT EXISTS (SELECT 1 FROM payslip_archive a WHERE a.period_id = ?1 AND a.payslip_id = s.id AND a.calc_version = s.calc_version
+                         AND json_extract(a.row_json, '$.published') = 1)`,
+    )
     .bind(p.id)
     .all<{ id: number; user_id: number }>();
   for (const r of results) await notify(db, r.user_id, 'สลิปเงินเดือนพร้อมแล้ว', p.name, `/my/payslips/${r.id}`);
