@@ -17,6 +17,14 @@
       "migrations_dir": "migrations"
     }
   ],
+  // Employee photographs: private bucket (no r2.dev URL, no custom domain); the Worker is the only way in and checks
+  // the session, RBAC and row scope on every read. Locally, wrangler dev simulates the bucket.
+  "r2_buckets": [
+    {
+      "binding": "AVATARS",
+      "bucket_name": "hr-system-employee-assets"
+    }
+  ],
   // Non-secret configuration. Secrets (MFA_ENCRYPTION_KEY) are set with `wrangler secret put`
   // and, for local development, in .dev.vars (git-ignored).
   "vars": {

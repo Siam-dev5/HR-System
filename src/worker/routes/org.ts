@@ -7,6 +7,7 @@ import type { AppEnv } from '../env';
 import type { CompanyOption, OrgDepartmentRow, OrgDesignResponse, OrgEmployeeNode, OrgPositionRow } from '../../shared/types';
 import { normalizeHeader } from '../../shared/feishu';
 import { writeXlsx, type Cell } from '../../shared/xlsx';
+import { avatarVersion } from '../../shared/avatar';
 import { safeName, badRequest, conflict, csv, forbidden, intParam, notFound, readJson } from '../lib/http';
 import { audit } from '../lib/audit';
 import { companyScope, requireCompany } from '../lib/companies';
@@ -35,11 +36,12 @@ async function loadOrg(db: D1Database, companyId: number | null): Promise<Omit<O
     .all<Omit<OrgDepartmentRow, 'level' | 'employees'>>();
   const { results: emps } = await db
     .prepare(
-      `SELECT e.id, e.emp_code, e.first_name || ' ' || e.last_name AS name, e.company_id, e.department_id, e.position_id, e.manager_id, e.status, e.hire_date
+      `SELECT e.id, e.emp_code, e.first_name || ' ' || e.last_name AS name, e.company_id, e.department_id, e.position_id, e.manager_id, e.status, e.hire_date,
+              (SELECT a.object_key FROM employee_avatars a WHERE a.employee_id = e.id) AS avatar_key
        FROM employees e WHERE ${ACTIVE} AND (?1 IS NULL OR e.company_id = ?1) ORDER BY e.emp_code`,
     )
     .bind(companyId)
-    .all<Omit<OrgEmployeeNode, 'email'>>();
+    .all<Omit<OrgEmployeeNode, 'email' | 'avatar'> & { avatar_key: string | null }>();
   const { results: pos } = await db
     .prepare(
       `SELECT x.id, x.code, x.title, x.department_id, x.job_grade, COALESCE(x.headcount, 0) AS approved
@@ -67,7 +69,8 @@ async function loadOrg(db: D1Database, companyId: number | null): Promise<Omit<O
     const approved = Math.max(0, Math.round(x.approved));
     return { ...x, approved, occupied, vacant: Math.max(0, approved - occupied), over: Math.max(0, occupied - approved) };
   });
-  const employees: OrgEmployeeNode[] = emps.map((e) => ({ ...e, email: null }));
+  // the photo itself is fetched through the authenticated avatar API; here only its version (null = no photo)
+  const employees: OrgEmployeeNode[] = emps.map(({ avatar_key, ...e }) => ({ ...e, email: null, avatar: avatar_key ? avatarVersion(avatar_key) : null }));
   // reporting depth (levels of the reports-to chain inside this scope)
   const ids = new Set(employees.map((e) => e.id));
   const mgrDepth = new Map<number, number>();

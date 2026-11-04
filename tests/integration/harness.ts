@@ -27,6 +27,8 @@ export interface Harness {
   sql: (command: string) => Array<Record<string, unknown>>;
   /** results per statement (one array per SQL statement in the command) */
   sqlEach: (command: string) => Array<Array<Record<string, unknown>>>;
+  /** whether the local (simulated) R2 bucket holds this object key */
+  r2Has: (key: string) => boolean;
   stop: () => Promise<void>;
 }
 
@@ -104,12 +106,22 @@ ${log.slice(-4000)}
     await new Promise((r) => setTimeout(r, 500));
   }
 
+  const r2Has = (key: string) => {
+    try {
+      wrangler(['r2', 'object', 'get', `hr-system-employee-assets/${key}`, '--local', '--persist-to', persist, '--file', join(dir, 'r2-probe.bin')]);
+      return true;
+    } catch {
+      return false;
+    }
+  };
+
   return {
     baseUrl,
     dir,
     passwords,
     sql,
     sqlEach,
+    r2Has,
     stop: async () => {
       stopping = true;
       if (/error|exception|crash/i.test(log)) process.stderr.write(`[harness] wrangler dev (port ${port}) logged:
@@ -178,6 +190,23 @@ export class Client {
   }
   del<T = any>(path: string) {
     return this.req<T>('DELETE', path);
+  }
+  /** raw binary request (e.g. an image upload); returns the bytes too */
+  async bytes(method: string, path: string, data?: Uint8Array, contentType?: string, extraHeaders: Record<string, string> = {}): Promise<Res & { raw: Uint8Array }> {
+    const headers: Record<string, string> = { ...extraHeaders };
+    if (this.cookie) headers.cookie = this.cookie;
+    if (method !== 'GET' && !('x-hr-requested' in extraHeaders)) headers['x-hr-requested'] = '1';
+    if (contentType) headers['content-type'] = contentType;
+    const res = await fetch(this.baseUrl + path, { method, headers, body: data?.slice(), redirect: 'manual' });
+    const raw = new Uint8Array(await res.arrayBuffer());
+    const text = new TextDecoder().decode(raw);
+    let body: unknown = text;
+    try {
+      body = JSON.parse(text);
+    } catch {
+      /* binary */
+    }
+    return { status: res.status, body, text, headers: res.headers, raw };
   }
 
   /** Logs in; enrols MFA when the policy requires it, then uses TOTP on later logins. */

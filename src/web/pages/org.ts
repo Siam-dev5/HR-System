@@ -10,6 +10,8 @@ import { h, mount, loading, errorBox, fmtDate, modal, toast } from '../dom';
 import { optionLabel } from '../labels';
 import { basePath, can, link, state } from '../app';
 import { icon } from '../icons';
+import { avatarUrl } from '../avatar';
+import { initialsOf } from '../../shared/avatar';
 import { noCompanies, readGridFile } from './attendance';
 
 const SVG_NS = 'http://www.w3.org/2000/svg';
@@ -18,6 +20,11 @@ const H = 66;
 const GX = 18;
 const GY = 46;
 const PALETTE = ['#2563eb', '#059669', '#d97706', '#7c3aed', '#db2777', '#0891b2', '#65a30d', '#dc2626', '#4f46e5', '#0d9488'];
+// photo circle on the card (card size unchanged; the text moves right of it)
+const AV = 40;
+const AX = 14;
+const AY = (H - AV) / 2;
+const TX = AX + AV + 8;
 const MIN_SCALE = 0.15;
 const MAX_SCALE = 3;
 
@@ -31,6 +38,14 @@ function svg<K extends keyof SVGElementTagNameMap>(tag: K, attrs: Record<string,
 const msg = (e: unknown) => (e instanceof Error ? e.message : String(e));
 const clip = (s: string, n: number) => (s.length > n ? `${s.slice(0, n - 1)}…` : s);
 const clampScale = (s: number) => Math.min(MAX_SCALE, Math.max(MIN_SCALE, s));
+/** darker shade of a department colour, so white initials keep ≥ 4.5:1 contrast */
+const darken = (hex: string, k = 0.62) => `#${[1, 3, 5].map((i) => Math.round(parseInt(hex.slice(i, i + 2), 16) * k).toString(16).padStart(2, '0')).join('')}`;
+const blobToDataUrl = (b: Blob) => new Promise<string>((res, rej) => {
+  const r = new FileReader();
+  r.onload = () => res(String(r.result));
+  r.onerror = () => rej(new Error('read failed'));
+  r.readAsDataURL(b);
+});
 
 function download(name: string, blob: Blob): void {
   const url = URL.createObjectURL(blob);
@@ -59,6 +74,24 @@ export async function renderOrgChart(main: HTMLElement, params: URLSearchParams)
     const pos = (id: number | null) => d.positions.find((x) => x.id === id);
     const colorOf = (deptId: number | null) => (deptId === null ? '#64748b' : PALETTE[deptId % PALETTE.length] as string);
     const byId = new Map(d.employees.map((e) => [e.id, e]));
+    // circular photo through the authenticated API (same origin) over the initials; a failed photo leaves the initials
+    const avatarNode = (e: OrgEmployeeNode, context: boolean) => {
+      const cx = AX + AV / 2;
+      const cy = AY + AV / 2;
+      const g = svg('g', { class: `org-avatar${e.avatar ? ' has-photo' : ''}`, 'aria-hidden': 'true' },
+        svg('circle', { class: 'org-avatar-bg', cx, cy, r: AV / 2, fill: context ? '#e2e8f0' : darken(colorOf(e.department_id)) }),
+        svg('text', { class: 'org-avatar-initials', x: cx, y: cy + 5, 'font-size': 14, 'font-weight': 700, 'text-anchor': 'middle', fill: context ? '#475569' : '#ffffff' }, initialsOf(e.name)));
+      if (e.avatar) {
+        const img = svg('image', { class: 'org-avatar-img', href: avatarUrl(e.id, e.avatar), x: AX, y: AY, width: AV, height: AV, preserveAspectRatio: 'xMidYMid slice', 'clip-path': 'url(#org-avatar-clip)' });
+        img.addEventListener('error', () => {
+          img.remove();
+          g.classList.remove('has-photo');
+        });
+        g.append(img);
+      }
+      g.append(svg('circle', { class: 'org-avatar-ring', cx, cy, r: AV / 2, fill: 'none', stroke: '#ffffff', 'stroke-width': 2 }));
+      return g;
+    };
 
     // ---- department filter: chips from the department master (counts = the API's active employees per department) ----
     const unassigned = d.employees.filter((e) => e.department_id === null).length;
@@ -264,9 +297,10 @@ export async function renderOrgChart(main: HTMLElement, params: URLSearchParams)
         },
           svg('rect', { class: 'org-card', width: W, height: H, rx: 8, fill: node.context ? '#f8fafc' : '#ffffff', stroke: mark ? '#f59e0b' : node.cycle ? '#dc2626' : node.context ? '#94a3b8' : '#cbd5e1', 'stroke-width': mark ? 3 : node.cycle ? 2 : 1, ...(node.context && !mark ? { 'stroke-dasharray': '5 4' } : {}) }),
           svg('rect', { class: 'org-stripe', width: 6, height: H, rx: 3, fill: node.context ? '#cbd5e1' : colorOf(e.department_id) }),
-          svg('text', { class: 'org-t1', x: 14, y: 20, 'font-size': 13, 'font-weight': 700, fill: node.context ? '#475569' : '#0f172a' }, clip(e.name, node.cycle ? 18 : 26)),
-          svg('text', { class: 'org-t2', x: 14, y: 38, 'font-size': 11.5, fill: '#334155' }, clip(p?.title ?? 'ไม่ระบุตำแหน่ง', 30)),
-          svg('text', { class: 'org-t3', x: 14, y: 55, 'font-size': 10.5, fill: node.context ? '#475569' : '#64748b' }, clip(third, 34)));
+          avatarNode(e, node.context),
+          svg('text', { class: 'org-t1', x: TX, y: 20, 'font-size': 13, 'font-weight': 700, fill: node.context ? '#475569' : '#0f172a' }, clip(e.name, node.cycle ? 13 : 19)),
+          svg('text', { class: 'org-t2', x: TX, y: 38, 'font-size': 11.5, fill: '#334155' }, clip(p?.title ?? 'ไม่ระบุตำแหน่ง', 22)),
+          svg('text', { class: 'org-t3', x: TX, y: 55, 'font-size': 10.5, fill: node.context ? '#475569' : '#64748b' }, clip(third, 25)));
         if (node.cycle) g.append(svg('g', { class: 'org-cycle-badge', transform: `translate(${W - 58},6)` }, svg('rect', { width: 52, height: 17, rx: 8.5, fill: '#fee2e2', stroke: '#dc2626' }), svg('text', { x: 26, y: 12.5, 'font-size': 10, 'text-anchor': 'middle', fill: '#b91c1c' }, 'วนลูป')));
         if (node.children.length) {
           const closed = collapsed.has(id);
@@ -285,6 +319,7 @@ export async function renderOrgChart(main: HTMLElement, params: URLSearchParams)
       content = { x: -10, y: 0, w: totalW + 20, h: (maxDepth + 1) * (H + GY) + 10 };
       const font = getComputedStyle(document.body).fontFamily || 'sans-serif';
       current = svg('svg', { xmlns: SVG_NS, width: '100%', height: '100%', preserveAspectRatio: 'xMinYMin meet', 'font-family': font, role: 'img', 'aria-label': 'ผังสายบังคับบัญชา' },
+        svg('defs', {}, svg('clipPath', { id: 'org-avatar-clip', clipPathUnits: 'objectBoundingBox' }, svg('circle', { cx: 0.5, cy: 0.5, r: 0.5 }))),
         svg('g', {}, ...edges), svg('g', {}, ...nodes));
       mount(chartBox, forest.roots.length ? current : h('div', { class: 'empty' }, dept ? 'ไม่มีพนักงานในหน่วยงานนี้' : 'ไม่มีพนักงานในขอบเขตนี้'));
       apply();
@@ -428,7 +463,7 @@ export async function renderOrgChart(main: HTMLElement, params: URLSearchParams)
     });
 
     // exports always cover the whole chart, whatever the current zoom / pan
-    const exportSvgText = (): string | null => {
+    const exportSvgText = async (): Promise<string | null> => {
       if (!current) return null;
       const clone = current.cloneNode(true) as SVGSVGElement;
       clone.setAttribute('viewBox', `${content.x} ${content.y} ${content.w} ${content.h}`);
@@ -436,11 +471,21 @@ export async function renderOrgChart(main: HTMLElement, params: URLSearchParams)
       clone.setAttribute('height', String(content.h));
       clone.removeAttribute('data-scale');
       clone.insertBefore(svg('rect', { x: content.x, y: content.y, width: content.w, height: content.h, fill: '#ffffff' }), clone.firstChild);
+      // photos come from the authenticated API: inline them so the exported file stands alone (initials if one fails)
+      for (const img of [...clone.querySelectorAll('image')]) {
+        try {
+          const r = await fetch(img.getAttribute('href') as string, { credentials: 'same-origin' });
+          if (!r.ok) throw new Error(String(r.status));
+          img.setAttribute('href', await blobToDataUrl(await r.blob()));
+        } catch {
+          img.remove();
+        }
+      }
       return new XMLSerializer().serializeToString(clone);
     };
     const fileBase = `organization${d.company ? `-${d.company.code}` : ''}`;
-    const exportPng = () => {
-      const text = exportSvgText();
+    const exportPng = async () => {
+      const text = await exportSvgText();
       if (!text) return;
       const img = new Image();
       img.onload = () => {
@@ -502,7 +547,7 @@ export async function renderOrgChart(main: HTMLElement, params: URLSearchParams)
         h('a', { class: 'menu-link', href: `${basePath()}/api/org-design/export.csv${qs({ company: d.company?.id })}`, download: true }, 'CSV'),
         view === 'chart' ? [
           h('button', { class: 'menu-link', onclick: exportPng }, 'PNG'),
-          h('button', { class: 'menu-link', onclick: () => { const t = exportSvgText(); if (t) download(`${fileBase}.svg`, new Blob([t], { type: 'image/svg+xml' })); } }, 'SVG'),
+          h('button', { class: 'menu-link', onclick: async () => { const t = await exportSvgText(); if (t) download(`${fileBase}.svg`, new Blob([t], { type: 'image/svg+xml' })); } }, 'SVG'),
           h('button', { class: 'menu-link', onclick: exportPdf }, 'PDF (พิมพ์)'),
         ] : null));
 

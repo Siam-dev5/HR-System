@@ -9,7 +9,7 @@ import { chromium } from 'playwright-core';
 import { execFileSync, spawn } from 'node:child_process';
 import { createHmac, randomBytes } from 'node:crypto';
 import { join } from 'node:path';
-import { mkdirSync, writeFileSync } from 'node:fs';
+import { mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { ROOT, EXE, SERVER_SPAWN, arg, outDir, freePort, stopServer } from './lib/env.mjs';
 
 const W = join('node_modules', 'wrangler', 'bin', 'wrangler.js');
@@ -38,6 +38,13 @@ writeFileSync(fixture, [
   `UPDATE employees SET manager_id = ${emp('ZZ12')} WHERE emp_code = 'ZZ13';`,
 ].join('\n'));
 run([W, 'd1', 'execute', 'hr-system-db', '--local', '--persist-to', persist, '--file', fixture]);
+// photo fixtures straight into the local storage (no app API): E001 has a real photo, E005's metadata points at an
+// object that does not exist (the chart must fall back to initials)
+const PHOTO_KEY = 'employees/1/uitest/avatar/uitest-e001.webp';
+run([W, 'r2', 'object', 'put', `hr-system-employee-assets/${PHOTO_KEY}`, '--file', join('tests', 'fixtures', 'avatar', 'sample.webp'), '--content-type', 'image/webp', '--local', '--persist-to', persist]);
+const avatarSql = join(persist, 'org-avatars.sql');
+writeFileSync(avatarSql, `INSERT INTO employee_avatars (employee_id, object_key, content_type, size_bytes) VALUES (${emp('E001')}, '${PHOTO_KEY}', 'image/webp', 338), (${emp('E005')}, 'employees/1/uitest/avatar/uitest-missing.webp', 'image/webp', 338);`);
+run([W, 'd1', 'execute', 'hr-system-db', '--local', '--persist-to', persist, '--file', avatarSql]);
 const pw = `Og-${randomBytes(9).toString('base64url')}-7q`;
 const uf = join(persist, 'u.sql');
 run(['scripts/create-user.mjs', '--username', 'o_admin', '--display', 'ทดสอบ o_admin', '--out', uf, '--cred-file', join(persist, 'c.txt'), '--role', 'super_admin'], { NEW_USER_PASSWORD: pw });
@@ -70,7 +77,8 @@ async function session(viewport, theme, extra = {}) {
   await ctx.addInitScript((t) => { try { localStorage.setItem('hr.theme', t); } catch { /* none */ } }, theme);
   const page = await ctx.newPage();
   page.on('pageerror', (e) => errors.push(`${theme} ${viewport.width}: ${e.message}`));
-  page.on('console', (m) => { if (m.type() === 'error') errors.push(`${theme} ${viewport.width}: ${m.text()}`); });
+  // the only expected error: the deliberately missing photo fixture (fallback test)
+  page.on('console', (m) => { if (m.type() === 'error' && !m.location().url.includes('uitest-missing')) errors.push(`${theme} ${viewport.width}: ${m.text()}`); });
   await page.goto(BASE + '/login'); await page.waitForSelector('input[name=username]');
   await page.fill('input[name=username]', 'o_admin'); await page.fill('input[name=password]', pw); await page.click('button.auth-submit');
   await page.waitForSelector('nav.sidebar, button:has-text("เริ่มตั้งค่า MFA"), input[name=totp]:visible');
@@ -116,6 +124,33 @@ try {
   let ids = await nodeIds(page);
   check('nodes = active employees of the company, each exactly once', ids.length === d1.employees.length && new Set(ids).size === ids.length, `${ids.length} nodes, ${d1.employees.length} employees`);
   check('no horizontal page overflow; chart has no scrollbars', g.overflow <= 0 && (await page.$eval('.org-canvas', (c) => getComputedStyle(c).overflow)) === 'hidden');
+  check('toolbar stays at the top of the chart', g.zb.t - g.cv.t >= 0 && g.zb.t - g.cv.t <= 20, `${g.zb.t - g.cv.t}px from the top`);
+
+  // photos: real photo for E001 (through the authenticated API), initials for everyone else, broken photo → initials
+  const e001 = d1.employees.find((e) => e.emp_code === 'E001');
+  const e005 = d1.employees.find((e) => e.emp_code === 'E005');
+  await page.waitForTimeout(500);
+  const av = await page.evaluate(async ({ a, b }) => {
+    const one = (id) => { const g = document.querySelector(`.org-canvas [data-id="${id}"] .org-avatar`); const img = g?.querySelector('image'); return { photo: g?.classList.contains('has-photo'), href: img?.getAttribute('href') ?? null, initials: g?.querySelector('.org-avatar-initials')?.textContent }; };
+    const p = one(a);
+    const served = p.href ? await fetch(p.href).then((r) => ({ status: r.status, type: r.headers.get('content-type'), cache: r.headers.get('cache-control') })) : null;
+    const circles = [...document.querySelectorAll('.org-canvas .org-avatar')].length;
+    const card = document.querySelector('.org-canvas .org-card');
+    return { a: p, b: one(b), served, circles, nodes: document.querySelectorAll('.org-canvas [data-id]').length, card: [card.getAttribute('width'), card.getAttribute('height')] };
+  }, { a: e001.id, b: e005.id });
+  check('org chart: every card has a round photo / initials area, card size unchanged (210×66)', av.circles === av.nodes && av.card.join() === '210,66', JSON.stringify(av.card));
+  check('org chart: real photo through the private API (no-store), clipped to a circle', av.a.photo && /^\/api\/employees\/\d+\/avatar\?v=uitest-e001$/.test(av.a.href) && av.served?.status === 200 && av.served.type === 'image/webp' && av.served.cache === 'private, no-store', JSON.stringify(av));
+  check('org chart: a photo that cannot load falls back to initials without breaking the SVG', av.b.photo === false && av.b.href === null && av.b.initials === 'ปท', JSON.stringify(av.b));
+  const noPhoto = await page.$$eval('.org-canvas .org-avatar:not(.has-photo) .org-avatar-initials', (x) => x.map((t) => t.textContent));
+  check('org chart: employees without a photo show their initials', noPhoto.length === d1.employees.length - 1 && noPhoto.every((t) => t && t.length >= 1 && t.length <= 2), JSON.stringify(noPhoto));
+  await page.click('summary:has-text("Export")');
+  const [svgDl] = await Promise.all([page.waitForEvent('download'), page.click('.menu-pop button:has-text("SVG")')]);
+  const exported = readFileSync(await svgDl.path(), 'utf8');
+  check('SVG export is self-contained: photo inlined, no API links, broken photo left as initials', exported.includes('href="data:image/webp;base64,') && !exported.includes('/api/employees') && exported.includes('>ปท<'));
+  check('org chart: initials keep ≥ 4.5:1 contrast on the department colour', await page.evaluate(() => {
+    const lum = (c) => { const v = c.match(/\d+/g).slice(0, 3).map((x) => { x /= 255; return x <= 0.03928 ? x / 12.92 : ((x + 0.055) / 1.055) ** 2.4; }); return 0.2126 * v[0] + 0.7152 * v[1] + 0.0722 * v[2]; };
+    return [...document.querySelectorAll('.org-canvas .org-node:not(.is-context) .org-avatar-bg')].every((c) => (1.05 / (lum(getComputedStyle(c).fill) + 0.05)) >= 4.5);
+  }));
 
   const s0 = await scale(page);
   await zbtn(page, 'zoom-in');

@@ -597,6 +597,9 @@ input[aria-invalid='true'], select[aria-invalid='true'], textarea[aria-invalid='
 .org-toolbar { flex-wrap: wrap; }
 .org-toolbar input[type='search'] { min-width: 12rem; flex: 1 1 12rem; }
 .org-search-count { font-size: 0.82rem; min-width: 3.5rem; }
+/* Export menu of the org toolbar: correct from the first frame (no reposition flicker) — anchored to the button's
+   right edge (the button sits right of the spacer); on phones a full-width sheet below the button */
+.org-toolbar .menu-pop { left: auto; right: 0; }
 /* department chips: one per department of the master data, count = the API's employees of that department */
 .org-chips { display: flex; flex-wrap: wrap; gap: 0.45rem; margin: 0.25rem 0 0.4rem; }
 .org-chip { display: inline-flex; align-items: center; gap: 0.45rem; min-height: 2.25rem; padding: 0.3rem 0.4rem 0.3rem 0.85rem; border: 1px solid var(--border-strong); border-radius: var(--radius-pill); background: var(--surface); color: var(--text-2); font: inherit; font-size: 0.86rem; font-weight: 600; cursor: pointer; }
@@ -642,6 +645,20 @@ input[aria-invalid='true'], select[aria-invalid='true'], textarea[aria-invalid='
 [data-theme='dark'] .org-canvas .org-edge { stroke: #475569; }
 [data-theme='dark'] .org-canvas .org-toggle-dot[fill='#f1f5f9'] { fill: #1e293b; stroke: #64748b; }
 [data-theme='dark'] .org-canvas .org-toggle-text[fill='#0f172a'] { fill: #e5e7eb; }
+[data-theme='dark'] .org-canvas .org-avatar-ring { stroke: #111827; }
+[data-theme='dark'] .org-canvas .org-node.is-context .org-avatar-ring { stroke: #0b1120; }
+/* employee photo: round; the initials sit underneath and show when there is no photo or it cannot load */
+.emp-avatar { position: relative; display: inline-grid; place-items: center; flex: none; overflow: hidden; border-radius: 50%; background: var(--brand-navy); color: #fff; font-weight: 700; line-height: 1; }
+.emp-avatar-lg { width: 96px; height: 96px; font-size: 2rem; }
+.emp-avatar-sm { width: 2rem; height: 2rem; font-size: 0.85rem; }
+.emp-avatar-img { position: absolute; inset: 0; width: 100%; height: 100%; object-fit: cover; }
+[data-theme='dark'] .emp-avatar { background: #1e3a5f; }
+.avatar-panel { display: flex; align-items: center; gap: 1rem; padding: 0.75rem; border: 1px solid var(--border); border-radius: var(--radius); background: var(--surface-2); }
+.avatar-panel-body { display: flex; flex: 1; flex-direction: column; gap: 0.35rem; min-width: 0; }
+.avatar-status { margin: 0; }
+.avatar-progress { display: flex; align-items: center; gap: 0.5rem; }
+.avatar-progress progress { flex: 1; height: 0.5rem; accent-color: var(--primary); }
+.avatar-actions { margin: 0; }
 .plain { list-style: none; margin: 0; padding: 0; }
 @media (max-width: 1024px) {
   /* tablets: ≥ 40px touch targets (root font-size is 15px) */
@@ -652,6 +669,8 @@ input[aria-invalid='true'], select[aria-invalid='true'], textarea[aria-invalid='
   .org-side { position: static; }
 }
 @media (max-width: 600px) {
+  .avatar-panel { flex-direction: column; align-items: flex-start; }
+  .org-toolbar .menu-pop { position: fixed; top: auto; left: 0.75rem; right: 0.75rem; min-width: 0; }
   /* phones: the toolbar sits above the chart (never over a node) as one row */
   .org-stage { display: flex; flex-direction: column; gap: 0.5rem; }
   .org-zoombar { position: static; order: -1; flex-direction: row; flex-wrap: wrap; justify-content: center; align-self: stretch; }

@@ -4,6 +4,7 @@ import { del, get, post, put, qs, ApiFailure } from '../api';
 import { h, mount, modal, toast, confirmDialog, loading, errorBox, fmtDate, fmtMoney, fmtNum } from '../dom';
 import { optionLabel } from '../labels';
 import { basePath } from '../app';
+import { avatarPanel } from '../avatar';
 
 const lookupCache = new Map<string, Promise<LookupOption[]>>();
 export function lookup(key: string): Promise<LookupOption[]> {
@@ -149,6 +150,8 @@ async function openForm(m: CrudMeta, row: Row | null, onSaved: () => void): Prom
     inputs.set(f.name, el);
     fields.push(h('label', { class: `field ${f.type === 'textarea' ? 'span2' : ''} ${f.type === 'bool' ? 'check' : ''}` }, h('span', null, f.label, f.required ? ' *' : ''), el));
   }
+  // employee photo: its own API (R2 + D1), outside collect(), so saving the form never touches the photo and vice versa
+  if (m.key === 'employees' && row) fields.unshift(avatarPanel({ id: Number(row.id), name: `${row.first_name ?? ''} ${row.last_name ?? ''}`.trim() }));
   const msg = h('div', { class: 'form-msg', role: 'alert' });
   const collect = (): Record<string, unknown> => {
     const out: Record<string, unknown> = {};
