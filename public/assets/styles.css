@@ -596,20 +596,70 @@ input[aria-invalid='true'], select[aria-invalid='true'], textarea[aria-invalid='
 .menu-link:hover, .menu-link:focus-visible { background: var(--surface-2); }
 .org-toolbar { flex-wrap: wrap; }
 .org-toolbar input[type='search'] { min-width: 12rem; flex: 1 1 12rem; }
+.org-search-count { font-size: 0.82rem; min-width: 3.5rem; }
+/* department chips: one per department of the master data, count = the API's employees of that department */
+.org-chips { display: flex; flex-wrap: wrap; gap: 0.45rem; margin: 0.25rem 0 0.4rem; }
+.org-chip { display: inline-flex; align-items: center; gap: 0.45rem; min-height: 2.25rem; padding: 0.3rem 0.4rem 0.3rem 0.85rem; border: 1px solid var(--border-strong); border-radius: var(--radius-pill); background: var(--surface); color: var(--text-2); font: inherit; font-size: 0.86rem; font-weight: 600; cursor: pointer; }
+.org-chip:hover { border-color: var(--primary); color: var(--heading); }
+.org-chip:focus-visible { outline: none; box-shadow: var(--focus-ring); }
+.org-chip-count { min-width: 1.6rem; padding: 0.05rem 0.45rem; border-radius: var(--radius-pill); background: var(--surface-3); color: var(--text-2); font-size: 0.78rem; text-align: center; font-variant-numeric: tabular-nums; }
+.org-chip[aria-pressed='true'] { background: var(--nav-active-bg); border-color: var(--nav-active-bg); color: var(--nav-active-text); }
+.org-chip[aria-pressed='true'] .org-chip-count { background: rgb(255 255 255 / 22%); color: inherit; }
+.org-chip.is-empty:not([aria-pressed='true']) { color: var(--muted); border-style: dashed; }
+.org-filter-note { margin: 0 0 0.6rem; font-size: 0.82rem; }
+.org-filter-note:empty { display: none; }
 .org-layout { display: grid; grid-template-columns: minmax(0, 1fr) 300px; gap: 1rem; align-items: start; }
-.org-canvas { overflow: auto; max-height: 72vh; min-height: 320px; background: var(--surface-2); border: 1px solid var(--border); border-radius: var(--radius); padding: 0.5rem; }
-.org-canvas svg { display: block; }
+/* chart stage: the SVG fills a fixed-height viewport and zoom / pan move its viewBox — sharp at any zoom, no nested scrollbars */
+.org-stage { position: relative; min-width: 0; }
+.org-canvas { position: relative; height: clamp(360px, 70vh, 820px); overflow: hidden; background: var(--surface-2); border: 1px solid var(--border); border-radius: var(--radius-lg); touch-action: none; cursor: grab; user-select: none; -webkit-user-select: none; }
+.org-canvas.is-panning { cursor: grabbing; }
+.org-canvas:focus-visible { outline: none; box-shadow: var(--focus-ring); }
+.org-canvas svg { display: block; width: 100%; height: 100%; }
+/* floating vertical toolbar at the top-right of the chart (stays reachable when the chart runs below the fold);
+   fit / centre keep the nodes clear of it */
+.org-zoombar { position: absolute; top: 0.75rem; right: 0.75rem; z-index: 2; display: flex; flex-direction: column; align-items: center; gap: 0.2rem; padding: 0.35rem; background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius-lg); box-shadow: var(--shadow); }
+.org-zoom-btn { display: grid; place-items: center; width: 2.4rem; height: 2.4rem; padding: 0; border: 0; border-radius: var(--radius-sm); background: transparent; color: var(--text-2); cursor: pointer; }
+.org-zoom-btn:hover { background: var(--surface-2); color: var(--heading); }
+.org-zoom-btn:focus-visible { outline: none; box-shadow: var(--focus-ring); }
+.org-zoom-btn .ico { width: 1.15rem; height: 1.15rem; }
+.org-zoom-level { font-size: 0.7rem; font-weight: 700; color: var(--muted); font-variant-numeric: tabular-nums; }
+.org-zoom-sep { width: 1.4rem; height: 1px; margin: 0.15rem 0; background: var(--border); }
 .org-node { cursor: pointer; }
 .org-node:focus { outline: none; }
-.org-node:focus rect:first-child { stroke: var(--primary); stroke-width: 3; }
+.org-node:focus .org-card { stroke: var(--primary); stroke-width: 3; }
 .org-toggle { cursor: pointer; }
 .org-side { position: sticky; top: 4.5rem; }
+.org-context-note { margin: 0.4rem 0; padding: 0.45rem 0.6rem; border: 1px dashed var(--border-strong); border-radius: var(--radius-sm); background: var(--surface-2); color: var(--text-2); font-size: 0.82rem; }
+.org-context-note.is-warn { border-color: var(--danger); background: color-mix(in srgb, var(--danger) 8%, var(--surface)); color: var(--danger); }
+/* dark theme: the SVG keeps light colours as attributes (exports stay print-friendly); CSS restyles the live chart */
+[data-theme='dark'] .org-canvas .org-card { fill: #111827; }
+[data-theme='dark'] .org-canvas .org-node:not(.is-hit, .is-selected, .is-cycle) .org-card { stroke: #334155; }
+[data-theme='dark'] .org-canvas .org-node.is-context .org-card { fill: #0b1120; }
+[data-theme='dark'] .org-canvas .org-node.is-context:not(.is-hit, .is-selected) .org-card { stroke: #64748b; }
+[data-theme='dark'] .org-canvas .org-t1 { fill: #e5edf7; }
+[data-theme='dark'] .org-canvas .org-t2 { fill: #cbd5e1; }
+[data-theme='dark'] .org-canvas .org-t3 { fill: #94a3b8; }
+[data-theme='dark'] .org-canvas .org-edge { stroke: #475569; }
+[data-theme='dark'] .org-canvas .org-toggle-dot[fill='#f1f5f9'] { fill: #1e293b; stroke: #64748b; }
+[data-theme='dark'] .org-canvas .org-toggle-text[fill='#0f172a'] { fill: #e5e7eb; }
 .plain { list-style: none; margin: 0; padding: 0; }
+@media (max-width: 1024px) {
+  /* tablets: ≥ 40px touch targets (root font-size is 15px) */
+  .org-zoom-btn { width: 2.7rem; height: 2.7rem; }
+}
 @media (max-width: 900px) {
   .org-layout { grid-template-columns: 1fr; }
   .org-side { position: static; }
 }
 @media (max-width: 600px) {
+  /* phones: the toolbar sits above the chart (never over a node) as one row */
+  .org-stage { display: flex; flex-direction: column; gap: 0.5rem; }
+  .org-zoombar { position: static; order: -1; flex-direction: row; flex-wrap: wrap; justify-content: center; align-self: stretch; }
+  .org-zoom-sep { width: 1px; height: 1.4rem; margin: 0 0.15rem; }
+  .org-zoom-level { min-width: 2.4rem; text-align: center; }
+  .org-canvas { height: 60vh; min-height: 320px; }
+  .org-chips { flex-wrap: nowrap; overflow-x: auto; padding-bottom: 0.25rem; scrollbar-width: thin; }
+  .org-chip { flex: none; }
   .org-toolbar input[type='search'] { min-width: 0; width: 100%; }
   .toolbar .field.inline { min-width: 0; max-width: 100%; }
   .toolbar select { max-width: 100%; min-width: 0; text-overflow: ellipsis; }
@@ -617,9 +667,10 @@ input[aria-invalid='true'], select[aria-invalid='true'], textarea[aria-invalid='
   .kpi-value { font-size: 1.25rem; overflow-wrap: anywhere; }
 }
 @media print {
-  body.print-org .org-toolbar, body.print-org .kpis, body.print-org .org-side, body.print-org #site-footer { display: none !important; }
+  body.print-org .org-toolbar, body.print-org .kpis, body.print-org .org-side, body.print-org #site-footer,
+  body.print-org .org-chips, body.print-org .org-filter-note, body.print-org .org-zoombar { display: none !important; }
   body.print-org .org-layout { display: block; }
-  body.print-org .org-canvas { max-height: none; overflow: visible; border: 0; background: #fff; }
+  body.print-org .org-canvas { height: auto; max-height: none; overflow: visible; border: 0; background: #fff; }
   body.print-org .org-canvas svg { width: 100% !important; height: auto !important; }
   .preview-wrap { max-height: none; overflow: visible; }
 }

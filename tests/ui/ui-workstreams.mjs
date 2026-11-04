@@ -219,13 +219,14 @@ try {
     await page.fill('input[type=search]', 'E007');
     await page.waitForTimeout(300);
     check('org chart: search highlights the match', await page.$$eval('.org-canvas rect[stroke="#f59e0b"]', (x) => x.length) >= 1);
-    const w1 = await page.$eval('.org-canvas svg', (s) => Number(s.getAttribute('width')));
+    // zoom works on the SVG viewBox (Phase E): the scale is exposed as data-scale; full coverage in ui-org
+    const w1 = await page.$eval('.org-canvas svg', (s) => Number(s.dataset.scale));
     await page.click('button[aria-label="ซูมเข้า"]');
-    const w2 = await page.$eval('.org-canvas svg', (s) => Number(s.getAttribute('width')));
+    const w2 = await page.$eval('.org-canvas svg', (s) => Number(s.dataset.scale));
     check('org chart: zoom in', w2 > w1);
-    await page.click('button:has-text("ย่อทั้งหมด")');
+    await page.click('.org-zoombar button[aria-label="ย่อทั้งหมด"]');
     const collapsedNodes = await page.$$eval('.org-canvas [data-id]', (x) => x.length);
-    await page.click('button:has-text("ขยายทั้งหมด")');
+    await page.click('.org-zoombar button[aria-label="ขยายทั้งหมด"]');
     check('org chart: collapse / expand all', collapsedNodes < nodes && (await page.$$eval('.org-canvas [data-id]', (x) => x.length)) === nodes, `${collapsedNodes} → ${nodes}`);
     await page.click('summary:has-text("Export")');
     const [png] = await Promise.all([page.waitForEvent('download'), page.click('.menu-pop button:has-text("PNG")')]);
