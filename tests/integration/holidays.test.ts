@@ -46,8 +46,8 @@ const audits = (action: string) => Number(H.sql(`SELECT COUNT(*) AS n FROM audit
 describe('setup (synthetic company ZZH)', () => {
   it('company, employees and the central Thai calendar from the migration', async () => {
     co = (await admin().post('/api/m/companies', { code: 'ZZH', name: 'zz_test holidays', active: true })).body.id;
-    const emp = async (code: string, type: string) => {
-      const r = await admin().post('/api/m/employees', { emp_code: code, first_name: 'zz_test', last_name: code, company_id: co, hire_date: '2020-01-01', employment_type: type, status: 'active', base_salary: 30000 });
+    const emp = async (code: string, type: string, status = 'active') => {
+      const r = await admin().post('/api/m/employees', { emp_code: code, first_name: 'zz_test', last_name: code, company_id: co, hire_date: '2020-01-01', employment_type: type, status, base_salary: 30000 });
       expect(r.status, r.text).toBe(201);
       ids[code] = r.body.id;
     };
@@ -56,6 +56,16 @@ describe('setup (synthetic company ZZH)', () => {
     await emp('ZH3', 'permanent'); // no holiday work (regression)
     await emp('ZH4', 'permanent'); // approved OT request on the holiday (double payment guard)
     await emp('ZH5', 'intern'); // no approved pay rule for interns
+    await emp('ZH6', 'permanent'); // salary raised to 36,000 on the 16th: holiday work before and after the raise
+    await emp('ZH7', 'probation', 'probation'); // employment TYPE probation: its own rule
+    await emp('ZH8', 'permanent', 'probation'); // a permanent hire whose STATUS is probation: the permanent rule
+    await emp('ZH9', 'permanent'); // legacy employment_type written outside the API (below): never mapped
+    H.sql(`UPDATE employees SET employment_type = 'Permanent ' WHERE id = ${ids.ZH9}`);
+    // salary history entered out of date order (the engine must not depend on insertion order)
+    for (const [date, amount] of [[d('05-16'), 36000], ['2020-01-01', 30000], [`${Y - 1}-01-01`, 30000]] as const) {
+      const h = await admin().post('/api/m/salary_history', { employee_id: ids.ZH6, effective_date: date, base_salary: amount, reason: 'zz test raise' });
+      expect(h.status, h.text).toBe(201);
+    }
     const r = await staff().get('/api/holidays');
     expect(r.status).toBe(200);
     expect(r.body.calendars.find((x: { code: string }) => x.code === 'TH')).toMatchObject({ country_code: 'TH', company_id: null });
@@ -251,7 +261,12 @@ describe('holiday pay rules', () => {
     // the creator cannot approve their own rule
     const mine = await admin().post('/api/holidays/pay-rules', { company_id: co, employment_type: 'probation', holiday_pay_entitled: true, work_multiplier: 1, ot_multiplier: 3, effective_from: '2020-01-01', legal_basis: 'zz' });
     expect((await admin().post(`/api/holidays/pay-rules/${mine.body.id}/approve`)).status).toBe(403);
-    expect(audits('holiday.pay_rule_approved')).toBe(2);
+    // employment type probation has its own rule (1.5x), so a wrong mapping to the permanent rule (1x) would show
+    const probation = await mk({ employment_type: 'probation', work_multiplier: 1.5 });
+    expect((await admin().post(`/api/holidays/pay-rules/${probation.body.id}/approve`)).status).toBe(200);
+    ids.rulePermanent = perm.body.id;
+    ids.ruleProbation = probation.body.id;
+    expect(audits('holiday.pay_rule_approved')).toBe(3);
   });
 });
 
@@ -265,7 +280,7 @@ describe('payroll baseline without holiday work', () => {
     const calc = await payroll().post(`/api/payroll/periods/${period}/calculate`);
     expect(calc.status, calc.text).toBe(200);
     baseline = slips();
-    expect(baseline.size).toBe(5);
+    expect(baseline.size).toBe(9);
     for (const s of baseline.values()) {
       expect(JSON.parse(s.lines_json).some((l: { code: string }) => l.code.startsWith('HOLIDAY'))).toBe(false);
       expect(JSON.parse(s.calc_json).holiday).toBeUndefined();
@@ -308,6 +323,21 @@ describe('holiday work records (verified evidence)', () => {
     expect((await w({ employee_id: demo, holiday_id: hol.company, evidence_ref: 'zz other company' })).status).toBe(400);
     ids.w4 = (await w({ employee_id: ids.ZH4, evidence_ref: 'zz approval 4' })).body.id;
     ids.w5 = (await w({ employee_id: ids.ZH5, evidence_ref: 'zz approval 5' })).body.id;
+    for (const k of ['ZH7', 'ZH8', 'ZH9']) ids[`w${k.slice(2)}`] = (await w({ employee_id: ids[k], evidence_ref: `zz approval ${k}` })).body.id;
+  });
+
+  it('holiday work before and after a salary raise in the same period', async () => {
+    const after = await staff().post('/api/holidays', { calendar_id: 1, holiday_date: d('05-20'), name: 'zz วันหยุดหลังปรับเงินเดือน', holiday_type: 'traditional', source_reference: 'ประกาศ zz' });
+    expect(after.status, after.text).toBe(201);
+    hol.after = after.body.id;
+    expect((await admin().post(`/api/holidays/${hol.after}/verify`)).status).toBe(200);
+    expect((await admin().post(`/api/holidays/${hol.after}/approve`)).status).toBe(200);
+    const w = (holiday: number) => staff().post('/api/holidays/work', { employee_id: ids.ZH6, holiday_id: holiday, normal_hours: 8, evidence_source: 'manual', evidence_ref: 'zz approval 6' });
+    const before = await w(hol.labour!);
+    const later = await w(hol.after!);
+    expect([before.status, later.status], before.text + later.text).toEqual([201, 201]);
+    ids.w6a = before.body.id;
+    ids.w6b = later.body.id;
   });
 
   it('approval: approve permission, a second person, and the no-double-OT confirmation', async () => {
@@ -324,13 +354,34 @@ describe('holiday work records (verified evidence)', () => {
     H.sql(`UPDATE overtime_requests SET status = 'approved' WHERE id = ${ot.body.id}`);
     expect((await admin().post(`/api/holidays/work/${ids.w4}/approve`, { excluded_from_regular_ot: true })).status).toBe(409);
     expect((await admin().post(`/api/holidays/work/${ids.w4}/reject`, { reason: 'zz paid as normal OT request' })).status).toBe(200);
-    expect(audits('holiday_work.approved')).toBe(3);
+    for (const k of ['w6a', 'w6b', 'w7', 'w8', 'w9']) expect((await admin().post(`/api/holidays/work/${ids[k]}/approve`, { excluded_from_regular_ot: true })).status, k).toBe(200);
+    expect(audits('holiday_work.approved')).toBe(8);
   });
 
   it('employees only see their own holiday work', async () => {
     const r = await employee().get('/api/holidays/work');
     expect(r.status).toBe(200);
     expect(r.body).toEqual([]);
+  });
+});
+
+describe('traditional-holiday compliance (warning only)', () => {
+  it('counts approved traditional + labour holidays, lists the excluded ones and never creates or approves holidays', async () => {
+    const before = H.sql("SELECT COUNT(*) AS n, SUM(status = 'approved') AS approved FROM holidays")[0];
+    const r = await staff().get(`/api/holidays?year=${Y}&company=${co}`);
+    expect(r.status).toBe(200);
+    expect(r.body.compliance).toHaveLength(1);
+    const x = r.body.compliance[0];
+    // approved: labour day (05-01), the Saturday holiday and 05-20 · drafts: the two imported traditional days
+    expect(x).toMatchObject({ company_id: co, year: Y, required: 13, counted: 3, ok: false, drafts: 2, labourDayIssue: null, notCounted: { company: 1, local: 0, substitute: 0 } });
+    expect(x.labourDay).toEqual([expect.objectContaining({ id: hol.labour, date: d('05-01') })]);
+    expect(x.countedHolidays.map((h: { type: string }) => h.type).sort()).toEqual(['national_labour', 'traditional', 'traditional']);
+    expect(x.message).toMatch(/น้อยกว่าขั้นต่ำ 13/);
+    // without a company: the central calendar and the ZZH calendar are both reported
+    const all = await staff().get(`/api/holidays?year=${Y}`);
+    expect(all.body.compliance.map((c: { company_id: number | null }) => c.company_id)).toEqual([null, co]);
+    expect(all.body.compliance[0]).toMatchObject({ counted: 3, notCounted: { company: 0 } });
+    expect(H.sql("SELECT COUNT(*) AS n, SUM(status = 'approved') AS approved FROM holidays")[0]).toEqual(before);
   });
 });
 
@@ -341,6 +392,14 @@ describe('payroll with holiday work', () => {
     expect(r.text).toMatch(/ZH5/);
     expect(H.sql(`SELECT COUNT(*) AS n FROM payslips WHERE period_id = ${period}`)[0]!.n).toBe(0);
     expect((await staff().post(`/api/holidays/work/${ids.w5}/cancel`, { reason: 'zz intern rule not decided' })).status).toBe(200);
+  });
+
+  it('refuses an employment type the system does not know instead of mapping it to another rule', async () => {
+    const r = await payroll().post(`/api/payroll/periods/${period}/calculate`);
+    expect(r.status).toBe(409);
+    expect(r.text).toMatch(/ZH9/);
+    expect(r.text).toMatch(/ไม่รู้จัก/);
+    expect((await staff().post(`/api/holidays/work/${ids.w9}/cancel`, { reason: 'zz legacy employment type' })).status).toBe(200);
   });
 
   it('pays HOLIDAY_WORK / HOLIDAY_OT at the rule multiples of the configured hourly wage, with a snapshot', async () => {
@@ -357,18 +416,42 @@ describe('payroll with holiday work', () => {
     expect(z1.gross).toBe(baseline.get(ids.ZH1!)!.gross + 1750);
     expect(z1.sso).toBe(baseline.get(ids.ZH1!)!.sso); // outside the SSO wage, like OT
     const snap = JSON.parse(z1.calc_json).holiday;
-    expect(snap).toMatchObject({ monthlyRate: 30000, divisorDays: 30, hoursPerDay: 8, hourlyRate: 125, workAmount: 1000, otAmount: 750 });
-    expect(snap.items).toEqual([expect.objectContaining({ recordId: ids.w1, holidayId: hol.labour, holidayName: 'วันแรงงานแห่งชาติ', date: d('05-01'), normalHours: 8, otHours: 2, entitled: true, workMultiplier: 1, otMultiplier: 3 })]);
+    expect(snap).toMatchObject({ divisorDays: 30, hoursPerDay: 8, workAmount: 1000, otAmount: 750 });
+    expect(snap.monthlyRate).toBeUndefined(); // rates are per item (salary on the work date)
+    expect(snap.items).toEqual([expect.objectContaining({ monthlyRate: 30000, hourlyRate: 125, employmentType: 'permanent', recordId: ids.w1, holidayId: hol.labour, holidayName: 'วันแรงงานแห่งชาติ', date: d('05-01'), normalHours: 8, otHours: 2, entitled: true, workMultiplier: 1, otMultiplier: 3 })]);
     const z2 = s.get(ids.ZH2!)!;
     expect(JSON.parse(z2.calc_json).holiday).toMatchObject({ workAmount: 2000, otAmount: 0, items: [expect.objectContaining({ entitled: false, workMultiplier: 2 })] });
     expect(z2.gross).toBe(baseline.get(ids.ZH2!)!.gross + 2000);
-    expect(H.sql(`SELECT id, payroll_period_id FROM holiday_work_records WHERE payroll_period_id IS NOT NULL ORDER BY id`)).toEqual([{ id: ids.w1, payroll_period_id: period }, { id: ids.w2, payroll_period_id: period }]);
+    const locked = ['w1', 'w2', 'w6a', 'w6b', 'w7', 'w8'].map((k) => ids[k]!).sort((a, b) => a - b);
+    expect(H.sql(`SELECT id, payroll_period_id FROM holiday_work_records WHERE payroll_period_id IS NOT NULL ORDER BY id`)).toEqual(locked.map((id) => ({ id, payroll_period_id: period })));
+  });
+
+  it('BLOCKER 1: each holiday is paid at the salary in force on its work date (30,000 before the 16th, 36,000 from it)', async () => {
+    const z6 = slips().get(ids.ZH6!)!;
+    const snap = JSON.parse(z6.calc_json).holiday;
+    expect(snap.items.map((x: Record<string, unknown>) => [x.date, x.monthlyRate, x.hourlyRate, x.workAmount])).toEqual([
+      [d('05-01'), 30000, 125, 1000],
+      [d('05-20'), 36000, 150, 1200],
+    ]);
+    expect(snap.workAmount).toBe(2200);
+    expect(JSON.parse(z6.lines_json).find((l: { code: string }) => l.code === 'HOLIDAY_WORK').amount).toBe(2200);
+    expect(z6.gross).toBe(Math.round((baseline.get(ids.ZH6!)!.gross + 2200) * 100) / 100);
+    // the period's existing salary split is unchanged by the holiday work
+    const base = (x: Slip) => JSON.stringify((JSON.parse(x.lines_json) as Array<{ code: string }>).filter((l) => l.code.startsWith('BASE')));
+    expect(base(z6)).toBe(base(baseline.get(ids.ZH6!)!));
+  });
+
+  it('BLOCKER 2: the rule follows employees.employment_type exactly (not the probation status)', async () => {
+    const s = slips();
+    const item = (code: string) => JSON.parse(s.get(ids[code]!)!.calc_json).holiday.items[0];
+    expect(item('ZH7')).toMatchObject({ employmentType: 'probation', ruleId: ids.ruleProbation, workMultiplier: 1.5, workAmount: 1500 });
+    expect(item('ZH8')).toMatchObject({ employmentType: 'permanent', ruleId: ids.rulePermanent, workMultiplier: 1, workAmount: 1000 });
   });
 
   it('REGRESSION: employees without holiday work get exactly the baseline payslip', async () => {
     const s = slips();
-    // ZH3: nothing changed · ZH5: holiday work recorded, approved and then cancelled before payroll
-    for (const code of ['ZH3', 'ZH5']) {
+    // ZH3: nothing changed · ZH5 / ZH9: holiday work recorded, approved and then cancelled before payroll
+    for (const code of ['ZH3', 'ZH5', 'ZH9']) {
       const a = baseline.get(ids[code]!)!;
       const b = s.get(ids[code]!)!;
       expect({ net: b.net, gross: b.gross, sso: b.sso, tax: b.tax, lines: b.lines_json, calc: b.calc_json }, code).toEqual({ net: a.net, gross: a.gross, sso: a.sso, tax: a.tax, lines: a.lines_json, calc: a.calc_json });
@@ -387,7 +470,7 @@ describe('payroll with holiday work', () => {
     const after = slips();
     expect(JSON.stringify([...after].sort((a, b) => a[0] - b[0]).map(([e, x]) => [e, x.net, x.lines_json]))).toBe(before);
     const holidayLines = [...after.values()].flatMap((x) => JSON.parse(x.lines_json) as Array<{ code: string }>).filter((l) => l.code.startsWith('HOLIDAY'));
-    expect(holidayLines).toHaveLength(3); // ZH1 work + OT, ZH2 work
+    expect(holidayLines).toHaveLength(6); // ZH1 work + OT, ZH2, ZH6 (one line for both days), ZH7, ZH8 work
   });
 
   it('payslip archive keeps the replaced versions unchanged (baseline amounts are archived, not altered)', async () => {
@@ -422,7 +505,7 @@ describe('after calculation: history is protected', () => {
   it('approving the period keeps the records locked; audit trail is complete', async () => {
     expect((await admin().post(`/api/payroll/periods/${period}/approve`)).status).toBe(200);
     expect((await payroll().post(`/api/payroll/periods/${period}/reopen`)).status).toBe(409);
-    expect(Number(H.sql(`SELECT COUNT(*) AS n FROM holiday_work_records WHERE payroll_period_id = ${period}`)[0]!.n)).toBe(2);
+    expect(Number(H.sql(`SELECT COUNT(*) AS n FROM holiday_work_records WHERE payroll_period_id = ${period}`)[0]!.n)).toBe(6);
     // one query (each H.sql spawns wrangler, slow when every test file runs in parallel)
     const counts = new Map((H.sql("SELECT action, COUNT(*) AS n FROM audit_logs WHERE action LIKE 'holiday%' GROUP BY action") as Array<{ action: string; n: number }>).map((r) => [r.action, r.n]));
     for (const a of ['holiday.created', 'holiday.verified', 'holiday.approved', 'holiday.updated', 'holiday.deactivated', 'holiday.deleted', 'holiday.substitute_created', 'holiday.calendar_created', 'holiday_work.created', 'holiday_work.rejected', 'holiday_work.cancelled', 'holiday.pay_rule_created']) {

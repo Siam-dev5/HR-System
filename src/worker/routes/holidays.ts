@@ -8,7 +8,7 @@ import type { AppEnv, AuthUser } from '../env';
 import type { CompanyScope } from '../../shared/types';
 import {
   DEFAULT_COUNTRY, EMPLOYMENT_TYPES, HOLIDAY_TYPES, classifyDay, exportGrid, holidayWindow, inWindow, isIsoDate, missingSubstitutes, parseWeeklyRest, ruleProblems,
-  validateImport, weekday, type ApplicableHoliday, type HolidayCalendarRow, type HolidayListResponse, type HolidayPayRuleRow, type HolidayRow, type HolidayType, type HolidayWorkRow,
+  traditionalCompliance, validateImport, weekday, type ApplicableHoliday, type ComplianceHoliday, type HolidayCalendarRow, type HolidayListResponse, type HolidayPayRuleRow, type HolidayRow, type HolidayType, type HolidayWorkRow,
 } from '../../shared/holidays';
 import { writeXlsx, type Cell } from '../../shared/xlsx';
 import { addDays, daysInclusive } from '../../shared/payroll';
@@ -164,6 +164,36 @@ async function filters(c: Context<AppEnv>): Promise<Filters> {
   return { where, params };
 }
 
+/**
+ * Traditional-holiday count per company context for one year (central calendar of the country + the company's own
+ * calendar; the central calendar alone when the company has none). Independent of the list filters. Read-only: the
+ * system never creates or approves holidays to reach the minimum.
+ */
+async function compliance(db: D1Database, scope: CompanyScope, calendars: HolidayCalendarRow[], year: number, companyId: number | null): Promise<HolidayListResponse['compliance']> {
+  const active = calendars.filter((x) => x.active);
+  const { results } = await db
+    .prepare(`SELECT h.id, h.holiday_date, h.name, h.holiday_type, h.status, h.calendar_id FROM holidays h WHERE h.year = ? AND h.calendar_id IN (SELECT value FROM json_each(?))`)
+    .bind(year, JSON.stringify(active.map((x) => x.id)))
+    .all<ComplianceHoliday & { calendar_id: number }>();
+  const contexts: Array<{ company_id: number | null; company: string | null; country_code: string; calendarIds: number[] }> = [];
+  for (const cal of active) {
+    if (cal.company_id === null) {
+      if (companyId === null) contexts.push({ company_id: null, company: null, country_code: cal.country_code, calendarIds: [cal.id] });
+      continue;
+    }
+    if (companyId !== null && cal.company_id !== companyId) continue;
+    const central = active.find((x) => x.company_id === null && x.country_code === cal.country_code);
+    contexts.push({ company_id: cal.company_id, company: cal.company, country_code: cal.country_code, calendarIds: [cal.id, ...(central ? [central.id] : [])] });
+  }
+  if (companyId !== null && !contexts.length) {
+    // the company has no calendar of its own: the central calendar applies as it is
+    const central = active.find((x) => x.company_id === null && x.country_code === DEFAULT_COUNTRY);
+    const name = scope.items.find((x) => x.id === companyId)?.name ?? null;
+    if (central) contexts.push({ company_id: companyId, company: name, country_code: central.country_code, calendarIds: [central.id] });
+  }
+  return contexts.map((ctx) => ({ company_id: ctx.company_id, company: ctx.company, country_code: ctx.country_code, ...traditionalCompliance(results.filter((h) => ctx.calendarIds.includes(h.calendar_id)), year) }));
+}
+
 holidayRoutes.get('/', async (c) => {
   const user = currentUser(c);
   const scope = await scopeOf(c);
@@ -183,6 +213,7 @@ holidayRoutes.get('/', async (c) => {
     window: openWindow(),
     calendars,
     holidays: results.map((h) => ({ ...h, needs_substitute: needs.has(h.id) })),
+    compliance: await compliance(db, scope, calendars, c.req.query('year') ? intParam(c.req.query('year'), 'year') : Number(bangkokNow().date.slice(0, 4)), c.req.query('company') ? intParam(c.req.query('company'), 'company') : null),
     can: {
       create: can(user, P.create),
       update: can(user, P.update),

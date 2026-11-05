@@ -1,9 +1,9 @@
 import { describe, expect, it } from 'vitest';
 import {
-  WINDOW_YEARS, buddhistYear, classifyDay, exportGrid, holidayPay, holidayWindow, hourlyRate, inWindow, isIsoDate, isLeapYear, missingSubstitutes, parseWeeklyRest, resolveRule, ruleProblems,
-  thaiDate, validateImport, weekday, type ApplicableHoliday, type ApplicableRule,
+  EMPLOYMENT_TYPES, MIN_TRADITIONAL_HOLIDAYS, WINDOW_YEARS, buddhistYear, classifyDay, exportGrid, holidayPay, holidayWindow, hourlyRate, inWindow, isIsoDate, isLeapYear, missingSubstitutes, parseWeeklyRest,
+  priceHolidayWork, resolveRule, ruleProblems, thaiDate, traditionalCompliance, validateImport, weekday, type ApplicableHoliday, type ApplicableRule, type ComplianceHoliday, type HolidayWorkInput,
 } from '../../src/shared/holidays';
-import { calculatePay, DEFAULT_PAYROLL_CONFIG, type PayInput } from '../../src/shared/payroll';
+import { calculatePay, salaryOn, wageSegments, DEFAULT_PAYROLL_CONFIG, type PayInput } from '../../src/shared/payroll';
 
 describe('10-year holiday window', () => {
   it('is the current year and the next nine (2026 → 2035)', () => {
@@ -180,5 +180,121 @@ describe('payroll regression: calculatePay without holiday work is unchanged', (
     expect(withHoliday.sso).toBe(without.sso);
     expect(withHoliday.tax).toBeGreaterThanOrEqual(without.tax);
     expect(withHoliday.lines.map((l) => l.code)).toEqual(['BASE', 'HOLIDAY_WORK', 'HOLIDAY_OT', 'SSO', 'TAX']);
+  });
+});
+
+describe('BLOCKER 1: holiday pay uses the salary in force on each work date', () => {
+  const permanent: ApplicableRule = { id: 1, company_id: null, employment_type: 'permanent', holiday_pay_entitled: 1, work_multiplier: 1, ot_multiplier: 3, effective_from: '2020-01-01', effective_to: null };
+  const ctx = (history: Array<{ from: string; amount: number }>, baseSalary = 30000) => ({ companyId: 7, employmentType: 'permanent', baseSalary, history, divisorDays: 30, hoursPerDay: 8, rules: [permanent] });
+  const work = (id: number, date: string, normal = 8, ot = 0): HolidayWorkInput => ({ id, holiday_id: 100 + id, work_date: date, normal_hours: normal, ot_hours: ot, holiday_name: `H${id}`, holiday_type: 'traditional' });
+  const raise = [{ from: '2027-05-16', amount: 36000 }];
+  const priced = (w: HolidayWorkInput[], c: ReturnType<typeof ctx>) => {
+    const r = priceHolidayWork(w, c);
+    if (!r.ok) throw new Error(r.reason);
+    return r.snapshot;
+  };
+
+  it('1. 30,000 for the whole period, 8 h on a holiday → 125/h × 8 = 1,000', () => {
+    const s = priced([work(1, '2027-05-10')], ctx([]));
+    expect(s.items[0]).toMatchObject({ monthlyRate: 30000, hourlyRate: 125, workAmount: 1000, otAmount: 0, employmentType: 'permanent' });
+    expect(s).toMatchObject({ divisorDays: 30, hoursPerDay: 8, workAmount: 1000, otAmount: 0 });
+  });
+  it('2. raised to 36,000 on the 16th, holiday worked on the 10th → old rate (1,000)', () => {
+    expect(priced([work(1, '2027-05-10')], ctx(raise)).items[0]).toMatchObject({ monthlyRate: 30000, hourlyRate: 125, workAmount: 1000 });
+  });
+  it('3. raised to 36,000 on the 16th, holiday worked on the 20th → new rate 150/h (1,200)', () => {
+    expect(priced([work(1, '2027-05-20')], ctx(raise)).items[0]).toMatchObject({ monthlyRate: 36000, hourlyRate: 150, workAmount: 1200 });
+  });
+  it('3b. worked on the effective date itself → new rate', () => {
+    expect(priced([work(1, '2027-05-16')], ctx(raise)).items[0]!.monthlyRate).toBe(36000);
+  });
+  it('4. holidays before and after the raise in the same period: each priced at its own rate, kept per item', () => {
+    const s = priced([work(1, '2027-05-01', 8, 2), work(2, '2027-05-20', 8, 2)], ctx(raise));
+    expect(s.items.map((x) => [x.date, x.monthlyRate, x.hourlyRate, x.workAmount, x.otAmount])).toEqual([
+      ['2027-05-01', 30000, 125, 1000, 750],
+      ['2027-05-20', 36000, 150, 1200, 900],
+    ]);
+    expect(s).toMatchObject({ workAmount: 2200, otAmount: 1650 });
+  });
+  it('5. several salary-history rows in any order resolve to the right rate per day', () => {
+    const shuffled = [{ from: '2027-05-16', amount: 36000 }, { from: '2026-01-01', amount: 28000 }, { from: '2027-05-05', amount: 32000 }];
+    const s = priced([work(1, '2027-05-03'), work(2, '2027-05-10'), work(3, '2027-05-20')], ctx(shuffled, 99999));
+    expect(s.items.map((x) => x.monthlyRate)).toEqual([28000, 32000, 36000]);
+    // before the first history row the employee's base salary applies
+    expect(priced([work(1, '2025-12-31')], ctx(shuffled, 27000)).items[0]!.monthlyRate).toBe(27000);
+  });
+  it('salaryOn agrees with the wage-segment rates (same rule as the existing salary split)', () => {
+    const history = [{ from: '2027-05-16', amount: 36000 }, { from: '2026-01-01', amount: 28000 }, { from: '2027-05-05', amount: 32000 }];
+    const w = wageSegments({ periodStart: '2027-04-26', periodEnd: '2027-05-25', hireDate: '2020-01-01', terminationDate: null, baseSalary: 25000, history, mode: 'monthly', divisorDays: 30 });
+    for (const seg of w.segments) {
+      expect(salaryOn(25000, history, seg.start)).toBe(seg.rate);
+      expect(salaryOn(25000, history, seg.end)).toBe(seg.rate);
+    }
+    expect(w.segments.map((x) => x.rate)).toEqual([28000, 32000, 36000]);
+  });
+  it('uses divisor days and hours per day from settings', () => {
+    const s = priced([work(1, '2027-05-20')], { ...ctx(raise), divisorDays: 26, hoursPerDay: 7 });
+    expect(s.items[0]!.workAmount).toBe(Math.round((36000 / 26 / 7) * 8 * 100) / 100);
+  });
+});
+
+describe('BLOCKER 2: employment type → pay rule mapping', () => {
+  const rule = (id: number, type: string, entitled: 0 | 1, work: number): ApplicableRule => ({ id, company_id: null, employment_type: type, holiday_pay_entitled: entitled, work_multiplier: work, ot_multiplier: 3, effective_from: '2020-01-01', effective_to: null });
+  const rules = [rule(1, 'permanent', 1, 1), rule(2, 'contract', 0, 2), rule(3, 'probation', 1, 1.5), rule(4, 'intern', 0, 2.5)];
+  it('the supported types are exactly the employee-form options', () => {
+    expect([...EMPLOYMENT_TYPES]).toEqual(['permanent', 'contract', 'probation', 'intern']);
+  });
+  it('every supported type resolves to its own rule, never another type', () => {
+    for (const [i, t] of EMPLOYMENT_TYPES.entries()) expect(resolveRule(rules, 7, t, '2027-05-01')?.id, t).toBe(i + 1);
+  });
+  it('no fallback: a type without a rule gets none (calculation is refused instead of using another rule)', () => {
+    expect(resolveRule(rules.filter((r) => r.employment_type !== 'probation'), 7, 'probation', '2027-05-01')).toBeNull();
+    const r = priceHolidayWork([{ id: 1, holiday_id: 1, work_date: '2027-05-01', normal_hours: 8, ot_hours: 0, holiday_name: 'x', holiday_type: 'traditional' }], { companyId: 7, employmentType: 'intern', baseSalary: 30000, history: [], divisorDays: 30, hoursPerDay: 8, rules: rules.slice(0, 3) });
+    expect(r).toEqual({ ok: false, reason: 'no_rule', date: '2027-05-01' });
+  });
+  it('unknown or differently written values are never mapped', () => {
+    for (const bad of ['Permanent', ' permanent', 'PERMANENT', 'full_time', 'พนักงานประจำ', '', 'active']) {
+      expect(resolveRule(rules, 7, bad, '2027-05-01'), JSON.stringify(bad)).toBeNull();
+      const r = priceHolidayWork([{ id: 1, holiday_id: 1, work_date: '2027-05-01', normal_hours: 8, ot_hours: 0, holiday_name: 'x', holiday_type: 'traditional' }], { companyId: 7, employmentType: bad, baseSalary: 30000, history: [], divisorDays: 30, hoursPerDay: 8, rules });
+      expect(r).toMatchObject({ ok: false, reason: 'unknown_employment_type' });
+    }
+  });
+  it('each type is priced with its own multiplier and recorded in the snapshot', () => {
+    for (const t of EMPLOYMENT_TYPES) {
+      const r = priceHolidayWork([{ id: 1, holiday_id: 1, work_date: '2027-05-01', normal_hours: 8, ot_hours: 0, holiday_name: 'x', holiday_type: 'traditional' }], { companyId: 7, employmentType: t, baseSalary: 30000, history: [], divisorDays: 30, hoursPerDay: 8, rules });
+      if (!r.ok) throw new Error(t);
+      const expected = rules.find((x) => x.employment_type === t)!;
+      expect(r.snapshot.items[0]).toMatchObject({ employmentType: t, ruleId: expected.id, workMultiplier: expected.work_multiplier, workAmount: 1000 * expected.work_multiplier });
+    }
+  });
+});
+
+describe('traditional-holiday compliance (warning only)', () => {
+  let n = 0;
+  const hol = (date: string, type: ComplianceHoliday['holiday_type'], status: ComplianceHoliday['status'] = 'approved'): ComplianceHoliday => ({ id: ++n, holiday_date: date, name: `${type} ${date}`, holiday_type: type, status });
+  const traditional = (count: number) => Array.from({ length: count }, (_, i) => hol(`2027-${String(i + 1).padStart(2, '0')}-0${i < 9 ? 2 : 3}`, 'traditional'));
+  it('warns when fewer than 13 approved traditional holidays (labour day included) exist', () => {
+    const c = traditionalCompliance([...traditional(11), hol('2027-05-01', 'national_labour')], 2027);
+    expect(MIN_TRADITIONAL_HOLIDAYS).toBe(13);
+    expect(c).toMatchObject({ counted: 12, required: 13, ok: false, labourDayIssue: null });
+    expect(c.message).toMatch(/น้อยกว่าขั้นต่ำ 13/);
+  });
+  it('13 counted is fine; company, local and substitute days are reported but not counted; drafts are not counted', () => {
+    const c = traditionalCompliance([
+      ...traditional(12), hol('2027-05-01', 'national_labour'),
+      hol('2027-06-15', 'company'), hol('2027-06-16', 'company'), hol('2027-07-01', 'local'), hol('2027-08-16', 'substitute'),
+      hol('2027-12-31', 'traditional', 'draft'), hol('2027-12-30', 'traditional', 'inactive'), hol('2026-12-31', 'traditional'),
+    ], 2027);
+    expect(c).toMatchObject({ counted: 13, ok: true, notCounted: { company: 2, local: 1, substitute: 1 }, drafts: 1 });
+    expect(c.countedHolidays.some((x) => x.type === 'company')).toBe(false);
+  });
+  it('labour day is shown separately and checked', () => {
+    expect(traditionalCompliance(traditional(13), 2027).labourDayIssue).toMatch(/ยังไม่มี/);
+    expect(traditionalCompliance([hol('2027-05-03', 'national_labour')], 2027).labourDayIssue).toMatch(/ไม่ใช่วันที่ 1 พฤษภาคม/);
+    expect(traditionalCompliance([hol('2027-05-01', 'national_labour'), hol('2027-05-01', 'national_labour')], 2027).labourDayIssue).toMatch(/2 รายการ/);
+    expect(traditionalCompliance([hol('2027-05-01', 'national_labour')], 2027).labourDay).toHaveLength(1);
+  });
+  it('the same day in the central and the company calendar counts once', () => {
+    expect(traditionalCompliance([hol('2027-04-13', 'traditional'), hol('2027-04-13', 'traditional')], 2027).counted).toBe(1);
   });
 });

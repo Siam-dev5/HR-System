@@ -721,3 +721,10 @@ input[aria-invalid='true'], select[aria-invalid='true'], textarea[aria-invalid='
   .hol-chip { font-size: 0.62rem; padding: 0.1rem 0.15rem; }
   .holiday-toolbar .field.inline { flex: 1 1 100%; }
 }
+.holiday-compliance { margin-bottom: 1rem; }
+.holiday-compliance h3 { margin: 0 0 0.5rem; }
+.compliance-row { border-top: 1px solid var(--border); padding: 0.5rem 0; }
+.compliance-row > summary { cursor: pointer; }
+.compliance-row.is-warn > summary strong { color: var(--warn); }
+.compliance-list { columns: 2; column-gap: 1.5rem; margin: 0.4rem 0 0; }
+@media (max-width: 600px) { .compliance-list { columns: 1; } }

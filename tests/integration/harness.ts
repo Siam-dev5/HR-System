@@ -160,7 +160,9 @@ export class Client {
   constructor(private readonly baseUrl: string) {}
 
   async req<T = any>(method: string, path: string, body?: unknown, extraHeaders: Record<string, string> = {}): Promise<Res<T>> {
-    const headers: Record<string, string> = { ...extraHeaders };
+    // a fresh connection per request: after a quiet spell wrangler dev drops idle keep-alive sockets, and fetch never
+    // retries a POST written to such a stale socket (ECONNRESET)
+    const headers: Record<string, string> = { connection: 'close', ...extraHeaders };
     if (this.cookie) headers.cookie = this.cookie;
     if (method !== 'GET' && !('x-hr-requested' in extraHeaders)) headers['x-hr-requested'] = '1';
     if (body !== undefined) headers['content-type'] = 'application/json';
@@ -193,7 +195,7 @@ export class Client {
   }
   /** raw binary request (e.g. an image upload); returns the bytes too */
   async bytes(method: string, path: string, data?: Uint8Array, contentType?: string, extraHeaders: Record<string, string> = {}): Promise<Res & { raw: Uint8Array }> {
-    const headers: Record<string, string> = { ...extraHeaders };
+    const headers: Record<string, string> = { connection: 'close', ...extraHeaders };
     if (this.cookie) headers.cookie = this.cookie;
     if (method !== 'GET' && !('x-hr-requested' in extraHeaders)) headers['x-hr-requested'] = '1';
     if (contentType) headers['content-type'] = contentType;

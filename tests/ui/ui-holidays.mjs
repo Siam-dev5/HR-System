@@ -80,6 +80,9 @@ try {
   check('approved and draft holidays are marked differently', month.chips.length === 2 && month.holidayCells === 2 && month.draftCells === 1, JSON.stringify(month));
   check('HR staff sees add / import / export (no approve permission needed for these)', ['+ เพิ่มวันหยุด', 'นำเข้า Excel/CSV', 'Export Excel'].every((b) => month.buttons.includes(b)), month.buttons.join());
   await page.screenshot({ path: join(OUT, 'month-1440-light.png') });
+  const comp = await page.evaluate(() => ({ text: document.querySelector('.holiday-compliance')?.textContent ?? '', warn: document.querySelectorAll('.holiday-compliance .compliance-row.is-warn').length }));
+  check('compliance: fewer than 13 approved traditional holidays is a warning; labour day shown separately; nothing is auto-approved',
+    comp.warn >= 1 && comp.text.includes('นับรวม 1 / ขั้นต่ำ 13') && comp.text.includes('วันแรงงานแห่งชาติ (uitest)') && comp.text.includes('ร่างที่ยังไม่นับ') && comp.text.includes('ไม่สร้างหรืออนุมัติวันหยุดแทน'), comp.text.slice(0, 160));
 
   await page.click('.hol-chip:has-text("uitest")');
   await page.waitForSelector('.modal .dl');

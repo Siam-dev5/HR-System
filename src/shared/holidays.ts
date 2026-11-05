@@ -3,7 +3,8 @@
 // Statutory holiday-pay minimums are validated here, but whether an employee is entitled to holiday pay and the
 // multipliers actually used come from approved holiday_pay_rules rows, never from code.
 import type { Cell } from './xlsx';
-import { round2 } from './payroll';
+import type { HolidayPaySnapshot } from './types';
+import { round2, salaryOn } from './payroll';
 
 export const HOLIDAY_TYPES = ['traditional', 'national_labour', 'company', 'substitute', 'local'] as const;
 export type HolidayType = (typeof HOLIDAY_TYPES)[number];
@@ -114,6 +115,8 @@ export interface HolidayListResponse {
   window: { from: number; to: number };
   calendars: HolidayCalendarRow[];
   holidays: HolidayRow[];
+  /** traditional-holiday count of the selected year, per company context (warning only) */
+  compliance: Array<HolidayCompliance & { company_id: number | null; company: string | null; country_code: string }>;
   can: { create: boolean; update: boolean; delete: boolean; approve: boolean; import: boolean; export: boolean; allCompanies: boolean };
 }
 
@@ -273,11 +276,138 @@ export interface ApplicableRule {
   effective_to: string | null;
 }
 
-/** The approved rule for an employee on a date: a company rule wins over the all-company rule; latest start wins. */
+export const isEmploymentType = (v: unknown): v is EmploymentType => typeof v === 'string' && (EMPLOYMENT_TYPES as readonly string[]).includes(v);
+
+/**
+ * The approved rule for an employee on a date: a company rule wins over the all-company rule; latest start wins.
+ * The employment type must match exactly (employees.employment_type, not the probation STATUS): there is no fallback
+ * from one type to another, so an employee is never paid under another type's rule.
+ */
 export function resolveRule(rules: readonly ApplicableRule[], companyId: number, employmentType: string, date: string): ApplicableRule | null {
+  if (!isEmploymentType(employmentType)) return null;
   const fits = rules.filter((r) => r.employment_type === employmentType && r.effective_from <= date && (r.effective_to === null || r.effective_to >= date) && (r.company_id === null || r.company_id === companyId));
   fits.sort((a, b) => (b.company_id === null ? 0 : 1) - (a.company_id === null ? 0 : 1) || (a.effective_from < b.effective_from ? 1 : a.effective_from > b.effective_from ? -1 : 0));
   return fits[0] ?? null;
+}
+
+export interface HolidayWorkInput {
+  id: number;
+  holiday_id: number;
+  work_date: string;
+  normal_hours: number;
+  ot_hours: number;
+  holiday_name: string;
+  holiday_type: HolidayType;
+}
+
+export interface HolidayPricingContext {
+  companyId: number;
+  employmentType: string;
+  /** employees.base_salary: the rate when no salary-history row applies */
+  baseSalary: number;
+  /** approved salary history (any order) */
+  history: ReadonlyArray<{ from: string; amount: number }>;
+  divisorDays: number;
+  hoursPerDay: number;
+  rules: readonly ApplicableRule[];
+}
+
+export type HolidayPricing =
+  | { ok: true; snapshot: HolidayPaySnapshot }
+  | { ok: false; reason: 'unknown_employment_type' | 'no_rule'; date: string };
+
+/**
+ * Prices an employee's approved holiday work. Each record uses the salary in force ON ITS WORK DATE (a raise inside the
+ * period only applies from its effective date) and the approved rule for the employee's exact employment type.
+ */
+export function priceHolidayWork(work: readonly HolidayWorkInput[], ctx: HolidayPricingContext): HolidayPricing {
+  const items: HolidayPaySnapshot['items'] = [];
+  for (const w of work) {
+    if (!isEmploymentType(ctx.employmentType)) return { ok: false, reason: 'unknown_employment_type', date: w.work_date };
+    const rule = resolveRule(ctx.rules, ctx.companyId, ctx.employmentType, w.work_date);
+    if (!rule) return { ok: false, reason: 'no_rule', date: w.work_date };
+    const r = { entitled: rule.holiday_pay_entitled === 1, workMultiplier: rule.work_multiplier, otMultiplier: rule.ot_multiplier };
+    const monthlyRate = salaryOn(ctx.baseSalary, ctx.history, w.work_date);
+    const pay = holidayPay({ monthlyRate, divisorDays: ctx.divisorDays, hoursPerDay: ctx.hoursPerDay }, r, w.normal_hours, w.ot_hours);
+    items.push({
+      monthlyRate, hourlyRate: pay.hourly, employmentType: ctx.employmentType,
+      recordId: w.id, holidayId: w.holiday_id, holidayName: w.holiday_name, holidayType: w.holiday_type, date: w.work_date, normalHours: w.normal_hours, otHours: w.ot_hours,
+      ruleId: rule.id, ...r, workAmount: pay.workAmount, otAmount: pay.otAmount,
+    });
+  }
+  return {
+    ok: true,
+    snapshot: {
+      divisorDays: ctx.divisorDays,
+      hoursPerDay: ctx.hoursPerDay,
+      items,
+      workAmount: round2(items.reduce((a, x) => a + x.workAmount, 0)),
+      otAmount: round2(items.reduce((a, x) => a + x.otAmount, 0)),
+    },
+  };
+}
+
+// ---- Traditional-holiday count (Labour Protection Act s.29) ------------------------------------
+/** At least this many traditional holidays a year, National Labour Day included. */
+export const MIN_TRADITIONAL_HOLIDAYS = 13;
+
+export interface ComplianceHoliday {
+  id: number;
+  holiday_date: string;
+  name: string;
+  holiday_type: HolidayType;
+  status: HolidayStatus;
+}
+
+export interface HolidayCompliance {
+  year: number;
+  required: number;
+  /** approved traditional + national labour holidays (counted towards the minimum) */
+  counted: number;
+  countedHolidays: Array<{ id: number; date: string; name: string; type: HolidayType }>;
+  /** approved National Labour Day rows, shown separately for review (normally exactly one, on 1 May) */
+  labourDay: Array<{ id: number; date: string; name: string }>;
+  labourDayIssue: string | null;
+  /** approved holidays that do NOT count: company announcements, local holidays and substitute days */
+  notCounted: { company: number; local: number; substitute: number };
+  /** traditional / labour holidays still draft (not counted until HR approves them) */
+  drafts: number;
+  ok: boolean;
+  /** never auto-corrected: HR checks the official announcement and approves */
+  message: string;
+}
+
+/** Counts a year's approved holidays for one company context (central calendar + the company's own calendar). */
+export function traditionalCompliance(holidays: readonly ComplianceHoliday[], year: number): HolidayCompliance {
+  const inYear = holidays.filter((h) => h.holiday_date.startsWith(`${year}-`));
+  const approved = inYear.filter((h) => h.status === 'approved');
+  // the same day in two calendars (central + company) counts once
+  const byDate = new Map<string, ComplianceHoliday>();
+  for (const h of approved) if ((h.holiday_type === 'traditional' || h.holiday_type === 'national_labour') && !byDate.has(h.holiday_date)) byDate.set(h.holiday_date, h);
+  const counted = [...byDate.values()].sort((a, b) => (a.holiday_date < b.holiday_date ? -1 : 1));
+  const labour = approved.filter((h) => h.holiday_type === 'national_labour');
+  const labourDayIssue = labour.length === 0 ? 'ยังไม่มีวันแรงงานแห่งชาติที่อนุมัติแล้ว'
+    : labour.length > 1 ? `มีวันแรงงานแห่งชาติ ${labour.length} รายการ ต้องตรวจสอบ`
+      : labour[0]!.holiday_date.slice(5) !== '05-01' ? `วันแรงงานแห่งชาติไม่ใช่วันที่ 1 พฤษภาคม (${labour[0]!.holiday_date}) ต้องตรวจสอบกับประกาศ` : null;
+  const ok = counted.length >= MIN_TRADITIONAL_HOLIDAYS;
+  return {
+    year,
+    required: MIN_TRADITIONAL_HOLIDAYS,
+    counted: counted.length,
+    countedHolidays: counted.map((h) => ({ id: h.id, date: h.holiday_date, name: h.name, type: h.holiday_type })),
+    labourDay: labour.map((h) => ({ id: h.id, date: h.holiday_date, name: h.name })),
+    labourDayIssue,
+    notCounted: {
+      company: approved.filter((h) => h.holiday_type === 'company').length,
+      local: approved.filter((h) => h.holiday_type === 'local').length,
+      substitute: approved.filter((h) => h.holiday_type === 'substitute').length,
+    },
+    drafts: inYear.filter((h) => h.status === 'draft' && (h.holiday_type === 'traditional' || h.holiday_type === 'national_labour')).length,
+    ok,
+    message: ok
+      ? `วันหยุดตามประเพณีที่อนุมัติแล้ว ${counted.length} วัน (ขั้นต่ำ ${MIN_TRADITIONAL_HOLIDAYS} วัน รวมวันแรงงานแห่งชาติ)`
+      : `วันหยุดตามประเพณีที่อนุมัติแล้วมี ${counted.length} วัน น้อยกว่าขั้นต่ำ ${MIN_TRADITIONAL_HOLIDAYS} วัน — HR ต้องตรวจสอบประกาศอย่างเป็นทางการและอนุมัติให้ครบ (ระบบไม่สร้างหรืออนุมัติแทน)`,
+  };
 }
 
 // ---- Import (Excel / CSV) ----------------------------------------------------------------------

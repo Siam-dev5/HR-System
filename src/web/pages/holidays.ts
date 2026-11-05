@@ -79,7 +79,7 @@ export async function renderHolidays(main: HTMLElement, params: URLSearchParams)
         select([['', 'ทุกสถานะ'], ['draft', 'ร่าง'], ['approved', 'อนุมัติ'], ['inactive', 'ปิดใช้งาน']], filters.status, { 'aria-label': 'สถานะ', onchange: (e: Event) => go({ status: (e.target as HTMLSelectElement).value || null }) }),
         select([['', 'ทุกประเทศ'], ...[...new Set(data.calendars.map((c) => c.country_code))].map((c): [string, string] => [c, c])], filters.country, { 'aria-label': 'ประเทศ', onchange: (e: Event) => go({ country: (e.target as HTMLSelectElement).value || null }) }));
       const reload = () => go({});
-      body = h('div', null, filterBar,
+      body = h('div', null, filterBar, complianceCard(data),
         tab === 'calendar' ? calendarView(data, year, view, Number(params.get('month') ?? new Date().getMonth() + 1), go, reload) : listView(data, reload));
     } else if (tab === 'work') body = await workView(data, year, () => go({}));
     else body = await rulesView(data, () => go({}));
@@ -137,6 +137,29 @@ function listView(data: HolidayListResponse, reload: () => void): HTMLElement {
       kpi('ร่าง (รอตรวจสอบ/อนุมัติ)', data.holidays.filter((x) => x.status === 'draft').length, data.holidays.some((x) => x.status === 'draft') ? 'kpi-warn' : ''),
       kpi('ตรงวันหยุดประจำสัปดาห์ ยังไม่มีวันชดเชย', missing, missing ? 'kpi-warn' : '')),
     data.holidays.length ? listTable(data, data.holidays, reload) : h('div', { class: 'card empty' }, 'ยังไม่มีวันหยุดตามเงื่อนไข'));
+}
+
+/** Traditional-holiday count (warning only): HR checks the official announcement and approves; nothing is auto-created. */
+function complianceCard(data: HolidayListResponse): HTMLElement | null {
+  if (!data.compliance.length) return null;
+  return h('section', { class: 'card holiday-compliance', 'aria-label': 'ตรวจสอบจำนวนวันหยุดตามประเพณี' },
+    h('h3', null, `ตรวจสอบจำนวนวันหยุดตามประเพณี ปี ${data.compliance[0] ? yearLabel(data.compliance[0].year) : ''}`),
+    data.compliance.map((x) => h('details', { class: `compliance-row ${x.ok && !x.labourDayIssue ? 'is-ok' : 'is-warn'}`, open: !x.ok || !!x.labourDayIssue },
+      h('summary', null,
+        h('strong', null, x.company ?? `ปฏิทินกลาง (${x.country_code})`), ' · ',
+        h('span', { class: x.ok ? 'ok-text' : 'issue-warning' }, `นับรวม ${x.counted} / ขั้นต่ำ ${x.required} วัน`)),
+      h('div', { class: x.ok ? 'muted small' : 'alert', role: x.ok ? null : 'status' }, x.message),
+      h('dl', { class: 'dl' },
+        h('dt', null, 'นับรวม (ประเพณี + วันแรงงาน, อนุมัติแล้ว)'), h('dd', null, String(x.counted)),
+        h('dt', null, 'วันแรงงานแห่งชาติ'), h('dd', null,
+          x.labourDay.length ? x.labourDay.map((l) => h('div', null, `${thaiDate(l.date)} · ${l.name}`)) : '-',
+          x.labourDayIssue ? h('div', { class: 'issue-warning small' }, x.labourDayIssue) : null),
+        h('dt', null, 'ไม่นับรวม'), h('dd', null, `วันหยุดบริษัท ${x.notCounted.company} · วันหยุดท้องถิ่น ${x.notCounted.local} · วันหยุดชดเชย ${x.notCounted.substitute}`),
+        h('dt', null, 'ร่างที่ยังไม่นับ (ประเพณี / วันแรงงาน)'), h('dd', null, String(x.drafts))),
+      x.countedHolidays.length
+        ? h('ol', { class: 'small compliance-list' }, x.countedHolidays.map((c) => h('li', null, `${thaiDate(c.date)} · ${c.name}${c.type === 'national_labour' ? ' (วันแรงงานแห่งชาติ)' : ''}`)))
+        : null)),
+    h('p', { class: 'muted small' }, 'HR เป็นผู้รับผิดชอบตรวจสอบประกาศอย่างเป็นทางการและอนุมัติวันหยุด ระบบแสดงคำเตือนเท่านั้น ไม่สร้างหรืออนุมัติวันหยุดแทน'));
 }
 
 function kpi(label: string, value: number, cls = ''): HTMLElement {

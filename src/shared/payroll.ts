@@ -213,6 +213,22 @@ export interface WageResult {
 }
 
 /**
+ * Monthly rate in force on a day: the latest approved salary-history row with from <= day (any input order),
+ * else the employee's base salary. Same rule as the segment rates of wageSegments.
+ */
+export function salaryOn(baseSalary: number, history: ReadonlyArray<{ from: string; amount: number }>, day: string): number {
+  let rate = baseSalary;
+  let since: string | null = null;
+  for (const x of history) {
+    if (x.from <= day && (since === null || x.from >= since)) {
+      rate = x.amount;
+      since = x.from;
+    }
+  }
+  return round2(rate);
+}
+
+/**
  * Splits a period into wage segments at the probation boundary and at salary changes, and prices each segment on a
  * 30-day base. A fully employed monthly period always pays exactly 30 days, so splitting never over- or under-pays:
  * the last segment receives the remaining paid days. Partial periods (joiner / leaver) pay calendar days, capped at 30.

@@ -294,13 +294,16 @@ export interface PayslipCalc {
 }
 
 export interface HolidayPaySnapshot {
-  /** monthly rate ÷ divisorDays ÷ hoursPerDay (System Settings at calculation time) */
-  monthlyRate: number;
+  /** System Settings at calculation time: hourly wage = monthly rate on the work date ÷ divisorDays ÷ hoursPerDay */
   divisorDays: number;
   hoursPerDay: number;
-  hourlyRate: number;
   /** the monthly salary already pays an entitled employee for the holiday itself (entitlement A): nothing extra */
   items: Array<{
+    /** salary in force on the work date (salary history), and the hourly wage derived from it */
+    monthlyRate: number;
+    hourlyRate: number;
+    /** employees.employment_type used to pick the pay rule */
+    employmentType: string;
     recordId: number;
     holidayId: number;
     holidayName: string;

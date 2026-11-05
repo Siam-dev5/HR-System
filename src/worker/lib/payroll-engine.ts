@@ -3,7 +3,7 @@
 // approved requests, recurring pay items, System Settings. Nothing here writes.
 import type { PayResult } from '../../shared/payroll';
 import { calculatePay, resolveEwf, round2, wageSegments, type EwfStatus, type WageResult } from '../../shared/payroll';
-import { holidayPay, resolveRule, type ApplicableRule, type HolidayType } from '../../shared/holidays';
+import { priceHolidayWork, type ApplicableRule, type HolidayWorkInput as HolidayWorkBase } from '../../shared/holidays';
 import type { HolidayPaySnapshot, PayslipCalc, PayrollPeriod } from '../../shared/types';
 import { conflict } from './http';
 import { ewfConfig, loadSettings, payrollConfig } from './settings';
@@ -28,16 +28,7 @@ export interface ComputedSlip {
   holidayRecordIds: number[];
 }
 
-interface HolidayWorkInput {
-  id: number;
-  employee_id: number;
-  holiday_id: number;
-  work_date: string;
-  normal_hours: number;
-  ot_hours: number;
-  holiday_name: string;
-  holiday_type: HolidayType;
-}
+type HolidayWorkInput = HolidayWorkBase & { employee_id: number };
 
 /**
  * Approved holiday work of a monthly period that no other period has used. Refuses (409) instead of guessing when an
@@ -195,13 +186,14 @@ export async function computePeriod(db: D1Database, p: PeriodRowLike, filterComp
 
   const out: ComputedSlip[] = [];
   for (const e of emps) {
+    const employeeHistory = history.filter((h) => h.employee_id === e.id).map((h) => ({ from: h.effective_date, amount: h.base_salary }));
     const wage = wageSegments({
       periodStart: p.start_date,
       periodEnd: p.end_date,
       hireDate: e.hire_date,
       terminationDate: e.termination_date,
       baseSalary: e.base_salary,
-      history: history.filter((h) => h.employee_id === e.id).map((h) => ({ from: h.effective_date, amount: h.base_salary })),
+      history: employeeHistory,
       mode: midMonth ? 'mid_month' : 'monthly',
       divisorDays: cfg.otDivisorDays,
     });
@@ -236,21 +228,22 @@ export async function computePeriod(db: D1Database, p: PeriodRowLike, filterComp
       // approver's confirmation on the record instead, because a Feishu import only carries period totals)
       const clash = imp ? undefined : holidays.otClash.find((x) => x.employee_id === e.id);
       if (clash) throw conflict(`พนักงาน ${e.emp_code} มีทั้งคำขอ OT ที่อนุมัติแล้วและบันทึกทำงานวันหยุดในวันที่ ${clash.work_date} ต้องยกเลิกรายการใดรายการหนึ่งก่อนคำนวณ (ป้องกันการจ่ายซ้ำ)`);
-      const basis = { monthlyRate: wage.rate, divisorDays: cfg.otDivisorDays, hoursPerDay: cfg.hoursPerDay };
-      const items: HolidayPaySnapshot['items'] = worked.map((w) => {
-        const rule = resolveRule(holidays.rules, e.company_id, e.employment_type, w.work_date);
-        if (!rule) throw conflict(`ยังไม่มีกฎค่าจ้างวันหยุดที่อนุมัติแล้วสำหรับพนักงาน ${e.emp_code} (ประเภทการจ้าง ${e.employment_type}) ณ วันที่ ${w.work_date} ต้องกำหนดและอนุมัติกฎก่อนคำนวณ`);
-        const r = { entitled: rule.holiday_pay_entitled === 1, workMultiplier: rule.work_multiplier, otMultiplier: rule.ot_multiplier };
-        const pay = holidayPay(basis, r, w.normal_hours, w.ot_hours);
-        return { recordId: w.id, holidayId: w.holiday_id, holidayName: w.holiday_name, holidayType: w.holiday_type, date: w.work_date, normalHours: w.normal_hours, otHours: w.ot_hours, ruleId: rule.id, ...r, workAmount: pay.workAmount, otAmount: pay.otAmount };
+      // each record is priced at the salary in force on its own work date (salary history), not the period-end rate
+      const priced = priceHolidayWork(worked, {
+        companyId: e.company_id,
+        employmentType: e.employment_type,
+        baseSalary: e.base_salary,
+        history: employeeHistory,
+        divisorDays: cfg.otDivisorDays,
+        hoursPerDay: cfg.hoursPerDay,
+        rules: holidays.rules,
       });
-      holiday = {
-        ...basis,
-        hourlyRate: round2(basis.monthlyRate / basis.divisorDays / basis.hoursPerDay),
-        items,
-        workAmount: round2(items.reduce((a, x) => a + x.workAmount, 0)),
-        otAmount: round2(items.reduce((a, x) => a + x.otAmount, 0)),
-      };
+      if (!priced.ok) {
+        throw conflict(priced.reason === 'unknown_employment_type'
+          ? `พนักงาน ${e.emp_code} มีประเภทการจ้าง "${e.employment_type}" ที่ระบบไม่รู้จัก จึงเลือกกฎค่าจ้างวันหยุดไม่ได้ ต้องแก้ข้อมูลพนักงานก่อนคำนวณ`
+          : `ยังไม่มีกฎค่าจ้างวันหยุดที่อนุมัติแล้วสำหรับพนักงาน ${e.emp_code} (ประเภทการจ้าง ${e.employment_type}) ณ วันที่ ${priced.date} ต้องกำหนดและอนุมัติกฎก่อนคำนวณ`);
+      }
+      holiday = priced.snapshot;
     }
 
     const single = wage.segments.length === 1 && wage.fullPeriod;
