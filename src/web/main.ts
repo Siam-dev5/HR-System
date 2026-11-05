@@ -55,18 +55,82 @@ function renderSignedOut(policy: AuthPolicy): void {
   else renderLogin(root, policy, () => void boot(), go);
 }
 
+// Desktop sidebar: expanded (260px) or collapsed to icons; the choice is per browser. The mobile drawer ignores it.
+const SIDEBAR_KEY = 'hr.sidebar.collapsed';
+const DRAWER_QUERY = '(max-width: 900px)';
+
+function savedSidebarCollapsed(): boolean {
+  try {
+    return localStorage.getItem(SIDEBAR_KEY) === '1';
+  } catch {
+    return false;
+  }
+}
+
+/** Collapse toggle + the collapsed-mode tooltip; returns the toggle button for the brand header. */
+function sidebarCollapse(shell: HTMLElement, nav: HTMLElement, menu: HTMLElement): HTMLElement {
+  // collapsed links show only an icon: one floating tooltip (outside the scrolling menu, so it is never clipped)
+  // names the link on hover and on keyboard focus. Decorative: each link already carries aria-label.
+  const tip = h('div', { class: 'nav-tooltip', 'aria-hidden': 'true', hidden: true });
+  const hideTip = () => { tip.hidden = true; };
+  const showTip = (e: Event) => {
+    const a = (e.target as Element).closest<HTMLElement>('.nav-item');
+    if (!a || !shell.classList.contains('sidebar-collapsed') || matchMedia(DRAWER_QUERY).matches) return hideTip();
+    const r = a.getBoundingClientRect();
+    tip.textContent = a.title;
+    tip.style.top = `${Math.round(r.top + r.height / 2)}px`;
+    tip.style.left = `${Math.round(r.right + 10)}px`;
+    tip.hidden = false;
+  };
+  nav.addEventListener('pointerover', showTip);
+  nav.addEventListener('focusin', showTip);
+  nav.addEventListener('pointerleave', hideTip);
+  nav.addEventListener('focusout', hideTip);
+  menu.addEventListener('scroll', hideTip, { passive: true });
+  nav.appendChild(tip);
+
+  const toggle = h('button', { type: 'button', class: 'sidebar-collapse-toggle', 'aria-controls': menu.id }, icon('chevronDown'));
+  const apply = (collapsed: boolean) => {
+    shell.classList.toggle('sidebar-collapsed', collapsed);
+    const label = collapsed ? 'ขยายเมนูด้านข้าง' : 'ย่อเมนูด้านข้าง';
+    toggle.setAttribute('aria-expanded', String(!collapsed));
+    toggle.setAttribute('aria-label', label);
+    toggle.title = label;
+  };
+  apply(savedSidebarCollapsed());
+  toggle.addEventListener('click', () => {
+    const collapsed = !shell.classList.contains('sidebar-collapsed');
+    apply(collapsed);
+    hideTip();
+    try {
+      localStorage.setItem(SIDEBAR_KEY, collapsed ? '1' : '0');
+    } catch {
+      /* storage unavailable: the choice lasts until reload */
+    }
+  });
+  return toggle;
+}
+
 function renderShell(): void {
   const meta = state.meta as MetaResponse;
-  const nav = h('nav', { class: 'sidebar', 'aria-label': 'เมนูหลัก' },
-    h('div', { class: 'brand' },
-      h('img', { class: 'brand-logo', src: '/assets/siamhrbp-logo.png', srcset: '/assets/siamhrbp-logo.png 1x, /assets/siamhrbp-logo@2x.png 2x', width: 254, height: 128, alt: 'โลโก้ SIAM HRBP' }),
-      h('span', { class: 'brand-name' }, meta.appName)),
+  // only the menu list scrolls; the brand header (logo + collapse toggle) stays at the top
+  const menu = h('div', { class: 'sidebar-menu-scroll', id: 'sidebar-menu' },
     MENU_GROUPS.map((g) => {
       const items = meta.menu.filter((m) => m.group === g.key);
       if (!items.length) return null;
       return h('div', { class: 'nav-group' }, h('div', { class: 'nav-group-title' }, g.title),
-        items.map((i) => link(i.path, [menuIcon(i.key), h('span', null, i.title)], { class: 'nav-item', 'data-path': i.path })));
+        items.map((i) => link(i.path, [menuIcon(i.key), h('span', { class: 'nav-label' }, i.title)], { class: 'nav-item', 'data-path': i.path, title: i.title, 'aria-label': i.title })));
     }),
+  );
+  const nav = h('nav', { class: 'sidebar', 'aria-label': 'เมนูหลัก' });
+  const shell = h('div', { class: 'shell' });
+  nav.append(
+    h('div', { class: 'sidebar-brand-header' },
+      h('div', { class: 'brand' },
+        h('img', { class: 'brand-logo', src: '/assets/siamhrbp-logo.png', srcset: '/assets/siamhrbp-logo.png 1x, /assets/siamhrbp-logo@2x.png 2x', width: 254, height: 128, alt: 'โลโก้ SIAM HRBP' }),
+        h('span', { class: 'brand-name' }, meta.appName)),
+      sidebarCollapse(shell, nav, menu)),
+    menu,
   );
   const bell = h('button', { class: 'icon-btn bell', 'aria-label': 'การแจ้งเตือน', onclick: () => void openNotifications() }, icon('bell'), h('span', { class: 'badge', id: 'bell-count', hidden: true }));
   const menuToggle = h('button', { class: 'icon-btn menu-toggle', 'aria-label': 'เปิด/ปิดเมนู', onclick: () => { closeMenus(); closeNotifications(); document.body.classList.toggle('nav-open'); } }, icon('menu'));
@@ -78,7 +142,8 @@ function renderShell(): void {
   document.addEventListener('keydown', (e) => {
     if (e.key === 'Escape') document.body.classList.remove('nav-open');
   });
-  mount(root, skip, h('div', { class: 'shell' }, nav, scrim, h('div', { class: 'content' }, h('header', { class: 'topbar' }, menuToggle, h('h1', { id: 'page-title' }, ''), h('div', { class: 'topbar-actions' }, headerMenus(meta, bell, () => void logout()))), main)));
+  shell.append(nav, scrim, h('div', { class: 'content' }, h('header', { class: 'topbar' }, menuToggle, h('h1', { id: 'page-title' }, ''), h('div', { class: 'topbar-actions' }, headerMenus(meta, bell, () => void logout()))), main));
+  mount(root, skip, shell);
   setRouteRenderer(() => renderRoute(main));
   window.onpopstate = () => renderRoute(main);
   if (['/', '/login', '/register'].includes(currentPath())) navigate(meta.menu[0]?.path ?? '/help', true);

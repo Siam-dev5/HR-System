@@ -147,7 +147,8 @@ try {
       await page.click('.menu-toggle');
       const nav = await page.evaluate(async () => {
         const s = document.querySelector('.sidebar');
-        s.scrollTop = s.scrollHeight;
+        const list = s.querySelector('.sidebar-menu-scroll'); // only the menu list scrolls; the brand header stays
+        list.scrollTop = list.scrollHeight;
         await new Promise((r) => setTimeout(r, 300));
         const items = [...s.querySelectorAll('.nav-item')];
         const last = items[items.length - 1].getBoundingClientRect();
