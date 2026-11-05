@@ -385,9 +385,12 @@ export function traditionalCompliance(holidays: readonly ComplianceHoliday[], ye
   const byDate = new Map<string, ComplianceHoliday>();
   for (const h of approved) if ((h.holiday_type === 'traditional' || h.holiday_type === 'national_labour') && !byDate.has(h.holiday_date)) byDate.set(h.holiday_date, h);
   const counted = [...byDate.values()].sort((a, b) => (a.holiday_date < b.holiday_date ? -1 : 1));
-  const labour = approved.filter((h) => h.holiday_type === 'national_labour');
+  // likewise one labour day per date: only different dates are a conflict
+  const labourByDate = new Map<string, ComplianceHoliday>();
+  for (const h of approved) if (h.holiday_type === 'national_labour' && !labourByDate.has(h.holiday_date)) labourByDate.set(h.holiday_date, h);
+  const labour = [...labourByDate.values()].sort((a, b) => (a.holiday_date < b.holiday_date ? -1 : 1));
   const labourDayIssue = labour.length === 0 ? 'ยังไม่มีวันแรงงานแห่งชาติที่อนุมัติแล้ว'
-    : labour.length > 1 ? `มีวันแรงงานแห่งชาติ ${labour.length} รายการ ต้องตรวจสอบ`
+    : labour.length > 1 ? `มีวันแรงงานแห่งชาติ ${labour.length} วันที่แตกต่างกัน (${labour.map((h) => h.holiday_date).join(', ')}) ต้องตรวจสอบ`
       : labour[0]!.holiday_date.slice(5) !== '05-01' ? `วันแรงงานแห่งชาติไม่ใช่วันที่ 1 พฤษภาคม (${labour[0]!.holiday_date}) ต้องตรวจสอบกับประกาศ` : null;
   const ok = counted.length >= MIN_TRADITIONAL_HOLIDAYS;
   return {
