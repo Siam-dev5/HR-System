@@ -31,5 +31,7 @@
     "APP_NAME": "HR System",
     "APP_BASE_PATH": ""
   },
+  // probation job (src/worker/lib/probation-job.ts): 00:05 and 08:05 Asia/Bangkok; the second run is the retry
+  "triggers": { "crons": ["5 17 * * *", "5 1 * * *"] },
   "observability": { "enabled": true }
 }

@@ -268,6 +268,7 @@ const SETTING_GROUPS: Array<{ title: string; match: (key: string) => boolean; no
   { title: 'เงินเดือน & ประกันสังคม', match: (k) => k.startsWith('payroll.') && !k.startsWith('payroll.ewf_') },
   { title: 'เวลาทำงาน', match: (k) => k.startsWith('attendance.') },
   { title: 'องค์กร', match: (k) => k.startsWith('org.') },
+  { title: 'ทดลองงาน (แจ้งเตือนวันที่ 90 · เปลี่ยนสถานะวันที่ 120)', match: (k) => k.startsWith('probation.') },
 ];
 
 function settingInput(s: SettingItem, inputs: Map<string, HTMLInputElement>, suffix?: string): HTMLElement {

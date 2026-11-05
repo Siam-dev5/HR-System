@@ -1,5 +1,5 @@
 import { Hono } from 'hono';
-import type { AppEnv } from './env';
+import type { AppEnv, Env } from './env';
 import type { ApiError } from '../shared/types';
 import { HttpError } from './lib/http';
 import { sessionMiddleware } from './auth';
@@ -13,6 +13,8 @@ import { attendanceRoutes } from './routes/attendance';
 import { orgRoutes } from './routes/org';
 import { avatarRoutes } from './routes/avatars';
 import { holidayRoutes } from './routes/holidays';
+import { bangkokNow } from './lib/time';
+import { runProbationJob } from './lib/probation-job';
 
 const app = new Hono<AppEnv>();
 
@@ -66,4 +68,15 @@ app.onError((err, c) => {
   return c.json<ApiError>({ error: { code: 'internal', message: 'เกิดข้อผิดพลาดภายในระบบ' } }, 500);
 });
 
-export default app;
+export { app };
+
+export default {
+  fetch: app.fetch,
+  /**
+   * Cron triggers (wrangler.jsonc): 17:05 and 01:05 UTC = 00:05 and 08:05 Asia/Bangkok. The job is idempotent, so the
+   * second trigger is the retry of the first: it only does what an earlier run of the same day did not complete.
+   */
+  async scheduled(event: ScheduledController, env: Env, ctx: ExecutionContext): Promise<void> {
+    ctx.waitUntil(runProbationJob(env.DB, { today: bangkokNow(event.scheduledTime).date, trigger: 'scheduled' }).then(() => undefined));
+  },
+} satisfies ExportedHandler<Env>;
