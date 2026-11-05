@@ -6,6 +6,7 @@ import { renderAudit, renderHelp, renderReports, renderRoles, renderSettings, re
 import { renderAttendanceImport, renderOtReview } from './attendance';
 import { renderPayrollPreview } from './payroll-preview';
 import { renderOrgChart } from './org';
+import { renderHolidays } from './holidays';
 
 export type PageRenderer = (main: HTMLElement, params: URLSearchParams) => Promise<void>;
 
@@ -17,6 +18,7 @@ export const PAGES: Record<string, PageRenderer> = {
   workflow_inbox: renderWorkflowInbox,
   organization: renderOrganization,
   talent: renderTalent,
+  holiday_calendar: renderHolidays,
   attendance_import: renderAttendanceImport,
   ot_review: renderOtReview,
   payroll_preview: renderPayrollPreview,

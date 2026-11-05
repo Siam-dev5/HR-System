@@ -693,3 +693,31 @@ input[aria-invalid='true'], select[aria-invalid='true'], textarea[aria-invalid='
   body.print-org .org-canvas svg { width: 100% !important; height: auto !important; }
   .preview-wrap { max-height: none; overflow: visible; }
 }
+
+/* ---- Holiday calendar ---------------------------------------------------------------------- */
+.linklike { background: none; border: 0; padding: 0; font: inherit; color: var(--primary); cursor: pointer; text-decoration: underline; }
+.hol-year { display: grid; grid-template-columns: repeat(auto-fill, minmax(230px, 1fr)); gap: 0.9rem; }
+.hol-month { background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius-lg); padding: 0.75rem; box-shadow: var(--shadow-sm); min-width: 0; }
+.hol-month-title { font-weight: 700; color: var(--heading); margin-bottom: 0.5rem; }
+.hol-grid { display: grid; grid-template-columns: repeat(7, minmax(0, 1fr)); gap: 3px; }
+.hol-wd { font-size: var(--fs-sm); color: var(--muted); font-weight: 600; text-align: center; padding: 0.2rem 0; }
+.hol-day { min-height: 4.6rem; border: 1px solid var(--border); border-radius: var(--radius-sm); padding: 0.25rem; background: var(--surface); display: flex; flex-direction: column; gap: 2px; min-width: 0; }
+.hol-month.compact .hol-day { min-height: 0; aspect-ratio: 1; align-items: center; justify-content: center; padding: 0; }
+.hol-day.is-pad { visibility: hidden; }
+.hol-day.is-rest { background: var(--surface-2); }
+.hol-day.is-holiday { background: color-mix(in srgb, var(--danger) 12%, var(--surface)); border-color: color-mix(in srgb, var(--danger) 45%, var(--border)); }
+.hol-day.is-draft { background: color-mix(in srgb, var(--warn) 12%, var(--surface)); border-style: dashed; border-color: color-mix(in srgb, var(--warn) 55%, var(--border)); }
+.hol-num { font-size: var(--fs-sm); font-weight: 600; color: var(--text-2); font-variant-numeric: tabular-nums; }
+.hol-chip { display: block; width: 100%; text-align: left; font: inherit; font-size: 0.72rem; line-height: 1.25; padding: 0.15rem 0.3rem; border-radius: 4px; border: 0; cursor: pointer; color: var(--text); background: color-mix(in srgb, var(--danger) 18%, var(--surface)); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.hol-chip.st-draft { background: color-mix(in srgb, var(--warn) 20%, var(--surface)); }
+.hol-chip.st-inactive { text-decoration: line-through; opacity: 0.7; }
+.hol-chip:focus-visible { outline: 2px solid var(--primary); outline-offset: 1px; }
+.hol-key { display: inline-block; width: 0.8rem; height: 0.8rem; border-radius: 3px; vertical-align: -1px; border: 1px solid var(--border); }
+.hol-key.is-holiday { background: color-mix(in srgb, var(--danger) 30%, var(--surface)); }
+.hol-key.is-draft { background: color-mix(in srgb, var(--warn) 30%, var(--surface)); border-style: dashed; }
+.hol-key.is-rest { background: var(--surface-2); }
+@media (max-width: 600px) {
+  .hol-day { min-height: 2.6rem; }
+  .hol-chip { font-size: 0.62rem; padding: 0.1rem 0.15rem; }
+  .holiday-toolbar .field.inline { flex: 1 1 100%; }
+}

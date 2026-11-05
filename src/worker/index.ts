@@ -12,6 +12,7 @@ import { adminRoutes } from './routes/admin';
 import { attendanceRoutes } from './routes/attendance';
 import { orgRoutes } from './routes/org';
 import { avatarRoutes } from './routes/avatars';
+import { holidayRoutes } from './routes/holidays';
 
 const app = new Hono<AppEnv>();
 
@@ -48,6 +49,7 @@ app.route('/api/admin', adminRoutes);
 app.route('/api/attendance', attendanceRoutes);
 app.route('/api/org-design', orgRoutes);
 app.route('/api/employees', avatarRoutes);
+app.route('/api/holidays', holidayRoutes);
 app.route('/api', payslipRoutes);
 app.route('/api', overviewRoutes);
 

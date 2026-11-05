@@ -3,7 +3,8 @@
 // approved requests, recurring pay items, System Settings. Nothing here writes.
 import type { PayResult } from '../../shared/payroll';
 import { calculatePay, resolveEwf, round2, wageSegments, type EwfStatus, type WageResult } from '../../shared/payroll';
-import type { PayslipCalc, PayrollPeriod } from '../../shared/types';
+import { holidayPay, resolveRule, type ApplicableRule, type HolidayType } from '../../shared/holidays';
+import type { HolidayPaySnapshot, PayslipCalc, PayrollPeriod } from '../../shared/types';
 import { conflict } from './http';
 import { ewfConfig, loadSettings, payrollConfig } from './settings';
 
@@ -23,6 +24,47 @@ export interface ComputedSlip {
   pay: PayResult;
   ewf: { status: EwfStatus; employeeRate: number | null; employerRate: number | null };
   calc: PayslipCalc;
+  /** approved holiday-work records paid by this slip (locked to the period when the calculation is saved) */
+  holidayRecordIds: number[];
+}
+
+interface HolidayWorkInput {
+  id: number;
+  employee_id: number;
+  holiday_id: number;
+  work_date: string;
+  normal_hours: number;
+  ot_hours: number;
+  holiday_name: string;
+  holiday_type: HolidayType;
+}
+
+/**
+ * Approved holiday work of a monthly period that no other period has used. Refuses (409) instead of guessing when an
+ * hour could be paid twice (an approved OT request on the same day) or when no approved pay rule applies.
+ */
+async function holidayWorkOf(db: D1Database, p: PeriodRowLike): Promise<{ work: HolidayWorkInput[]; rules: ApplicableRule[]; otClash: Array<{ employee_id: number; work_date: string }> }> {
+  const { results: work } = await db
+    .prepare(
+      `SELECT w.id, w.employee_id, w.holiday_id, w.work_date, w.normal_hours, w.ot_hours, h.name AS holiday_name, h.holiday_type
+       FROM holiday_work_records w JOIN holidays h ON h.id = w.holiday_id
+       WHERE w.status = 'approved' AND h.status = 'approved' AND w.work_date BETWEEN ?1 AND ?2 AND (w.payroll_period_id IS NULL OR w.payroll_period_id = ?3)
+       ORDER BY w.employee_id, w.work_date, w.id`,
+    )
+    .bind(p.start_date, p.end_date, p.id)
+    .all<HolidayWorkInput>();
+  if (!work.length) return { work, rules: [], otClash: [] };
+  const { results: rules } = await db
+    .prepare("SELECT id, company_id, employment_type, holiday_pay_entitled, work_multiplier, ot_multiplier, effective_from, effective_to FROM holiday_pay_rules WHERE status = 'approved'")
+    .all<ApplicableRule>();
+  const { results: otClash } = await db
+    .prepare(
+      `SELECT DISTINCT o.employee_id, o.work_date FROM overtime_requests o JOIN holiday_work_records w ON w.employee_id = o.employee_id AND w.work_date = o.work_date
+       WHERE o.status = 'approved' AND w.status = 'approved' AND o.work_date BETWEEN ?1 AND ?2`,
+    )
+    .bind(p.start_date, p.end_date)
+    .all<{ employee_id: number; work_date: string }>();
+  return { work, rules, otClash };
 }
 
 export type PeriodRowLike = Pick<PayrollPeriod, 'id' | 'code' | 'start_date' | 'end_date' | 'pay_date' | 'status' | 'kind' | 'company_id'>;
@@ -77,6 +119,7 @@ interface EmpRow {
   base_salary: number;
   ewf_equivalent_welfare: number;
   bank_account: string | null;
+  employment_type: string;
 }
 
 export async function computePeriod(db: D1Database, p: PeriodRowLike, filterCompany: number | null = null): Promise<ComputedSlip[]> {
@@ -91,7 +134,7 @@ export async function computePeriod(db: D1Database, p: PeriodRowLike, filterComp
   const { results: emps } = await db
     .prepare(
       `SELECT e.id, e.emp_code, e.first_name, e.last_name, e.company_id, c.name AS company, d.name AS department, x.title AS position,
-              e.hire_date, e.termination_date, e.base_salary, e.ewf_equivalent_welfare, e.bank_account
+              e.hire_date, e.termination_date, e.base_salary, e.ewf_equivalent_welfare, e.bank_account, e.employment_type
        FROM employees e LEFT JOIN companies c ON c.id = e.company_id LEFT JOIN departments d ON d.id = e.department_id LEFT JOIN positions x ON x.id = e.position_id
        WHERE e.hire_date <= ?1 AND e.base_salary IS NOT NULL AND e.base_salary > 0
          AND (e.status IN ('active', 'probation') OR (e.status IN ('resigned', 'terminated') AND e.termination_date IS NOT NULL AND e.termination_date >= ?2))
@@ -147,6 +190,8 @@ export async function computePeriod(db: D1Database, p: PeriodRowLike, filterComp
         .bind(...advanceIds)
         .all<{ employee_id: number; amount: number }>()
     : { results: [] };
+  // holiday work is paid at month-end only (a mid-month round is a wage advance, like OT)
+  const holidays = midMonth ? { work: [] as HolidayWorkInput[], rules: [] as ApplicableRule[], otClash: [] as Array<{ employee_id: number; work_date: string }> } : await holidayWorkOf(db, p);
 
   const out: ComputedSlip[] = [];
   for (const e of emps) {
@@ -184,6 +229,30 @@ export async function computePeriod(db: D1Database, p: PeriodRowLike, filterComp
           equivalentWelfare: e.ewf_equivalent_welfare === 1,
         });
 
+    const worked = holidays.work.filter((w) => w.employee_id === e.id);
+    let holiday: HolidayPaySnapshot | null = null;
+    if (worked.length) {
+      // an approved OT request on a holiday-work day would pay the same hours twice (Feishu OT is excluded by the
+      // approver's confirmation on the record instead, because a Feishu import only carries period totals)
+      const clash = imp ? undefined : holidays.otClash.find((x) => x.employee_id === e.id);
+      if (clash) throw conflict(`พนักงาน ${e.emp_code} มีทั้งคำขอ OT ที่อนุมัติแล้วและบันทึกทำงานวันหยุดในวันที่ ${clash.work_date} ต้องยกเลิกรายการใดรายการหนึ่งก่อนคำนวณ (ป้องกันการจ่ายซ้ำ)`);
+      const basis = { monthlyRate: wage.rate, divisorDays: cfg.otDivisorDays, hoursPerDay: cfg.hoursPerDay };
+      const items: HolidayPaySnapshot['items'] = worked.map((w) => {
+        const rule = resolveRule(holidays.rules, e.company_id, e.employment_type, w.work_date);
+        if (!rule) throw conflict(`ยังไม่มีกฎค่าจ้างวันหยุดที่อนุมัติแล้วสำหรับพนักงาน ${e.emp_code} (ประเภทการจ้าง ${e.employment_type}) ณ วันที่ ${w.work_date} ต้องกำหนดและอนุมัติกฎก่อนคำนวณ`);
+        const r = { entitled: rule.holiday_pay_entitled === 1, workMultiplier: rule.work_multiplier, otMultiplier: rule.ot_multiplier };
+        const pay = holidayPay(basis, r, w.normal_hours, w.ot_hours);
+        return { recordId: w.id, holidayId: w.holiday_id, holidayName: w.holiday_name, holidayType: w.holiday_type, date: w.work_date, normalHours: w.normal_hours, otHours: w.ot_hours, ruleId: rule.id, ...r, workAmount: pay.workAmount, otAmount: pay.otAmount };
+      });
+      holiday = {
+        ...basis,
+        hourlyRate: round2(basis.monthlyRate / basis.divisorDays / basis.hoursPerDay),
+        items,
+        workAmount: round2(items.reduce((a, x) => a + x.workAmount, 0)),
+        otAmount: round2(items.reduce((a, x) => a + x.otAmount, 0)),
+      };
+    }
+
     const single = wage.segments.length === 1 && wage.fullPeriod;
     const wageLines = single
       ? undefined
@@ -204,6 +273,14 @@ export async function computePeriod(db: D1Database, p: PeriodRowLike, filterComp
         ewf: ewfFor.rates,
         advance: advances.find((a) => a.employee_id === e.id)?.amount ?? 0,
         advanceOnly: midMonth,
+        ...(holiday
+          ? {
+              holidayPay: [
+                { code: 'HOLIDAY_WORK' as const, name: 'ค่าทำงานในวันหยุด', amount: holiday.workAmount },
+                { code: 'HOLIDAY_OT' as const, name: 'ค่าล่วงเวลาในวันหยุด', amount: holiday.otAmount },
+              ],
+            }
+          : {}),
       },
       cfg,
     );
@@ -231,7 +308,10 @@ export async function computePeriod(db: D1Database, p: PeriodRowLike, filterComp
           unpaidLeaveDays: unpaidDays,
           unpaidLeaveHours: unpaidHours,
         },
+        // only present with holiday work, so the snapshot of every other payslip stays exactly as before
+        ...(holiday ? { holiday } : {}),
       },
+      holidayRecordIds: holiday ? holiday.items.map((x) => x.recordId) : [],
     });
   }
   return out;

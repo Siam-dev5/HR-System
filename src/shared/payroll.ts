@@ -51,6 +51,8 @@ export interface PayInput {
   advance?: number;
   /** mid-month round: an advance of earned wage only, statutory deductions happen at month-end */
   advanceOnly?: boolean;
+  /** pay for approved holiday work (HOLIDAY_WORK / HOLIDAY_OT): taxable, outside the SSO / EWF wage like OT */
+  holidayPay?: Array<{ code: 'HOLIDAY_WORK' | 'HOLIDAY_OT'; name: string; amount: number }>;
 }
 
 export interface PayLine {
@@ -78,6 +80,8 @@ export interface PayResult {
   ewfEmployer: number;
   /** mid-month advance deducted (part of deductions) */
   advance: number;
+  /** holiday work + holiday OT (part of gross; 0 when the employee did no approved holiday work) */
+  holidayPay: number;
   lines: PayLine[];
 }
 
@@ -118,9 +122,11 @@ export function calculatePay(input: PayInput, cfg: PayrollConfig = DEFAULT_PAYRO
   const unpaidLeave = round2(Math.min(input.unpaidLeaveDays * dailyRate, wage));
   const earnings = round2(input.earnings.reduce((s, e) => s + e.amount, 0));
   const taxableEarnings = input.earnings.filter((e) => e.taxable).reduce((s, e) => s + e.amount, 0);
-  const gross = round2(wage - unpaidLeave + otAmount + earnings);
+  const holiday = (input.holidayPay ?? []).filter((x) => x.amount > 0).map((x) => ({ ...x, amount: round2(x.amount) }));
+  const holidayPay = round2(holiday.reduce((s, x) => s + x.amount, 0));
+  const gross = round2(wage - unpaidLeave + otAmount + holidayPay + earnings);
   const sso = statutory ? socialSecurity(wage - unpaidLeave, cfg) : 0;
-  const taxable = wage - unpaidLeave + otAmount + taxableEarnings;
+  const taxable = wage - unpaidLeave + otAmount + holidayPay + taxableEarnings;
   const tax = statutory ? monthlyWithholding(taxable, sso, cfg) : 0;
   const other = round2(input.deductions.reduce((s, d) => s + d.amount, 0));
   const ewfWage = input.ewf && statutory ? (input.ewf.wageCap > 0 ? Math.min(wage - unpaidLeave, input.ewf.wageCap) : wage - unpaidLeave) : 0;
@@ -133,6 +139,7 @@ export function calculatePay(input: PayInput, cfg: PayrollConfig = DEFAULT_PAYRO
     ? input.wageLines.map((l) => ({ code: l.code, name: l.name, kind: 'earning' as const, amount: round2(l.amount) }))
     : [{ code: 'BASE', name: 'เงินเดือน', kind: 'earning', amount: wage }];
   if (otAmount) lines.push({ code: 'OT', name: 'ค่าล่วงเวลา', kind: 'earning', amount: otAmount });
+  for (const x of holiday) lines.push({ code: x.code, name: x.name, kind: 'earning', amount: x.amount });
   for (const e of input.earnings) lines.push({ code: e.code, name: e.name, kind: 'earning', amount: round2(e.amount), ...(e.category ? { category: e.category } : {}) });
   if (unpaidLeave) lines.push({ code: 'UNPAID', name: 'หักลาไม่รับค่าจ้าง', kind: 'deduction', amount: unpaidLeave });
   if (statutory) lines.push({ code: 'SSO', name: 'ประกันสังคม', kind: 'deduction', amount: sso });
@@ -141,7 +148,7 @@ export function calculatePay(input: PayInput, cfg: PayrollConfig = DEFAULT_PAYRO
   for (const d of input.deductions) lines.push({ code: d.code, name: d.name, kind: 'deduction', amount: round2(d.amount), ...(d.category ? { category: d.category } : {}) });
   if (advance) lines.push({ code: 'ADV', name: 'หักเงินจ่ายล่วงหน้ากลางเดือน (Mid-month Advance)', kind: 'deduction', amount: advance });
 
-  return { baseSalary: base, otAmount, earnings, unpaidLeave, gross, sso, tax, deductions, net: round2(gross - deductions), ewfEmployee, ewfEmployer, advance, lines };
+  return { baseSalary: base, otAmount, earnings, unpaidLeave, gross, sso, tax, deductions, net: round2(gross - deductions), ewfEmployee, ewfEmployer, advance, holidayPay, lines };
 }
 
 // ---- Dates (calendar days, timezone independent) ------------------------------------------------

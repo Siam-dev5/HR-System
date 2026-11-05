@@ -151,6 +151,14 @@ payrollRoutes.post('/periods/:id/calculate', requirePerm('payroll.calculate'), a
         r.ewfEmployee, r.ewfEmployer, s.ewf.employeeRate, s.ewf.employerRate, s.ewf.status, s.employee.company_id, r.advance, JSON.stringify(s.calc), version),
     );
   }
+  // holiday work paid by these slips is locked to the period (released by "reopen"); the check fails the whole batch
+  // when a record changed between the calculation and this write, so a slip never pays an unlocked record
+  const holidayIds = JSON.stringify(slips.flatMap((s) => s.holidayRecordIds));
+  stmts.push(
+    db.prepare('UPDATE holiday_work_records SET payroll_period_id = NULL, paid_calc_version = NULL WHERE payroll_period_id = ?').bind(p.id),
+    db.prepare("UPDATE holiday_work_records SET payroll_period_id = ?1, paid_calc_version = ?2 WHERE status = 'approved' AND payroll_period_id IS NULL AND id IN (SELECT value FROM json_each(?3))").bind(p.id, version, holidayIds),
+    db.prepare("SELECT CASE WHEN (SELECT COUNT(*) FROM holiday_work_records WHERE payroll_period_id = ?1) = json_array_length(?2) THEN 1 ELSE json('holiday work changed during calculation') END AS ok").bind(p.id, holidayIds),
+  );
   stmts.push(db.prepare("UPDATE payroll_periods SET status = 'calculated', calc_version = ?, calculated_by = ?, calculated_at = datetime('now'), updated_at = datetime('now'), updated_by = ? WHERE id = ?").bind(version, user.id, user.id, p.id));
   // attendance used by the calculation is locked: re-import / rollback / OT changes need the period reopened first
   stmts.push(db.prepare("UPDATE attendance_imports SET locked = 1, locked_at = datetime('now') WHERE payroll_period_id = ? AND status = 'active' AND locked = 0").bind(p.id));
@@ -175,6 +183,7 @@ payrollRoutes.post('/periods/:id/reopen', requirePerm('payroll.calculate'), asyn
     db.prepare('DELETE FROM payslips WHERE period_id = ?').bind(p.id),
     db.prepare("UPDATE payroll_periods SET status = 'draft', updated_at = datetime('now'), updated_by = ? WHERE id = ?").bind(user.id, p.id),
     db.prepare('UPDATE attendance_imports SET locked = 0, locked_at = NULL WHERE payroll_period_id = ?').bind(p.id),
+    db.prepare('UPDATE holiday_work_records SET payroll_period_id = NULL, paid_calc_version = NULL WHERE payroll_period_id = ?').bind(p.id),
   ]);
   await audit(c, 'payroll.reopened', 'payroll_periods', p.id, { version: p.calc_version, archivedSlips: p.employees, archivedTotalNet: p.total_net, legacy: p.legacy_slips, ...(forced ? { forced: true, reopenedFrom: p.reopened_from, reason: forced } : {}) });
   return c.json(await period(db, p.id));
@@ -539,7 +548,8 @@ const STATUTORY = new Set(['SSO', 'TAX', 'EWF', 'ADV', 'UNPAID']);
 
 function previewRow(e: EmpLike, s: SlipLike, calc: PayslipCalc | null, pvdCode: string): Record<string, string | number | null> {
   const sum = (f: (l: SlipLike['lines'][number]) => boolean) => round2(s.lines.filter(f).reduce((a, l) => a + l.amount, 0));
-  const earning = (l: SlipLike['lines'][number]) => l.kind === 'earning' && !l.code.startsWith('BASE') && l.code !== 'OT';
+  const holiday = (l: SlipLike['lines'][number]) => l.kind === 'earning' && (l.code === 'HOLIDAY_WORK' || l.code === 'HOLIDAY_OT');
+  const earning = (l: SlipLike['lines'][number]) => l.kind === 'earning' && !l.code.startsWith('BASE') && l.code !== 'OT' && !holiday(l);
   const isPvd = (l: SlipLike['lines'][number]) => l.category === 'provident_fund' || (!l.category && l.code === pvdCode);
   const other = (l: SlipLike['lines'][number]) => l.kind === 'deduction' && !STATUTORY.has(l.code) && !isPvd(l);
   return {
@@ -559,6 +569,7 @@ function previewRow(e: EmpLike, s: SlipLike, calc: PayslipCalc | null, pvdCode: 
     base_salary: sum((l) => l.kind === 'earning' && l.code.startsWith('BASE')),
     unpaid_leave_amount: s.unpaid_leave ? -s.unpaid_leave : 0,
     ot_pay: s.ot_amount,
+    holiday_pay: sum(holiday),
     allowance: sum((l) => earning(l) && l.category === 'allowance'),
     commission: sum((l) => earning(l) && l.category === 'commission'),
     bonus: sum((l) => earning(l) && l.category === 'bonus'),
