@@ -289,6 +289,37 @@ export interface PayslipCalc {
     unpaidLeaveDays: number;
     unpaidLeaveHours: number | null;
   };
+  /** holiday work paid by this payslip (present only when there was approved holiday work): frozen inputs and rates */
+  holiday?: HolidayPaySnapshot;
+}
+
+export interface HolidayPaySnapshot {
+  /** System Settings at calculation time: hourly wage = monthly rate on the work date ÷ divisorDays ÷ hoursPerDay */
+  divisorDays: number;
+  hoursPerDay: number;
+  /** the monthly salary already pays an entitled employee for the holiday itself (entitlement A): nothing extra */
+  items: Array<{
+    /** salary in force on the work date (salary history), and the hourly wage derived from it */
+    monthlyRate: number;
+    hourlyRate: number;
+    /** employees.employment_type used to pick the pay rule */
+    employmentType: string;
+    recordId: number;
+    holidayId: number;
+    holidayName: string;
+    holidayType: string;
+    date: string;
+    normalHours: number;
+    otHours: number;
+    ruleId: number;
+    entitled: boolean;
+    workMultiplier: number;
+    otMultiplier: number;
+    workAmount: number;
+    otAmount: number;
+  }>;
+  workAmount: number;
+  otAmount: number;
 }
 
 export interface YtdTotals {

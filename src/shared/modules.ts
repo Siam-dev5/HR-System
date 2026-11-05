@@ -206,6 +206,7 @@ export const MODULES: readonly ModuleDef[] = [
     key: 'performance', path: '/performance', title: 'ประเมินผล (KPI/OKR)', group: 'hrm', table: 'performance_reviews', description: 'ผลประเมินรายบุคคล', labelExpr: "'PR-' || id", ownerField: 'employee_id',
     fields: [ref('cycle_id', 'รอบประเมิน', 'performance_cycles', RL), ref('employee_id', 'พนักงาน', 'employees', RL), ref('reviewer_employee_id', 'ผู้ประเมิน', 'employees'), num('kpi_score', 'คะแนน KPI (0-5)', { list: true, min: 0, max: 5 }), num('okr_progress', 'ความคืบหน้า OKR (%)', { list: true, min: 0, max: 100 }), sel('rating', 'เกรด', ['1', '2', '3', '4', '5'], L), area('comment', 'ความเห็น'), sel('status', 'สถานะ', ['draft', 'submitted', 'calibrated'], RL)],
   }),
+  page('holiday_calendar', '/holidays', 'ปฏิทินวันหยุด', 'hrm', 'holiday_calendar.view', '/api/holidays'),
   page('attendance_import', '/attendance/import', 'นำเข้าเวลาทำงาน (Feishu)', 'hrm', 'attendance_import.view', '/api/attendance/imports'),
   page('ot_review', '/attendance/ot-review', 'ตรวจสอบ OT (Feishu)', 'hrm', 'ot_review.view', '/api/attendance/ot'),
   page('talent', '/talent', 'Talent 9-Box', 'hrm', 'talent.view', '/api/talent/ninebox'),
@@ -376,7 +377,8 @@ export function permissionCatalogue(): string[] {
   }
   for (const p of PAGE_MODULES) perms.add(p.perm);
   for (const extra of ['payroll.calculate', 'payroll.approve', 'payroll.publish', 'payroll.export', 'workflow.approve', 'workflow.approve_any', 'reports.export',
-    'attendance_import.create', 'attendance_import.update', 'ot_review.update', 'payroll_preview.export', 'org_chart.update', 'org_chart.import', 'org_chart.export', 'payslip_ytd.view']) perms.add(extra);
+    'attendance_import.create', 'attendance_import.update', 'ot_review.update', 'payroll_preview.export', 'org_chart.update', 'org_chart.import', 'org_chart.export', 'payslip_ytd.view',
+    'holiday_calendar.create', 'holiday_calendar.update', 'holiday_calendar.delete', 'holiday_calendar.approve', 'holiday_calendar.import', 'holiday_calendar.export']) perms.add(extra);
   for (const r of RESERVED_PERMISSIONS) perms.delete(r);
   return [...perms].sort();
 }

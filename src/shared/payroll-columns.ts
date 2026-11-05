@@ -37,6 +37,7 @@ export const PREVIEW_COLUMNS: readonly PreviewColumn[] = [
   { key: 'base_salary', label: 'เงินเดือน (ตามวันมีสิทธิ์)', group: 'income', type: 'money' },
   { key: 'unpaid_leave_amount', label: 'หักลาไม่รับค่าจ้าง', group: 'income', type: 'money' },
   { key: 'ot_pay', label: 'ค่าล่วงเวลา (OT)', group: 'income', type: 'money' },
+  { key: 'holiday_pay', label: 'ค่าทำงาน / OT ในวันหยุด', group: 'income', type: 'money' },
   { key: 'allowance', label: 'ค่าตอบแทน / Allowance', group: 'income', type: 'money' },
   { key: 'commission', label: 'Commission', group: 'income', type: 'money' },
   { key: 'bonus', label: 'Bonus', group: 'income', type: 'money' },

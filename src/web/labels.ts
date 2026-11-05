@@ -17,6 +17,7 @@ const LABELS: Record<string, string> = {
   received: 'รับเรื่อง', overtime: 'OT', time_correction: 'แก้ไขเวลา', calculated: 'คำนวณแล้ว', published: 'เผยแพร่แล้ว',
   allowance: 'ค่าตอบแทน / Allowance', commission: 'Commission', bonus: 'Bonus', provident_fund: 'กองทุนสำรองเลี้ยงชีพ',
   monthly: 'รายเดือน (สิ้นเดือน)', mid_month: 'กลางเดือน (ทดลองงาน)', superseded: 'ถูกแทนที่', rolled_back: 'ย้อนกลับแล้ว',
+  inactive: 'ปิดใช้งาน', attendance: 'บันทึกเวลาเข้า-ออก', feishu: 'Feishu',
   confirmed: 'ยืนยันแล้ว', revised: 'ปรับแก้แล้ว', none: '-', days: 'Expected Working Days', hours: 'Expected Working Hours', summary: 'สรุปรายคน', daily: 'รายวัน (รวมยอดอัตโนมัติ)',
 };
 
