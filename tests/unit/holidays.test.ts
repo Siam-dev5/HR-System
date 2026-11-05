@@ -291,10 +291,38 @@ describe('traditional-holiday compliance (warning only)', () => {
   it('labour day is shown separately and checked', () => {
     expect(traditionalCompliance(traditional(13), 2027).labourDayIssue).toMatch(/ยังไม่มี/);
     expect(traditionalCompliance([hol('2027-05-03', 'national_labour')], 2027).labourDayIssue).toMatch(/ไม่ใช่วันที่ 1 พฤษภาคม/);
-    expect(traditionalCompliance([hol('2027-05-01', 'national_labour'), hol('2027-05-01', 'national_labour')], 2027).labourDayIssue).toMatch(/2 รายการ/);
     expect(traditionalCompliance([hol('2027-05-01', 'national_labour')], 2027).labourDay).toHaveLength(1);
   });
   it('the same day in the central and the company calendar counts once', () => {
     expect(traditionalCompliance([hol('2027-04-13', 'traditional'), hol('2027-04-13', 'traditional')], 2027).counted).toBe(1);
+  });
+  it('the same labour day in the central and the company calendar is one labour day, not a duplicate', () => {
+    const c = traditionalCompliance([hol('2027-05-01', 'national_labour'), hol('2027-05-01', 'national_labour')], 2027);
+    expect(c.labourDay).toHaveLength(1);
+    expect(c.labourDay[0]).toMatchObject({ date: '2027-05-01' });
+    expect(c.labourDayIssue).toBeNull();
+    expect(c.counted).toBe(1);
+  });
+  it('labour days on different dates are still a conflict', () => {
+    const c = traditionalCompliance([hol('2027-05-02', 'national_labour'), hol('2027-05-01', 'national_labour'), hol('2027-05-02', 'national_labour')], 2027);
+    expect(c.labourDay.map((x) => x.date)).toEqual(['2027-05-01', '2027-05-02']);
+    expect(c.labourDayIssue).toMatch(/2 วันที่แตกต่างกัน/);
+    expect(c.labourDayIssue).toMatch(/2027-05-01, 2027-05-02/);
+  });
+  it('missing and wrong-date labour day warnings are unchanged when other calendars hold other holidays', () => {
+    expect(traditionalCompliance([...traditional(13), hol('2027-05-01', 'company'), hol('2027-05-01', 'national_labour', 'draft')], 2027).labourDayIssue).toBe('ยังไม่มีวันแรงงานแห่งชาติที่อนุมัติแล้ว');
+    const wrong = traditionalCompliance([hol('2027-05-03', 'national_labour'), hol('2027-05-03', 'national_labour')], 2027);
+    expect(wrong.labourDay).toHaveLength(1);
+    expect(wrong.labourDayIssue).toBe('วันแรงงานแห่งชาติไม่ใช่วันที่ 1 พฤษภาคม (2027-05-03) ต้องตรวจสอบกับประกาศ');
+  });
+  it('a labour day duplicated across calendars still counts once towards the 13 and excluded types stay excluded', () => {
+    const c = traditionalCompliance([
+      ...traditional(12), ...traditional(12).map((h) => ({ ...h, id: ++n })), // central + company copies
+      hol('2027-05-01', 'national_labour'), hol('2027-05-01', 'national_labour'),
+      hol('2027-05-01', 'company'), hol('2027-07-01', 'local'), hol('2027-08-16', 'substitute'),
+    ], 2027);
+    expect(c).toMatchObject({ counted: 13, required: 13, ok: true, labourDayIssue: null, notCounted: { company: 1, local: 1, substitute: 1 } });
+    expect(c.countedHolidays.filter((x) => x.type === 'national_labour')).toHaveLength(1);
+    expect(c.countedHolidays.some((x) => x.type === 'company' || x.type === 'local' || x.type === 'substitute')).toBe(false);
   });
 });
