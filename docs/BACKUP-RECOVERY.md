@@ -42,6 +42,13 @@ npx wrangler d1 time-travel info hr-system-db --timestamp=2026-11-03T14:50:00Z  
 | Time Travel ก่อน 0007 (15:20 UTC; 0007 ถูก Apply 15:30:16 UTC) | `00000073-00000000-00005119-48b25975fe7672a49081950348c1881b` |
 | เนื้อหาที่ตรวจแล้ว | 59 ตาราง 896 แถว, งวด 2 งวด (ร่าง), สลิป 0, Archive 0, role_permissions 160, Audit 487, พนักงาน 46, ผู้ใช้ 7 — Restore ลง Local ตรงทุกตาราง, `foreign_key_check` ว่าง, `quick_check` ok, ทดสอบ Apply 0007 ผ่าน |
 | Worker ก่อน / หลัง Deploy 0007 | `b984f052-6300-4392-818f-f8580e1a104e` → `6cd27abe-6dab-478f-a92d-0fd55c6f24b1` (15:31:14 UTC, จาก `main` @ `b947f6a`) |
+| ไฟล์ก่อน Migration 0008 (5 พ.ย. 2569 เวลาไทย) | `.secrets/backups/hr-system-db-pre-0008-20261104-191211.sql` (1,078 คำสั่ง, 273,081 bytes) |
+| SHA-256 | `d1ce85d74b567af61e5d72e98fdeb0d39f79b128d846574f0695307bc9b8f52d` |
+| ไฟล์พร้อม Restore | `.secrets/backups/hr-system-db-pre-0008-20261104-191211.restore.sql` |
+| Time Travel ก่อน 0008 (19:12 UTC; 0008 ถูก Apply 19:22:45 UTC) | `0000007d-00000000-00005119-771132f56414da6b76a36e0ec8ea7001` |
+| เนื้อหาที่ตรวจแล้ว | 60 ตาราง 910 แถว, สลิป 0, Archive 0, งวด 2 งวด (ร่าง), พนักงาน 46, ผู้ใช้ 7 — Restore ลง Local ตรงทุกตาราง, `foreign_key_check` ว่าง, `quick_check` ok, ทดสอบ Apply 0008 ผ่าน |
+| Worker ก่อน / หลัง Deploy 0008 | `6cd27abe-6dab-478f-a92d-0fd55c6f24b1` → `c50ce2c5-4fcc-46db-ba12-4a6d3bab7fd5` (19:23:39 UTC, จาก `main` @ `342e642`, binding R2 `AVATARS`) |
+| รูปพนักงาน (R2) | Bucket `hr-system-employee-assets` แบบ private ไม่อยู่ในไฟล์สำรอง D1 — ไฟล์สำรอง D1 มีเฉพาะ metadata (`employee_avatars`) ถ้ากู้ D1 ย้อนกลับ ให้ตรวจว่า object key ใน metadata ยังมีใน bucket (รูปที่หายจะแสดงเป็นอักษรย่อ ระบบไม่ล่ม) |
 
 ## 3. ทดสอบ Restore (ทำบน Local D1 แยกต่างหากเท่านั้น)
 
@@ -69,6 +76,11 @@ npx wrangler d1 migrations apply hr-system-db --local --persist-to .tmp/restore-
 - `foreign_key_check` ไม่มีปัญหา, `quick_check` ได้ `ok`
 - Apply Migration 0005 ต่อได้ และยอดสลิปไม่เปลี่ยน
 
+**ผลทดสอบก่อน Migration 0008 (5 พ.ย. 2569 เวลาไทย, ตามรายงาน Release `reports/PHASE-E1-AVATAR-RELEASE.md`):**
+- Restore ไฟล์ `hr-system-db-pre-0008-20261104-191211.restore.sql` ลง Local แยก: 60 ตาราง 910 แถว ตรงกับ Production ณ เวลาสำรองทุกตาราง
+- `foreign_key_check` ไม่มีปัญหา, `quick_check` ได้ `ok`
+- Apply Migration 0008 ต่อได้ เพิ่มเฉพาะตาราง `employee_avatars` ที่ว่าง ข้อมูลอื่นไม่เปลี่ยน
+
 ## 4. การกู้คืนเมื่อเกิดเหตุ (ต้องได้รับอนุมัติก่อนทุกครั้ง)
 
 | สถานการณ์ | วิธีที่แนะนำ |
@@ -79,6 +91,7 @@ npx wrangler d1 migrations apply hr-system-db --local --persist-to .tmp/restore-
 | งวดที่ปิดแล้วถูกเปิดใหม่หรือคำนวณใหม่ (ตั้งแต่ Migration 0007) | สลิปก่อนเปิดงวดอยู่ใน `payslip_archive` (`reason = 'reopen'`, `op_token` ตาม Audit `payroll.period_reopened_closed`) รวมสถานะการเผยแพร่เดิม |
 | ข้อมูลบางตารางเสียหาย | Restore ลง Local → Export เฉพาะแถวที่ต้องการ → ตรวจโดย HR → นำเข้าเฉพาะแถวนั้นผ่านขั้นตอนที่อนุมัติ |
 | ฐานข้อมูลเสียหายทั้งระบบ | `npx wrangler d1 time-travel restore hr-system-db --bookmark=<bookmark>` โดยเจ้าของระบบอนุมัติเป็นลายลักษณ์อักษร ข้อมูลหลังจุดนั้นจะหายทั้งหมด ให้สำรองสถานะปัจจุบันก่อนเสมอ |
+| รูปพนักงานหายหรือไม่ตรงกับ metadata (ตั้งแต่ Migration 0008) | รูปอยู่ใน R2 bucket private `hr-system-employee-assets` ไม่อยู่ในไฟล์สำรอง D1 ตาราง `employee_avatars` เก็บเฉพาะ metadata (`object_key`, ชนิด, ขนาด) แถวที่ชี้ไปยัง object ที่ไม่มีแล้วจะแสดงเป็นอักษรย่อ ให้ลบแถวนั้นหรืออัปโหลดรูปใหม่ ส่วน object ที่ค้างหลังเปลี่ยนรูปไม่สำเร็จจะมี key อยู่ใน Audit (`orphan_key`) |
 | Deploy ใหม่มีปัญหา (ไม่เกี่ยวกับข้อมูล) | `npx wrangler rollback` กลับ Worker Version ก่อนหน้า ไม่แตะฐานข้อมูล |
 
 ทุกครั้งหลังกู้คืน:
