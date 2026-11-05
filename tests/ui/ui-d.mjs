@@ -191,7 +191,8 @@ try {
       const f = [...document.querySelectorAll('a[href], button, input, select, textarea, [tabindex]')].filter((e) => e.tabIndex >= 0 && !e.disabled);
       return f[0]?.className;
     });
-    await page.focus('.sidebar .nav-item'); await page.keyboard.press('Shift+Tab');
+    // the first tab stop inside the menu is the sidebar collapse toggle (brand header), then the menu items
+    await page.focus('.sidebar .sidebar-collapse-toggle'); await page.keyboard.press('Shift+Tab');
     const sk = await page.evaluate(() => { const e = document.activeElement; const r = e.getBoundingClientRect(); return { cls: e.className, text: e.textContent, top: Math.round(r.top), tf: getComputedStyle(e).transform }; });
     check(`${theme}: skip link is the first tab stop, before the menu, visible when focused`, firstTab?.includes('skip-link') && sk.cls.includes('skip-link') && sk.text === 'ข้ามไปยังเนื้อหาหลัก' && sk.top >= 0 && sk.tf === 'none', JSON.stringify({ firstTab, ...sk }));
     await page.keyboard.press('Enter');
@@ -210,12 +211,13 @@ try {
       const s = document.querySelector('.sidebar'); const r = s.getBoundingClientRect();
       const onTop = s.contains(document.elementFromPoint(100, 300));   // drawer actually painted above the scrim
       const shot = { left: Math.round(r.left), w: Math.round(r.width), onTop };
-      s.scrollTop = s.scrollHeight; await new Promise((res) => setTimeout(res, 200));
+      const list = s.querySelector('.sidebar-menu-scroll'); // only the menu list scrolls; the brand header stays
+      list.scrollTop = list.scrollHeight; await new Promise((res) => setTimeout(res, 200));
       const items = [...s.querySelectorAll('.nav-item')]; const last = items[items.length - 1].getBoundingClientRect();
       return { open: document.body.classList.contains('nav-open'), ...shot, lastBottom: Math.round(last.bottom), footerTop: Math.round(document.getElementById('site-footer').getBoundingClientRect().top) };
     });
     check(`${theme} 375: drawer opens on screen (left 0, on top of the scrim), < 300px wide, last item above footer`, dr.open && dr.left === 0 && dr.onTop && dr.w < 300 && dr.lastBottom <= dr.footerTop, JSON.stringify(dr));
-    await page.evaluate(() => { document.querySelector('.sidebar').scrollTop = 0; });
+    await page.evaluate(() => { document.querySelector('.sidebar-menu-scroll').scrollTop = 0; });
     await page.screenshot({ path: join(OUT, `after-${theme}-375-drawer.png`) });
     await page.keyboard.press('Escape');
     check(`${theme} 375: Escape closes the drawer`, !(await page.evaluate(() => document.body.classList.contains('nav-open'))));
