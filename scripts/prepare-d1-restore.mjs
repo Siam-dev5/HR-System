@@ -2,6 +2,10 @@
 // The export writes INSERTs of a table (e.g. payslips) before the CREATE TABLE of its foreign-key parent
 // (employees), which fails with "no such table: main.employees". Output order:
 //   PRAGMA → every CREATE TABLE → every INSERT (sqlite_sequence last) → every CREATE INDEX.
+// INSERTs are ordered so that every foreign-key parent row comes first: tables in dependency order (parents before
+// children) and, inside a table that references itself (employees.manager_id, departments.parent_id), parent rows
+// before their children. A remote D1 import checks foreign keys as it goes (PRAGMA defer_foreign_keys does not hold
+// across its batches), so a dump in export order fails there with "FOREIGN KEY constraint failed".
 // Statements are split outside quoted strings; count and content are unchanged, only the order differs.
 //
 // Usage: node scripts/prepare-d1-restore.mjs <export.sql> <restore.sql>
@@ -38,6 +42,55 @@ function statements(sql) {
   if (sql.slice(start).trim()) throw new Error('trailing text after the last statement');
   return out;
 }
+
+// split a parenthesised list on top-level commas (outside quotes and nested parentheses, e.g. replace(...))
+function topLevel(list) {
+  const parts = [];
+  let depth = 0;
+  let quote = null;
+  let start = 0;
+  for (let i = 0; i < list.length; i++) {
+    const ch = list[i];
+    if (quote) {
+      if (ch === quote) {
+        if (list[i + 1] === quote) i++;
+        else quote = null;
+      }
+    } else if (ch === "'" || ch === '"') quote = ch;
+    else if (ch === '(') depth++;
+    else if (ch === ')') depth--;
+    else if (ch === ',' && depth === 0) {
+      parts.push(list.slice(start, i).trim());
+      start = i + 1;
+    }
+  }
+  parts.push(list.slice(start).trim());
+  return parts;
+}
+const unquote = (s) => s.replace(/^"|"$/g, '');
+
+/** { table, columns, values } of `INSERT INTO "t" ("a","b") VALUES(1,'x');` */
+function parseInsert(stmt) {
+  const m = /^INSERT INTO "?(\w+)"?\s*\(([^)]*)\)\s*VALUES\s*\(([\s\S]*)\);$/i.exec(stmt);
+  if (!m) throw new Error(`unexpected INSERT form: ${stmt.slice(0, 80)}`);
+  return { table: m[1], columns: topLevel(m[2]).map(unquote), values: topLevel(m[3]) };
+}
+
+/** foreign keys per table from the CREATE TABLE statements: [{ column, parent }] */
+function foreignKeys(createStmt) {
+  const body = createStmt.slice(createStmt.indexOf('(') + 1, createStmt.lastIndexOf(')'));
+  const fks = [];
+  for (const def of topLevel(body)) {
+    const table = /^FOREIGN KEY\s*\(\s*"?(\w+)"?\s*\)\s*REFERENCES\s+"?(\w+)"?/i.exec(def);
+    if (table) fks.push({ column: table[1], parent: table[2] });
+    else {
+      const col = /^"?(\w+)"?\s[\s\S]*?\bREFERENCES\s+"?(\w+)"?/i.exec(def);
+      if (col) fks.push({ column: col[1], parent: col[2] });
+    }
+  }
+  return fks;
+}
+
 const lines = statements(readFileSync(src, 'utf8'));
 const groups = { pragma: [], table: [], insert: [], sequence: [], index: [] };
 for (const l of lines) {
@@ -51,9 +104,59 @@ for (const l of lines) {
     process.exit(1);
   }
 }
-const ordered = [...groups.pragma, ...groups.table, ...groups.insert, ...groups.sequence, ...groups.index];
+
+// tables in dependency order (parents first); ties keep the export order
+const fkOf = new Map(groups.table.map((t) => [/^CREATE TABLE "?(\w+)"?/i.exec(t)[1], foreignKeys(t)]));
+const tableOrder = [];
+const state = new Map();
+const visit = (t, path) => {
+  if (state.get(t) === 'done') return;
+  if (state.get(t) === 'visiting') throw new Error(`foreign-key cycle between tables: ${[...path, t].join(' -> ')}`);
+  state.set(t, 'visiting');
+  for (const fk of fkOf.get(t) ?? []) if (fk.parent !== t && fkOf.has(fk.parent)) visit(fk.parent, [...path, t]);
+  state.set(t, 'done');
+  tableOrder.push(t);
+};
+for (const t of fkOf.keys()) visit(t, []);
+
+// rows per table; a self-referencing table is ordered parents-first
+const rowsOf = new Map();
+for (const stmt of groups.insert) {
+  const row = parseInsert(stmt);
+  if (!rowsOf.has(row.table)) rowsOf.set(row.table, []);
+  rowsOf.get(row.table).push({ stmt, row });
+}
+let selfOrdered = 0;
+for (const [table, rows] of rowsOf) {
+  const self = (fkOf.get(table) ?? []).filter((fk) => fk.parent === table);
+  if (!self.length) continue;
+  const idAt = rows[0].row.columns.indexOf('id');
+  if (idAt < 0) throw new Error(`${table} references itself but has no id column`);
+  const byId = new Map(rows.map((r) => [r.row.values[idAt], r]));
+  const placed = new Set();
+  const ordered = [];
+  const place = (r, path) => {
+    const id = r.row.values[idAt];
+    if (placed.has(id)) return;
+    if (path.includes(id)) throw new Error(`${table}: rows reference each other in a cycle (${[...path, id].join(' -> ')})`);
+    for (const fk of self) {
+      const ref = r.row.values[r.row.columns.indexOf(fk.column)];
+      if (ref !== undefined && ref !== 'NULL' && ref !== id && byId.has(ref)) place(byId.get(ref), [...path, id]);
+    }
+    placed.add(id);
+    ordered.push(r);
+  };
+  for (const r of rows) place(r, []);
+  if (ordered.some((r, i) => r !== rows[i])) selfOrdered++;
+  rowsOf.set(table, ordered);
+}
+const inserts = [];
+for (const t of tableOrder) for (const r of rowsOf.get(t) ?? []) inserts.push(r.stmt);
+for (const [t, rows] of rowsOf) if (!fkOf.has(t)) for (const r of rows) inserts.push(r.stmt); // no CREATE TABLE seen (kept, at the end)
+
+const ordered = [...groups.pragma, ...groups.table, ...inserts, ...groups.sequence, ...groups.index];
 if (ordered.length !== lines.length) throw new Error('statement count changed');
 const sorted = (a) => createHash('sha256').update([...a].sort().join('\n')).digest('hex');
 if (sorted(ordered) !== sorted(lines)) throw new Error('statement content changed');
 writeFileSync(out, ordered.join('\n') + '\n');
-console.log(`ok: ${ordered.length} statements (${groups.table.length} tables, ${groups.insert.length} inserts, ${groups.index.length} indexes) → ${out}`);
+console.log(`ok: ${ordered.length} statements (${groups.table.length} tables, ${groups.insert.length} inserts, ${groups.index.length} indexes; parents before children, ${selfOrdered} self-referencing table(s) re-ordered) → ${out}`);

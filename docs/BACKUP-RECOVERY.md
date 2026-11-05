@@ -61,6 +61,20 @@ node scripts/prepare-d1-restore.mjs .secrets/backups/<ไฟล์>.sql .secrets
 npx wrangler d1 execute hr-system-db --local --persist-to .tmp/restore-<วันที่> --file .secrets/backups/<ไฟล์>.restore.sql
 ```
 
+สคริปต์เรียง INSERT ให้แถวแม่มาก่อนแถวลูกเสมอ (ตารางแม่ก่อนตารางลูก และในตารางที่อ้างอิงตัวเอง เช่น `employees.manager_id`, `departments.parent_id` หัวหน้า/หน่วยงานแม่มาก่อน)
+เพราะการ Import เข้า **D1 แบบ Remote ฐานใหม่** (กรณีกู้ระบบจริง) ตรวจ Foreign Key ทีละแถว — `PRAGMA defer_foreign_keys` ใช้ไม่ได้ข้ามชุดคำสั่งของการ Import
+ไฟล์ที่ไม่ได้เรียงแบบนี้จะล้มด้วย `FOREIGN KEY constraint failed` (Import ทั้งไฟล์ถูกยกเลิก ฐานยังว่าง)
+ถ้ามีแถวในตารางเดียวกันอ้างอิงกันเป็นวง สคริปต์จะหยุดและแจ้ง ไม่สร้างไฟล์ที่ Restore ไม่ได้
+
+Restore ลง **D1 Remote ฐานใหม่สำหรับ Staging** (ห้ามใช้ชื่อ `hr-system-db`): ใช้ไฟล์ config แยกที่มีเฉพาะฐาน Staging เพื่อไม่ให้คำสั่งชี้ไป Production ได้
+
+```
+npx wrangler d1 create hr-system-db-staging
+# wrangler.staging.jsonc (นอก repo): d1_databases มีเฉพาะ hr-system-db-staging + migrations_dir ของ repo
+npx wrangler d1 execute hr-system-db-staging --remote --config <wrangler.staging.jsonc> --file .secrets/backups/<ไฟล์>.restore.sql
+npx wrangler d1 migrations apply hr-system-db-staging --remote --config <wrangler.staging.jsonc>
+```
+
 ตรวจผลหลัง Restore บนฐาน Local:
 
 ```
@@ -80,6 +94,13 @@ npx wrangler d1 migrations apply hr-system-db --local --persist-to .tmp/restore-
 - Restore ไฟล์ `hr-system-db-pre-0008-20261104-191211.restore.sql` ลง Local แยก: 60 ตาราง 910 แถว ตรงกับ Production ณ เวลาสำรองทุกตาราง
 - `foreign_key_check` ไม่มีปัญหา, `quick_check` ได้ `ok`
 - Apply Migration 0008 ต่อได้ เพิ่มเฉพาะตาราง `employee_avatars` ที่ว่าง ข้อมูลอื่นไม่เปลี่ยน
+
+**ผลทดสอบก่อน Migration 0009 (5 พ.ย. 2569, ไฟล์ `hr-system-db-pre-0009-20261105-110751.sql`, bookmark `000000b5-00000000-0000511a-53c4171aa7010963fb3a83ec186c7f4d`):**
+- Production อยู่ที่ Migration 0001–0008, 62 ตาราง; ไฟล์สำรองครบ (1,326 คำสั่ง: 62 ตาราง, 1,164 แถว, 78 index)
+- Restore ลง Local แยก และลง D1 Remote ฐานใหม่ `hr-system-db-staging`: จำนวนแถวตรงกับไฟล์สำรองทุกตาราง (0 ต่าง), `quick_check` `ok`, `foreign_key_check` ไม่มีปัญหา (Local)
+- ครั้งแรกที่ Restore ลง Remote ล้มด้วย `FOREIGN KEY constraint failed` (Import ถูกยกเลิกทั้งไฟล์ ฐานยังว่าง) — แก้ด้วยการเรียงแถวแม่ก่อนลูกในสคริปต์ แล้ว Restore สำเร็จ 1,326/1,326
+- Apply Migration 0009 ทั้ง Local และ Staging Remote: เพิ่ม 5 ตารางว่าง + ปฏิทินกลาง 1 แถว + สิทธิ์ 11 แถว + ประวัติ Migration 1 แถว; ข้อมูลพนักงาน งวดเงินเดือน สลิป และประวัติเงินเดือน ไม่เปลี่ยน (เทียบ hash ก่อน/หลัง)
+- ทดสอบ Rollback (`scripts/rollback/0009_holiday_calendar.down.sql`) บนสำเนา Local: กลับเป็นสถานะเดียวกับไฟล์สำรองทุกตาราง แล้ว Apply 0009 ซ้ำได้
 
 ## 4. การกู้คืนเมื่อเกิดเหตุ (ต้องได้รับอนุมัติก่อนทุกครั้ง)
 
