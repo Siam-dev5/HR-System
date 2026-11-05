@@ -7,6 +7,8 @@ import type { ListResponse, LookupOption, ModulePerms, Row } from '../../shared/
 import { resolveLink } from '../../shared/links';
 import { DATE_RE, HttpError, badRequest, conflict, csv, forbidden, intParam, notFound, readJson } from '../lib/http';
 import { audit } from '../lib/audit';
+import { requireCompany } from '../lib/companies';
+import { bangkokNow } from '../lib/time';
 import { can, currentUser, requireAuth } from '../auth';
 import { cancelWorkflowFor, startWorkflow } from './workflow';
 
@@ -64,6 +66,14 @@ interface ListQuery {
   where: string;
   params: unknown[];
   order: string;
+}
+
+/**
+ * Employee lists filtered by company: the company must be in the user's company scope (403 otherwise), exactly as on
+ * the other company-scoped pages. The row scope below still applies, so this never widens what a user can see.
+ */
+async function checkCompanyFilter(c: Context<AppEnv>, user: AuthUser, m: CrudModule): Promise<void> {
+  if (m.key === 'employees') await requireCompany(c.env.DB, user, c.req.query('f.company_id'));
 }
 
 function buildListQuery(c: Context<AppEnv>, user: AuthUser, m: CrudModule): ListQuery {
@@ -185,6 +195,7 @@ crudRoutes.get('/:key', async (c) => {
   const user = currentUser(c);
   const m = moduleOr404(c.req.param('key'));
   need(user, m, 'view');
+  await checkCompanyFilter(c, user, m);
   const { where, params, order } = buildListQuery(c, user, m);
   const page = Math.max(1, Number(c.req.query('page')) || 1);
   const pageSize = Math.min(200, Math.max(1, Number(c.req.query('pageSize')) || 50));
@@ -192,7 +203,7 @@ crudRoutes.get('/:key', async (c) => {
   const { results } = await c.env.DB.prepare(`SELECT ${selectColumns(m)} FROM ${m.table} t WHERE ${where} ORDER BY ${order} LIMIT ? OFFSET ?`)
     .bind(...params, pageSize, (page - 1) * pageSize)
     .all<Row>();
-  return c.json<ListResponse>({ rows: results.map((r) => maskRow(user, m, r)), total: total?.n ?? 0, page, pageSize });
+  return c.json<ListResponse>({ rows: results.map((r) => maskRow(user, m, r)), total: total?.n ?? 0, page, pageSize, asOf: bangkokNow().date });
 });
 
 crudRoutes.get('/:key/export.csv', async (c) => {
@@ -200,6 +211,7 @@ crudRoutes.get('/:key/export.csv', async (c) => {
   const m = moduleOr404(c.req.param('key'));
   need(user, m, 'view');
   need(user, m, 'export');
+  await checkCompanyFilter(c, user, m);
   const { where, params, order } = buildListQuery(c, user, m);
   const { results } = await c.env.DB.prepare(`SELECT ${selectColumns(m)} FROM ${m.table} t WHERE ${where} ORDER BY ${order} LIMIT 10000`).bind(...params).all<Row>();
   const available = [
