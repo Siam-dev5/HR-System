@@ -171,6 +171,80 @@ try {
   await page.emulateMedia({ reducedMotion: 'no-preference' });
   await ctx.close();
 
+  // ---------- K. menu groups: independent toggle, saved, icon-only shows everything, restored on expand ----------
+  const GK = 'hr.sidebar.groups';
+  const g = await session();
+  await go(g.page, '/dashboard');
+  const groups = (page) => page.evaluate((key) => {
+    const vis = (e) => e.getBoundingClientRect().width > 0 && e.getBoundingClientRect().height > 0;
+    const out = {};
+    for (const grp of document.querySelectorAll('.nav-group')) {
+      const t = grp.querySelector('.nav-group-toggle'), items = [...grp.querySelectorAll('.nav-item')];
+      out[grp.dataset.group] = { expanded: t.getAttribute('aria-expanded'), toggleShown: vis(t), shown: items.filter(vis).length, total: items.length, controls: document.getElementById(t.getAttribute('aria-controls'))?.parentElement === grp, labelled: grp.getAttribute('aria-labelledby') === t.id, type: t.getAttribute('type'), name: t.textContent.trim() };
+    }
+    let saved; try { saved = localStorage.getItem(key); } catch { saved = 'unavailable'; }
+    return { groups: out, saved, hrefs: [...document.querySelectorAll('.nav-item')].map((a) => a.getAttribute('href')).sort().join() };
+  }, GK);
+  let k = await groups(g.page);
+  const keys = Object.keys(k.groups);
+  const [ga, gb] = [keys[1], keys[2]]; // two groups below "ภาพรวม" (the dashboard's own group stays open)
+  const hrefs = k.hrefs;
+  check('K. every group header is a button (type=button, aria-expanded, aria-controls its items, names the group)', keys.length >= 3 && Object.values(k.groups).every((x) => x.type === 'button' && x.expanded === 'true' && x.controls && x.labelled && x.name.length > 0 && x.shown === x.total && x.toggleShown) && k.saved === null, JSON.stringify(keys));
+  await g.page.click(`.nav-group[data-group="${ga}"] .nav-group-toggle`);
+  k = await groups(g.page);
+  check(`K. closing "${ga}" hides only its items; every other group stays open`, k.groups[ga].expanded === 'false' && k.groups[ga].shown === 0 && keys.filter((x) => x !== ga).every((x) => k.groups[x].shown === k.groups[x].total && k.groups[x].expanded === 'true'), JSON.stringify(k.groups[ga]));
+  check('K. the closed group is saved immediately', k.saved === JSON.stringify([ga]), String(k.saved));
+  await g.page.focus(`.nav-group[data-group="${gb}"] .nav-group-toggle`); await g.page.keyboard.press('Enter');
+  k = await groups(g.page);
+  check(`K. keyboard: Enter on "${gb}" closes it, independently of "${ga}"`, k.groups[gb].expanded === 'false' && k.groups[gb].shown === 0 && k.groups[ga].shown === 0 && JSON.parse(k.saved).sort().join() === [ga, gb].sort().join(), String(k.saved));
+  const gf = await g.page.evaluate(() => { const s = getComputedStyle(document.activeElement); return { cls: document.activeElement.className, os: s.outlineStyle, ow: s.outlineWidth }; });
+  check('K. keyboard focus on a group header is visible', gf.cls.includes('nav-group-toggle') && gf.os !== 'none' && parseFloat(gf.ow) >= 2, JSON.stringify(gf));
+  await g.page.keyboard.press('Space');
+  await g.page.click(`.nav-group[data-group="${ga}"] .nav-group-toggle`);
+  await g.page.click(`.nav-group[data-group="${gb}"] .nav-group-toggle`);
+  k = await groups(g.page);
+  check(`K. Space reopens "${gb}"; reopening "${ga}" and closing "${gb}" leaves only "${gb}" closed`, k.groups[ga].expanded === 'true' && k.groups[ga].shown === k.groups[ga].total && k.groups[gb].expanded === 'false' && k.saved === JSON.stringify([gb]), String(k.saved));
+  check('K. permissions unchanged: the same menu links exist whatever the group state', k.hrefs === hrefs);
+  await g.page.reload(); await g.page.waitForSelector('nav.sidebar .nav-item'); await settle(g.page);
+  k = await groups(g.page);
+  check(`K. reload restores each group's state ("${gb}" closed, the rest open)`, k.groups[gb].expanded === 'false' && k.groups[gb].shown === 0 && keys.filter((x) => x !== gb).every((x) => k.groups[x].expanded === 'true' && k.groups[x].shown === k.groups[x].total));
+  const firstA = await g.page.$eval(`.nav-group[data-group="${ga}"] .nav-item`, (a) => a.dataset.path);
+  await g.page.click(`.nav-group[data-group="${ga}"] .nav-item`); await settle(g.page);
+  check('K. navigation and active highlight work with a group closed elsewhere', await g.page.evaluate((p) => { const a = document.querySelector('.nav-item.active'); return a?.dataset.path === p && a.getAttribute('aria-current') === 'page' && location.pathname === p; }, firstA));
+  // icon-only mode
+  await g.page.click('.sidebar-collapse-toggle'); await g.page.waitForTimeout(350);
+  k = await groups(g.page);
+  check(`K. icon-only: every item of every group is shown (including closed "${gb}"), no group headers`, Object.values(k.groups).every((x) => x.shown === x.total && !x.toggleShown), JSON.stringify(Object.fromEntries(Object.entries(k.groups).map(([n, x]) => [n, `${x.shown}/${x.total}`]))));
+  check('K. icon-only: saved group states are kept, not overwritten', k.saved === JSON.stringify([gb]), String(k.saved));
+  await g.page.click(`.nav-group[data-group="${gb}"] .nav-item`); await settle(g.page);
+  check(`K. icon-only: an item of the closed group "${gb}" is reachable and navigates`, await g.page.evaluate((key) => document.querySelector('.nav-item.active')?.closest('.nav-group')?.dataset.group === key, gb));
+  await g.page.focus('.sidebar-collapse-toggle'); await g.page.keyboard.press('Tab');
+  check('K. icon-only: Tab from the sidebar toggle lands on a menu item (hidden group headers are not tab stops)', await g.page.evaluate(() => document.activeElement.classList.contains('nav-item')));
+  // back to expanded
+  await g.page.click('.sidebar-collapse-toggle'); await g.page.waitForTimeout(350);
+  k = await groups(g.page);
+  check(`K. expanded again: saved states restored ("${gb}" closed, headers back)`, k.groups[gb].expanded === 'false' && k.groups[gb].shown === 0 && Object.values(k.groups).every((x) => x.toggleShown) && keys.filter((x) => x !== gb).every((x) => k.groups[x].shown === k.groups[x].total));
+  check('K. expanded again: the active item (in the closed group) keeps its highlight in the DOM', await g.page.evaluate((key) => { const a = document.querySelector('.nav-item.active'); return a?.closest('.nav-group')?.dataset.group === key && a.getAttribute('aria-current') === 'page'; }, gb));
+  await g.page.screenshot({ path: join(OUT, 'groups-expanded-1440-light.png') });
+  await g.ctx.close();
+  // mobile drawer keeps working with saved group states; corrupt storage falls back to all open
+  const gm = await session({ viewport: { width: 375, height: 740 }, init: { content: `try { localStorage.setItem('${GK}', '${JSON.stringify([gb])}'); localStorage.setItem('hr.sidebar.collapsed', '1'); } catch { /* none */ }` } });
+  await go(gm.page, '/dashboard');
+  await gm.page.click('.menu-toggle'); await gm.page.waitForTimeout(350);
+  k = await groups(gm.page);
+  check(`K. drawer 375: saved group state applies ("${gb}" closed), headers shown`, k.groups[gb].shown === 0 && Object.values(k.groups).every((x) => x.toggleShown));
+  await gm.page.click(`.nav-group[data-group="${gb}"] .nav-group-toggle`);
+  k = await groups(gm.page);
+  check('K. drawer 375: a group opens in the drawer and the drawer stays open', k.groups[gb].shown === k.groups[gb].total && (await gm.page.evaluate(() => document.body.classList.contains('nav-open'))));
+  await gm.page.keyboard.press('Escape');
+  check('K. drawer 375: Escape still closes the drawer', !(await gm.page.evaluate(() => document.body.classList.contains('nav-open'))));
+  await gm.ctx.close();
+  const gc = await session({ init: { content: `try { localStorage.setItem('${GK}', 'not json'); } catch { /* none */ }` } });
+  await go(gc.page, '/dashboard');
+  k = await groups(gc.page);
+  check('K. unreadable saved group state: every group open, no error', Object.values(k.groups).every((x) => x.expanded === 'true' && x.shown === x.total));
+  await gc.ctx.close();
+
   // ---------- storage unavailable: defaults to expanded, the toggle still works ----------
   // only this key throws (as a blocked / private-mode storage would); the theme preference still works
   const blocked = await session({ init: { content: `{

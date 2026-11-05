@@ -67,6 +67,47 @@ function savedSidebarCollapsed(): boolean {
   }
 }
 
+// Menu groups the user closed (expanded sidebar and drawer). Icon-only mode always shows every item: it has no
+// group header to reopen them with. The saved set is applied again when the sidebar expands.
+const GROUPS_KEY = 'hr.sidebar.groups';
+
+function savedClosedGroups(): Set<string> {
+  try {
+    const v: unknown = JSON.parse(localStorage.getItem(GROUPS_KEY) ?? '[]');
+    return new Set(Array.isArray(v) ? v.filter((x): x is string => typeof x === 'string') : []);
+  } catch {
+    return new Set();
+  }
+}
+
+/** One menu group: a header button that shows / hides the group's items, remembered per group. */
+function navGroup(key: string, title: string, items: HTMLElement[], closed: Set<string>): HTMLElement {
+  const listId = `nav-group-${key}`;
+  const list = h('div', { class: 'nav-group-items', id: listId }, items);
+  const group = h('div', { class: 'nav-group', role: 'group', 'aria-labelledby': `${listId}-title`, 'data-group': key });
+  const toggle = h('button', { type: 'button', class: 'nav-group-title nav-group-toggle', id: `${listId}-title`, 'aria-controls': listId },
+    h('span', { class: 'nav-group-label' }, title), icon('chevronDown', 'ico nav-group-chevron'));
+  const apply = (open: boolean) => {
+    group.classList.toggle('is-closed', !open);
+    toggle.setAttribute('aria-expanded', String(open));
+  };
+  apply(!closed.has(key));
+  toggle.addEventListener('click', () => {
+    const open = group.classList.contains('is-closed');
+    apply(open);
+    const now = savedClosedGroups();
+    if (open) now.delete(key);
+    else now.add(key);
+    try {
+      localStorage.setItem(GROUPS_KEY, JSON.stringify([...now]));
+    } catch {
+      /* storage unavailable: the choice lasts until reload */
+    }
+  });
+  group.append(toggle, list);
+  return group;
+}
+
 /** Collapse toggle + the collapsed-mode tooltip; returns the toggle button for the brand header. */
 function sidebarCollapse(shell: HTMLElement, nav: HTMLElement, menu: HTMLElement): HTMLElement {
   // collapsed links show only an icon: one floating tooltip (outside the scrolling menu, so it is never clipped)
@@ -114,12 +155,14 @@ function sidebarCollapse(shell: HTMLElement, nav: HTMLElement, menu: HTMLElement
 function renderShell(): void {
   const meta = state.meta as MetaResponse;
   // only the menu list scrolls; the brand header (logo + collapse toggle) stays at the top
+  const closedGroups = savedClosedGroups();
   const menu = h('div', { class: 'sidebar-menu-scroll', id: 'sidebar-menu' },
     MENU_GROUPS.map((g) => {
       const items = meta.menu.filter((m) => m.group === g.key);
       if (!items.length) return null;
-      return h('div', { class: 'nav-group' }, h('div', { class: 'nav-group-title' }, g.title),
-        items.map((i) => link(i.path, [menuIcon(i.key), h('span', { class: 'nav-label' }, i.title)], { class: 'nav-item', 'data-path': i.path, title: i.title, 'aria-label': i.title })));
+      return navGroup(g.key, g.title,
+        items.map((i) => link(i.path, [menuIcon(i.key), h('span', { class: 'nav-label' }, i.title)], { class: 'nav-item', 'data-path': i.path, title: i.title, 'aria-label': i.title })),
+        closedGroups);
     }),
   );
   const nav = h('nav', { class: 'sidebar', 'aria-label': 'เมนูหลัก' });
