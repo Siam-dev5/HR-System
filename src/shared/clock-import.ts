@@ -46,6 +46,11 @@ export function findClockHeaderRow(grid: readonly Cell[][]): number {
   return 0;
 }
 
+/** Whether any of the first 20 rows names at least two system fields (a time-clock export). */
+export function hasClockHeader(grid: readonly Cell[][]): boolean {
+  return grid.slice(0, 20).some((row) => new Set(row.map((c) => ALIAS.get(normalizeLabel(c))).filter(Boolean)).size >= 2);
+}
+
 export function headerLabels(grid: readonly Cell[][], headerRow: number): string[] {
   const row = grid[headerRow] ?? [];
   const width = Math.max(row.length, ...grid.slice(headerRow, headerRow + 50).map((r) => r.length));
