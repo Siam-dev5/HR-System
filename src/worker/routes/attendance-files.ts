@@ -19,11 +19,17 @@ import {
 } from '../../shared/clock-import';
 import { CLOCK_WARNING_LABEL, checkClock, formatDuration } from '../../shared/shifts';
 import { writeXlsx, type Cell } from '../../shared/xlsx';
+import { DAILY_FIELDS, FEISHU_DAILY_TEMPLATE, type DailyMapping } from '../../shared/feishu-daily';
+import { CLOCK_TEMPLATE, TEMPLATE_LABEL, detectSheet, wrongSheetMessage } from '../../shared/import-templates';
+import { dailyStatements, evaluateDaily, readDailyMapping, type DailyEvaluation, type EvaluatedDailyRow } from '../lib/feishu-daily-import';
+
+const TEMPLATES = [CLOCK_TEMPLATE, FEISHU_DAILY_TEMPLATE] as const;
+type AttendanceTemplate = (typeof TEMPLATES)[number];
 
 export const attendanceFileRoutes = new Hono<AppEnv>();
 attendanceFileRoutes.use('*', requireAuth);
 
-const MAX_COLS = 60;
+const MAX_COLS = 120;
 const MAX_CELL = 2000;
 const KEY_RE = /^[A-Za-z0-9-]{8,64}$/;
 
@@ -42,6 +48,8 @@ interface FileInput {
   grid: Cell[][];
   headerRow: number | null;
   mapping: ClockMapping | null;
+  template: AttendanceTemplate;
+  dailyMapping: DailyMapping | null;
 }
 
 function readGrid(v: unknown): Cell[][] {
@@ -85,10 +93,22 @@ async function readInput(c: Context<AppEnv>, body: Record<string, unknown>): Pro
   if (!/^[0-9a-f]{64}$/.test(sha)) throw badRequest('sha256 ไม่ถูกต้อง');
   const headerRow = body.header_row === undefined || body.header_row === null ? null : Number(body.header_row);
   if (headerRow !== null && (!Number.isInteger(headerRow) || headerRow < 0 || headerRow > 50)) throw badRequest('แถวหัวตารางไม่ถูกต้อง');
+  const template = (body.template ?? CLOCK_TEMPLATE) as AttendanceTemplate;
+  if (!TEMPLATES.includes(template)) throw badRequest('Template การนำเข้าไม่ถูกต้อง');
+  const sheetName = str(body, 'sheet_name', { max: 100 });
+  const grid = readGrid(body.grid);
+  // one worksheet of attendance data only: a leave / overtime worksheet or a template that does not fit is refused
+  const kind = detectSheet(grid);
+  const wrong = wrongSheetMessage('attendance', kind, sheetName);
+  if (wrong) throw badRequest(wrong);
+  if (kind.template && kind.template !== template) throw badRequest(`Worksheet นี้มีโครงสร้างแบบ ${TEMPLATE_LABEL[kind.template]} ไม่ตรงกับ Template ที่เลือก (${TEMPLATE_LABEL[template]})`);
+  if (template === FEISHU_DAILY_TEMPLATE && kind.template !== FEISHU_DAILY_TEMPLATE) throw badRequest('Worksheet นี้ไม่ใช่รายงาน Feishu Daily Attendance (ไม่พบหัวตาราง Employee ID และคอลัมน์วันที่)');
   return {
     company, fileName, fileType: fileType as ClockFileType, fileSize: size, sha256: sha,
-    sheetName: str(body, 'sheet_name', { max: 100 }), source: str(body, 'source', { max: 100 }),
-    grid: readGrid(body.grid), headerRow, mapping: readMapping(body.mapping),
+    sheetName, source: str(body, 'source', { max: 100 }),
+    grid, headerRow, template,
+    mapping: template === CLOCK_TEMPLATE ? readMapping(body.mapping) : null,
+    dailyMapping: template === FEISHU_DAILY_TEMPLATE ? readDailyMapping(body.mapping, MAX_COLS) : null,
   };
 }
 
@@ -229,21 +249,64 @@ const publicRow = (r: EvaluatedRow) => ({
   shift_label: r.shift_label, late_minutes: r.late_minutes, early_leave_minutes: r.early_leave_minutes, worked_minutes: r.worked_minutes,
 });
 
-/** Fields, accepted file types and limits of the import wizard. */
+const fieldList = (template: AttendanceTemplate) => (template === FEISHU_DAILY_TEMPLATE ? DAILY_FIELDS : CLOCK_FIELDS).map(({ key, label, required }) => ({ key, label, required }));
+
+/** Fields, templates, accepted file types and limits of the import wizard. */
 attendanceFileRoutes.get('/fields', requirePerm('attendance_file.import'), (c) =>
-  c.json({ fields: CLOCK_FIELDS.map(({ key, label, required }) => ({ key, label, required })), file_types: CLOCK_FILE_TYPES, max_rows: MAX_CLOCK_ROWS, max_bytes: MAX_CLOCK_FILE_BYTES }));
+  c.json({
+    fields: fieldList(CLOCK_TEMPLATE), file_types: CLOCK_FILE_TYPES, max_rows: MAX_CLOCK_ROWS, max_bytes: MAX_CLOCK_FILE_BYTES,
+    templates: TEMPLATES.map((t) => ({ code: t, label: TEMPLATE_LABEL[t], version: 1, fields: fieldList(t) })),
+  }));
+
+const sha256Of = (s: string) => sha256Hex(s);
+
+async function previousImports(db: D1Database, input: FileInput) {
+  const { results } = await db
+    .prepare('SELECT id, created_at, file_name FROM attendance_file_imports WHERE company_id = ? AND file_sha256 = ? AND COALESCE(sheet_name, \'\') = COALESCE(?, \'\') ORDER BY id DESC LIMIT 5')
+    .bind(input.company.id, input.sha256, input.sheetName)
+    .all<{ id: number; created_at: string; file_name: string }>();
+  return results;
+}
+
+function summarizeDaily(ev: DailyEvaluation) {
+  const n = (s: EvaluatedDailyRow['status']) => ev.rows.filter((r) => r.status === s).length;
+  const valid = n('valid');
+  const warning = n('warning');
+  return {
+    total: ev.rows.length, valid, warning, duplicate: n('duplicate'), invalid: n('invalid'), importable: valid + warning,
+    source_rows: ev.sourceRows, empty_days: ev.emptyDays, with_clock: ev.rows.filter((r) => (r.status === 'valid' || r.status === 'warning') && (r.clock_in || r.clock_out)).length,
+    events: ev.rows.filter((r) => r.status === 'valid' || r.status === 'warning').reduce((s, r) => s + r.day.events.length, 0),
+  };
+}
+
+const publicDailyRow = (r: EvaluatedDailyRow) => ({
+  row_no: r.row_no, source_ref: r.source_ref, employee_code: r.employee_code, employee_id: r.employee_id, employee_name: r.employee_display ?? r.employee_name, work_date: r.work_date,
+  cell: r.cell, clock_in: r.clock_in, clock_out: r.clock_out, out_next_day: r.out_next_day, in_result: r.day.clock_in ? { label: r.day.clock_in.label, result: r.day.clock_in.result, time: r.day.clock_in.time } : null,
+  out_result: r.day.clock_out ? { label: r.day.clock_out.label, result: r.day.clock_out.result, time: r.day.clock_out.time } : null, day_kind: r.day.kind,
+  events: r.day.events.map((e) => ({ kind: e.kind, label: e.label, amount: e.amount, unit: e.unit, ranges: e.ranges, all_day: e.all_day, overnight: e.overnight })),
+  status: r.status, issues: r.issues, attendance_status: r.attendance_status, late_minutes: r.late_minutes, early_leave_minutes: r.early_leave_minutes, worked_minutes: r.worked_minutes,
+});
 
 attendanceFileRoutes.post('/preview', requirePerm('attendance_file.import'), async (c) => {
   const input = await readInput(c, await readJson(c));
-  const ev = await evaluate(c.env.DB, currentUser(c), input);
+  const db = c.env.DB;
+  if (input.template === FEISHU_DAILY_TEMPLATE) {
+    const ev = await evaluateDaily(db, currentUser(c), { company: input.company, grid: input.grid, headerRow: input.headerRow, mapping: input.dailyMapping }, sha256Of);
+    return c.json({
+      template: input.template, sheet_name: input.sheetName, company: input.company, header_row: ev.headerRow, headers: ev.headers, mapping: ev.mapping, remembered: ev.remembered,
+      mapping_problems: ev.mappingProblems, fields: fieldList(input.template), day_columns: ev.dayColumns, previous: await previousImports(db, input), summary: summarizeDaily(ev), rows: ev.rows.map(publicDailyRow),
+    });
+  }
+  const ev = await evaluate(db, currentUser(c), input);
   return c.json({
-    company: input.company, header_row: ev.headerRow, headers: ev.headers, mapping: ev.mapping, remembered: ev.remembered, mapping_problems: ev.mappingProblems,
-    fields: CLOCK_FIELDS.map(({ key, label, required }) => ({ key, label, required })), previous: ev.previous, summary: summarize(ev.rows), rows: ev.rows.map(publicRow),
+    template: input.template, sheet_name: input.sheetName, company: input.company, header_row: ev.headerRow, headers: ev.headers, mapping: ev.mapping, remembered: ev.remembered, mapping_problems: ev.mappingProblems,
+    fields: fieldList(input.template), previous: ev.previous, summary: summarize(ev.rows), rows: ev.rows.map(publicRow),
   });
 });
 
 const BATCH_SELECT = `SELECT b.id, b.company_id, c.name AS company, c.code AS company_code, b.file_name, b.file_type, b.file_size, b.sheet_name, b.source, b.total_rows, b.imported_count, b.duplicate_count,
-  b.warning_count, b.invalid_count, b.status, b.created_at, b.created_by, u.username AS created_by_name
+  b.warning_count, b.invalid_count, b.status, b.created_at, b.created_by, u.username AS created_by_name, b.template_code, b.template_version, b.source_rows,
+  (SELECT COUNT(*) FROM attendance_raw_records x WHERE x.batch_id = b.id AND x.attendance_record_id IS NOT NULL) AS record_count
   FROM attendance_file_imports b JOIN companies c ON c.id = b.company_id LEFT JOIN users u ON u.id = b.created_by`;
 
 interface BatchRow {
@@ -268,11 +331,12 @@ attendanceFileRoutes.post('/', requirePerm('attendance_file.import'), async (c) 
     return c.json({ ...again, repeated: true });
   }
   const input = await readInput(c, body);
+  const batchId = `(SELECT id FROM attendance_file_imports WHERE idempotency_key = ?1)`;
+  if (input.template === FEISHU_DAILY_TEMPLATE) return importDaily(c, key, input, batchId);
   const ev = await evaluate(db, user, input);
   if (ev.mappingProblems.length) throw badRequest(ev.mappingProblems.join(' · '));
   if (!ev.rows.length) throw badRequest('ไม่พบแถวข้อมูลในไฟล์');
   const s = summarize(ev.rows);
-  const batchId = `(SELECT id FROM attendance_file_imports WHERE idempotency_key = ?1)`;
   const stmts: D1PreparedStatement[] = [
     db.prepare(`INSERT INTO attendance_file_imports (company_id, file_name, file_type, file_sha256, file_size, sheet_name, source, idempotency_key, mapping_json, total_rows, status, created_by)
                 VALUES (?2, ?3, ?4, ?5, ?6, ?7, ?8, ?1, ?9, ?10, 'failed', ?11)`)
@@ -330,6 +394,38 @@ attendanceFileRoutes.post('/', requirePerm('attendance_file.import'), async (c) 
   return c.json({ ...batch, repeated: false }, 201);
 });
 
+/** Confirmed import of a Feishu daily report: one atomic batch (see lib/feishu-daily-import.ts). */
+async function importDaily(c: Context<AppEnv>, key: string, input: FileInput, batchId: string) {
+  const db = c.env.DB;
+  const user = currentUser(c);
+  const ev = await evaluateDaily(db, user, { company: input.company, grid: input.grid, headerRow: input.headerRow, mapping: input.dailyMapping }, sha256Of);
+  if (ev.mappingProblems.length) throw badRequest(ev.mappingProblems.join(' · '));
+  if (!ev.rows.length) throw badRequest('ไม่พบข้อมูลรายวันในไฟล์');
+  const s = summarizeDaily(ev);
+  const stmts: D1PreparedStatement[] = [
+    db.prepare(`INSERT INTO attendance_file_imports (company_id, file_name, file_type, file_sha256, file_size, sheet_name, source, idempotency_key, mapping_json, total_rows, status, created_by, template_code, template_version, source_rows)
+                VALUES (?2, ?3, ?4, ?5, ?6, ?7, ?8, ?1, ?9, ?10, 'failed', ?11, ?12, 1, ?13)`)
+      .bind(key, input.company.id, input.fileName, input.fileType, input.sha256, input.fileSize, input.sheetName, input.source ?? 'Feishu', JSON.stringify(ev.mapping), ev.rows.length, user.id, FEISHU_DAILY_TEMPLATE, ev.sourceRows),
+    ...dailyStatements(db, key, batchId, ev, { companyId: input.company.id, fileName: input.fileName, userId: user.id }),
+  ];
+  try {
+    await db.batch(stmts);
+  } catch (e) {
+    if (String(e).includes('UNIQUE') && String(e).includes('idempotency_key')) {
+      const row = await db.prepare(`${BATCH_SELECT} WHERE b.idempotency_key = ?`).bind(key).first<BatchRow>();
+      if (row) return c.json({ ...row, repeated: true });
+    }
+    throw e;
+  }
+  const batch = await db.prepare(`${BATCH_SELECT} WHERE b.idempotency_key = ?`).bind(key).first<BatchRow>();
+  if (!batch) throw new Error('import batch missing after commit');
+  await audit(c, 'attendance_file.imported', 'attendance_file_imports', batch.id, {
+    company_id: input.company.id, template: FEISHU_DAILY_TEMPLATE, file_name: input.fileName, sheet_name: input.sheetName, file_type: input.fileType, source_rows: ev.sourceRows,
+    total: s.total, imported: batch.imported_count, records: batch.record_count, duplicate: batch.duplicate_count, invalid: batch.invalid_count, warning: batch.warning_count,
+  });
+  return c.json({ ...batch, repeated: false }, 201);
+}
+
 async function visibleBatch(c: Context<AppEnv>, id: number): Promise<BatchRow> {
   const b = await c.env.DB.prepare(`${BATCH_SELECT} WHERE b.id = ?`).bind(id).first<BatchRow>();
   if (!b) throw notFound('ไม่พบประวัติการนำเข้า');
@@ -351,26 +447,39 @@ attendanceFileRoutes.get('/', requirePerm('attendance_file.view'), async (c) => 
   return c.json(results);
 });
 
-const ROW_SELECT = `SELECT r.row_no, r.employee_code, r.employee_id, e.first_name || ' ' || e.last_name AS employee_name, r.work_date, r.clock_in, r.clock_out, r.clock_out_next_day, r.device, r.source, r.remark,
-  r.status, r.issues_json, r.attendance_record_id FROM attendance_raw_records r LEFT JOIN employees e ON e.id = r.employee_id`;
+const ROW_SELECT = `SELECT r.id, r.row_no, r.employee_code, r.employee_id, e.first_name || ' ' || e.last_name AS employee_name, r.work_date, r.clock_in, r.clock_out, r.clock_out_next_day, r.device, r.source, r.remark,
+  r.status, r.issues_json, r.attendance_record_id, r.source_ref, r.in_result, r.out_result FROM attendance_raw_records r LEFT JOIN employees e ON e.id = r.employee_id`;
 
 attendanceFileRoutes.get('/:id', requirePerm('attendance_file.view'), async (c) => {
   const b = await visibleBatch(c, intParam(c.req.param('id')));
-  const { results } = await c.env.DB.prepare(`${ROW_SELECT} WHERE r.batch_id = ? ORDER BY r.row_no`).bind(b.id).all<Record<string, unknown>>();
-  return c.json({ ...b, rows: results.map(({ issues_json, ...r }) => ({ ...r, issues: JSON.parse(String(issues_json)) })) });
+  const db = c.env.DB;
+  const [{ results }, { results: events }] = await Promise.all([
+    db.prepare(`${ROW_SELECT} WHERE r.batch_id = ? ORDER BY r.row_no`).bind(b.id).all<Record<string, unknown>>(),
+    db.prepare('SELECT raw_record_id, kind, label, amount, unit, ranges, all_day, overnight FROM attendance_day_events WHERE batch_id = ? ORDER BY raw_record_id, seq').bind(b.id)
+      .all<{ raw_record_id: number; kind: string; label: string; amount: number | null; unit: string | null; ranges: string | null; all_day: number; overnight: number }>(),
+  ]);
+  const byRow = new Map<number, Array<Record<string, unknown>>>();
+  for (const { raw_record_id, ...e } of events) byRow.set(raw_record_id, [...(byRow.get(raw_record_id) ?? []), e]);
+  return c.json({ ...b, rows: results.map(({ issues_json, id, ...r }) => ({ ...r, issues: JSON.parse(String(issues_json)), events: byRow.get(id as number) ?? [] })) });
 });
 
 /** Rows that were not imported cleanly (invalid, duplicate, warning) with their reasons, as CSV or XLSX. */
 attendanceFileRoutes.get('/:id/report', requirePerm('attendance_file.view'), async (c) => {
   const b = await visibleBatch(c, intParam(c.req.param('id')));
   const format = c.req.query('format') === 'xlsx' ? 'xlsx' : 'csv';
-  const { results } = await c.env.DB.prepare(`${ROW_SELECT} WHERE r.batch_id = ? AND (r.status <> 'valid' OR r.attendance_record_id IS NULL) ORDER BY r.row_no`).bind(b.id).all<Record<string, unknown>>();
+  const daily = b.template_code === FEISHU_DAILY_TEMPLATE;
+  // a Feishu day without clock times (rest day, full-day leave) is imported without an attendance record
+  const { results } = await c.env.DB.prepare(`${ROW_SELECT} WHERE r.batch_id = ? AND (r.status <> 'valid' OR (?2 = 0 AND r.attendance_record_id IS NULL)) ORDER BY r.row_no`).bind(b.id, daily ? 1 : 0).all<Record<string, unknown>>();
   const label: Record<string, string> = { valid: 'ผ่าน', warning: 'ผ่าน (มีคำเตือน)', duplicate: 'ซ้ำ (ไม่นำเข้า)', invalid: 'ไม่ถูกต้อง (ไม่นำเข้า)' };
-  const head = ['แถวในไฟล์', 'รหัสพนักงาน', 'วันที่ทำงาน', 'เวลาเข้า', 'เวลาออก', 'ผลการตรวจสอบ', 'นำเข้าแล้ว', 'รายละเอียด'];
-  const body = results.map((r) => [
-    r.row_no as number, (r.employee_code as string) ?? '', (r.work_date as string) ?? '', (r.clock_in as string) ?? '', r.clock_out ? `${r.clock_out}${r.clock_out_next_day ? ' (+1 วัน)' : ''}` : '',
-    label[String(r.status)] ?? String(r.status), r.attendance_record_id ? 'ใช่' : 'ไม่', (JSON.parse(String(r.issues_json)) as ClockIssue[]).map((i) => i.message).join('; '),
-  ]);
+  const head = daily
+    ? ['รายการที่', 'ช่องในไฟล์', 'รหัสพนักงาน', 'วันที่ทำงาน', 'ผลลงเวลาเข้า', 'ผลลงเวลาออก', 'เวลาเข้า', 'เวลาออก', 'ผลการตรวจสอบ', 'สร้างบันทึกเวลา', 'รายละเอียด']
+    : ['แถวในไฟล์', 'รหัสพนักงาน', 'วันที่ทำงาน', 'เวลาเข้า', 'เวลาออก', 'ผลการตรวจสอบ', 'นำเข้าแล้ว', 'รายละเอียด'];
+  const out = (r: Record<string, unknown>) => (r.clock_out ? `${r.clock_out}${r.clock_out_next_day ? ' (+1 วัน)' : ''}` : '');
+  const reasons = (r: Record<string, unknown>) => (JSON.parse(String(r.issues_json)) as Array<{ message: string }>).map((i) => i.message).join('; ');
+  const body = results.map((r) => daily
+    ? [r.row_no as number, (r.source_ref as string) ?? '', (r.employee_code as string) ?? '', (r.work_date as string) ?? '', (r.in_result as string) ?? '', (r.out_result as string) ?? '',
+        (r.clock_in as string) ?? '', out(r), label[String(r.status)] ?? String(r.status), r.attendance_record_id ? 'ใช่' : 'ไม่', reasons(r)]
+    : [r.row_no as number, (r.employee_code as string) ?? '', (r.work_date as string) ?? '', (r.clock_in as string) ?? '', out(r), label[String(r.status)] ?? String(r.status), r.attendance_record_id ? 'ใช่' : 'ไม่', reasons(r)]);
   const name = safeName(`attendance-import-${b.id}-errors`);
   await audit(c, 'attendance_file.report_downloaded', 'attendance_file_imports', b.id, { format, rows: body.length });
   if (format === 'csv') return c.body(csv([head, ...body]), 200, { 'content-type': 'text/csv; charset=utf-8', 'content-disposition': `attachment; filename="${name}.csv"`, 'cache-control': 'no-store' });

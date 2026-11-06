@@ -871,3 +871,25 @@ tr.is-future td { color: var(--primary); }
   .stepper .step-label { display: none; }
   .stepper li.current .step-label { display: inline; }
 }
+
+/* ---- one worksheet per import: worksheet picker, worksheet badge, approval statuses (Feishu imports) ---- */
+.sheet-picker { margin-top: 0.75rem; }
+.sheet-picker legend { font-weight: 600; padding: 0 0.25rem; }
+.sheet-options { display: grid; gap: 0.4rem; grid-template-columns: repeat(auto-fill, minmax(15rem, 1fr)); }
+.sheet-option { display: grid; grid-template-columns: auto 1fr; column-gap: 0.5rem; align-items: start; padding: 0.5rem 0.65rem; border: 1px solid var(--border); border-radius: var(--radius-sm); background: var(--surface); cursor: pointer; }
+.sheet-option input { margin-top: 0.2rem; grid-row: span 3; }
+.sheet-option .sheet-name { font-weight: 600; overflow-wrap: anywhere; }
+.sheet-option.is-selected { border-color: var(--primary); box-shadow: inset 0 0 0 1px var(--primary); }
+.sheet-option.is-wrong .sheet-name { color: var(--text-2); }
+.sheet-badge { display: flex; flex-wrap: wrap; align-items: baseline; gap: 0.25rem; margin: 0 0 0.6rem; padding: 0.4rem 0.65rem; border-left: 3px solid var(--primary); background: var(--surface-2); border-radius: var(--radius-sm); }
+.sheet-badge-name { overflow-wrap: anywhere; }
+.rows-before-after { margin: 0.25rem 0 0.5rem; }
+.day-events { margin: 0; padding-left: 1rem; }
+.day-events li[data-kind="leave"] { color: var(--warn); }
+.daily-rows td, .request-rows td { vertical-align: top; }
+.appr-approved { color: var(--ok); border-color: color-mix(in srgb, var(--ok) 30%, transparent); background: color-mix(in srgb, var(--ok) 10%, var(--surface)); }
+.appr-pending { color: var(--warn); border-color: color-mix(in srgb, var(--warn) 30%, transparent); background: color-mix(in srgb, var(--warn) 10%, var(--surface)); }
+.appr-rejected, .appr-cancelled { color: var(--danger); border-color: color-mix(in srgb, var(--danger) 30%, transparent); background: color-mix(in srgb, var(--danger) 9%, var(--surface)); }
+@media (max-width: 600px) {
+  .sheet-options { grid-template-columns: 1fr; }
+}

@@ -9,6 +9,7 @@ import { renderOrgChart } from './org';
 import { renderHolidays } from './holidays';
 import { renderAttendanceFileHistory, renderAttendanceFileImport } from './attendance-files';
 import { renderShiftGroups, renderShiftSchedule, renderShiftSettings } from './shifts';
+import { renderLeaveImport, renderLeaveImportHistory, renderOvertimeImport, renderOvertimeImportHistory } from './request-imports';
 
 export type PageRenderer = (main: HTMLElement, params: URLSearchParams) => Promise<void>;
 
@@ -23,6 +24,10 @@ export const PAGES: Record<string, PageRenderer> = {
   holiday_calendar: renderHolidays,
   attendance_file_import: renderAttendanceFileImport,
   attendance_file_history: renderAttendanceFileHistory,
+  leave_import: renderLeaveImport,
+  leave_import_history: renderLeaveImportHistory,
+  overtime_import: renderOvertimeImport,
+  overtime_import_history: renderOvertimeImportHistory,
   shift_groups: renderShiftGroups,
   shift_schedule: renderShiftSchedule,
   attendance_import: renderAttendanceImport,
