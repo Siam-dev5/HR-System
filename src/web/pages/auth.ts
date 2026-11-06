@@ -382,7 +382,7 @@ export async function renderSecurity(main: HTMLElement): Promise<void> {
     ),
     h('section', { class: 'card' }, h('h2', null, 'เปลี่ยนรหัสผ่าน'), changePasswordForm(s.policy, reload)),
     h('section', { class: 'card' }, h('h2', null, 'Session ที่ใช้งานอยู่'),
-      h('table', { class: 'table' }, h('thead', null, h('tr', null, h('th', null, 'เริ่ม'), h('th', null, 'หมดอายุ'), h('th', null, 'IP'), h('th', null, 'อุปกรณ์'))),
-        h('tbody', null, s.sessions.map((x) => h('tr', null, h('td', null, fmtDate(x.createdAt), x.current ? ' (ปัจจุบัน)' : ''), h('td', null, fmtDate(x.expiresAt)), h('td', null, x.ip ?? '-'), h('td', { class: 'truncate' }, x.userAgent ?? '-')))))),
+      h('div', { class: 'table-scroll' }, h('table', { class: 'table' }, h('thead', null, h('tr', null, h('th', null, 'เริ่ม'), h('th', null, 'หมดอายุ'), h('th', null, 'IP'), h('th', null, 'อุปกรณ์'))),
+        h('tbody', null, s.sessions.map((x) => h('tr', null, h('td', null, fmtDate(x.createdAt), x.current ? ' (ปัจจุบัน)' : ''), h('td', null, fmtDate(x.expiresAt)), h('td', null, x.ip ?? '-'), h('td', { class: 'truncate' }, x.userAgent ?? '-'))))))),
   );
 }
