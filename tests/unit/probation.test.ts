@@ -1,5 +1,6 @@
+import { readFileSync } from 'node:fs';
 import { describe, expect, it } from 'vitest';
-import { addMonths, formatTenure, inMidMonthRound, probationActions, probationTimeline, tenure, tenureEnd, thaiDate } from '../../src/shared/probation';
+import { PROBATION_CRONS, addMonths, formatTenure, inMidMonthRound, nextScheduledRun, probationActions, probationTimeline, tenure, tenureEnd, thaiDate } from '../../src/shared/probation';
 import { calculatePay, socialSecurity, wageSegments, DEFAULT_PAYROLL_CONFIG, type WageInput } from '../../src/shared/payroll';
 
 const t = (from: string, to: string) => formatTenure(tenure(from, to));
@@ -103,10 +104,27 @@ describe('probation actions of the daily job', () => {
       expect(probationActions(emp(s), at(120), 7)).toEqual([]);
     }
   });
-  it('a probation end recorded after day 120 (an extension) is never activated automatically', () => {
-    expect(probationActions(emp('probation', '2026-06-30'), at(120), 7)).toEqual([{ kind: 'extended', due: '2026-06-30' }]);
-    // the usual record (probation end = day 90) does not block it
-    expect(probationActions(emp('probation', '2026-03-31'), at(120), 7)).toEqual([{ kind: 'activate', due: '2026-04-30' }]);
+  it('the recorded probation end is ignored: earlier than, later than or without one, day 120 activates on the hire date', () => {
+    for (const end of ['2026-03-31', '2026-02-15', '2026-06-30', '2027-01-01', null]) {
+      expect(probationActions(emp('probation', end), at(119), 7).map((a) => a.kind)).toEqual(['day90_notice', 'reminder']);
+      expect(probationActions(emp('probation', end), at(120), 7)).toEqual([{ kind: 'activate', due: '2026-04-30' }]);
+      // nor does it bring the change or the notices forward
+      expect(probationActions(emp('probation', end), at(60), 7)).toEqual([]);
+    }
+  });
+});
+
+describe('job schedule', () => {
+  it('the next run is the next 00:05 or 08:05 Asia/Bangkok (17:05 / 01:05 UTC)', () => {
+    expect(nextScheduledRun(Date.UTC(2026, 10, 6, 0, 0))).toBe('2026-11-06 01:05:00');
+    expect(nextScheduledRun(Date.UTC(2026, 10, 6, 1, 5))).toBe('2026-11-06 17:05:00'); // exactly at a run: the next one
+    expect(nextScheduledRun(Date.UTC(2026, 10, 6, 20, 0))).toBe('2026-11-07 01:05:00');
+    expect(nextScheduledRun(Date.UTC(2026, 11, 31, 18, 0))).toBe('2027-01-01 01:05:00');
+  });
+  it('the schedule shown matches the cron triggers of wrangler.jsonc', () => {
+    const cfg = readFileSync(new URL('../../wrangler.jsonc', import.meta.url), 'utf8');
+    const crons = /"crons"\s*:\s*\[([^\]]*)\]/.exec(cfg)?.[1]?.match(/"[^"]+"/g)?.map((x) => x.slice(1, -1));
+    expect(crons).toEqual(PROBATION_CRONS);
   });
 });
 

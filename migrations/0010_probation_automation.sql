@@ -13,8 +13,9 @@ CREATE TABLE job_runs (
   requested_by INTEGER REFERENCES users(id),
   started_at TEXT NOT NULL DEFAULT (datetime('now')),
   finished_at TEXT,
-  -- counts only (no names): {"candidates":3,"day90_notice":1,...,"failed":0}
+  -- counts only (no names): {"processed":3,"notifications":4,"activated":1,"retries":0,"failed":0,...}
   summary TEXT,
+  -- a failed run's message, or JSON of the failed steps of a partial run (employee id, action, attempts, message)
   error TEXT
 );
 CREATE INDEX idx_job_runs_job ON job_runs(job, id);
@@ -24,8 +25,8 @@ CREATE INDEX idx_job_runs_job ON job_runs(job, id);
 CREATE TABLE probation_events (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   employee_id INTEGER NOT NULL REFERENCES employees(id),
-  kind TEXT NOT NULL CHECK (kind IN ('day90_notice', 'reminder', 'activate', 'activate_due', 'extended')),
-  -- day the event belongs to (day 90, the reminder day, day 120, or the extended probation end)
+  kind TEXT NOT NULL CHECK (kind IN ('day90_notice', 'reminder', 'activate', 'activate_due')),
+  -- day the event belongs to (day 90, the reminder day or day 120, all counted from the hire date)
   due_date TEXT NOT NULL,
   -- hire date the event was computed from (a corrected hire date produces new due dates)
   hire_date TEXT NOT NULL,
@@ -42,4 +43,4 @@ CREATE INDEX idx_probation_events_employee ON probation_events(employee_id);
 INSERT INTO settings (key, value, type, description) VALUES
   ('probation.notifications_enabled', 'true', 'bool', 'แจ้งเตือน HR เมื่อพนักงานครบทดลองงาน 90 วัน และแจ้งเตือนติดตามจนถึงวันที่ 120'),
   ('probation.reminder_interval_days', '7', 'number', 'แจ้งเตือนติดตามผลทดลองงานทุกกี่วันหลังวันที่ 90 (0 = ไม่แจ้งเตือนซ้ำ)'),
-  ('probation.auto_activate', 'false', 'bool', 'เปลี่ยนสถานะ ทดลองงาน → ปฏิบัติงาน อัตโนมัติเมื่อครบ 120 วัน (ปิดไว้: แจ้ง HR ให้เปลี่ยนเอง)');
+  ('probation.auto_activate', 'true', 'bool', 'เปลี่ยนสถานะ ทดลองงาน → ปฏิบัติงาน อัตโนมัติเมื่อครบ 120 วันนับจากวันเริ่มงาน (ปิด: แจ้ง HR ให้เปลี่ยนเอง)');

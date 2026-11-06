@@ -79,21 +79,18 @@ export type ProbationAction =
   /** day 120 or later: status probation → active */
   | { kind: 'activate'; due: string }
   /** day 120 with the automatic change switched off (setting probation.auto_activate): HR is asked to change it */
-  | { kind: 'activate_due'; due: string }
-  /** day 120 or later, but HR recorded a probation end after day 120 (an extension): never activated automatically */
-  | { kind: 'extended'; due: string };
+  | { kind: 'activate_due'; due: string };
 
 /**
- * What the daily probation job should do for one employee today. Only status "probation" is ever acted on.
+ * What the daily probation job should do for one employee today. Only status "probation" is ever acted on, and only
+ * the hire date counts: the recorded probation end (employees.probation_end) never postpones or suppresses day 120.
  * Every action carries the date it belongs to, so the job can make each one idempotent (employee, kind, due).
  * Catching up after missed runs yields the latest due action only, never one per missed day.
  */
-export function probationActions(e: { hire_date: string; status: string; probation_end: string | null }, today: string, intervalDays: number): ProbationAction[] {
+export function probationActions(e: { hire_date: string; status: string }, today: string, intervalDays: number): ProbationAction[] {
   if (e.status !== 'probation') return [];
   const t = probationTimeline(e.hire_date, today);
-  if (t.day >= PROBATION_ACTIVATE_DAY) {
-    return e.probation_end && e.probation_end > t.day120 ? [{ kind: 'extended', due: e.probation_end }] : [{ kind: 'activate', due: t.day120 }];
-  }
+  if (t.day >= PROBATION_ACTIVATE_DAY) return [{ kind: 'activate', due: t.day120 }];
   if (t.day < 90) return [];
   const out: ProbationAction[] = [{ kind: 'day90_notice', due: t.day90 }];
   const step = Math.floor(intervalDays);
@@ -111,6 +108,22 @@ export function probationActions(e: { hire_date: string; status: string; probati
  */
 export function inMidMonthRound(hireDate: string, roundStart: string, roundEnd: string): boolean {
   return hireDate <= roundEnd && probationEndDate(hireDate) >= roundStart;
+}
+
+/** The cron triggers of wrangler.jsonc (UTC): 00:05 and 08:05 Asia/Bangkok. A unit test keeps the two in step. */
+export const PROBATION_CRONS = ['5 17 * * *', '5 1 * * *'];
+
+/** Next scheduled run after `now` (epoch ms), in UTC as D1 writes datetime('now'). Daily "minute hour * * *" crons only. */
+export function nextScheduledRun(now: number, crons: readonly string[] = PROBATION_CRONS): string {
+  const day = 86_400_000;
+  const midnight = Math.floor(now / day) * day;
+  let next = Infinity;
+  for (const cron of crons) {
+    const [minute, hour] = cron.split(' ').map(Number) as [number, number];
+    const at = midnight + (hour * 60 + minute) * 60_000;
+    next = Math.min(next, at > now ? at : at + day);
+  }
+  return new Date(next).toISOString().slice(0, 19).replace('T', ' ');
 }
 
 const THAI_MONTHS = ['ม.ค.', 'ก.พ.', 'มี.ค.', 'เม.ย.', 'พ.ค.', 'มิ.ย.', 'ก.ค.', 'ส.ค.', 'ก.ย.', 'ต.ค.', 'พ.ย.', 'ธ.ค.'];
