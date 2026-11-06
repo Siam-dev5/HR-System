@@ -7,6 +7,9 @@ import type { WorkflowRequestRow } from '../../shared/types';
 import { badRequest, conflict, forbidden, intParam, notFound, readJson, str } from '../lib/http';
 import { audit, notify } from '../lib/audit';
 import { can, currentUser, requireAuth, requirePerm } from '../auth';
+import { shiftForDay, shiftTimes } from '../lib/shift-resolver';
+import { loadSettings, settingText } from '../lib/settings';
+import { checkClock } from '../../shared/shifts';
 
 interface StepDef {
   step: number;
@@ -137,25 +140,30 @@ workflowRoutes.post('/:id/decide', async (c) => {
     stmts.push(db.prepare("UPDATE workflow_requests SET status = ?, updated_at = datetime('now') WHERE id = ?").bind(decision, id));
     stmts.push(db.prepare(`UPDATE ${req.ref_table} SET status = ?, updated_at = datetime('now'), updated_by = ? WHERE id = ?`).bind(decision, user.id, req.ref_id));
     if (decision === 'approved' && req.type === 'time_correction') {
-      // Apply the approved correction to that day's attendance and re-evaluate lateness against the shift start.
+      // Apply the approved correction to that day's attendance and re-evaluate lateness against the shift in force
+      // that day (schedule entry, shift group, then the legacy assignment; default start time without a shift).
+      const tc = await db.prepare('SELECT employee_id, work_date, clock_in FROM time_corrections WHERE id = ?').bind(req.ref_id).first<{ employee_id: number; work_date: string; clock_in: string | null }>();
+      let status = 'present';
+      let shiftId: number | null = null;
+      if (tc?.clock_in) {
+        const day = await shiftForDay(db, tc.employee_id, tc.work_date);
+        const shift = day.kind === 'shift' ? day.shift : null;
+        shiftId = shift?.id ?? null;
+        const defaultStart = settingText(await loadSettings(db), 'attendance.default_start_time', '09:00');
+        status = checkClock(shift ? shiftTimes(shift) : null, tc.clock_in, null, { defaultStart }).status;
+      }
       stmts.push(
         db.prepare(
-          `INSERT INTO attendance_records (employee_id, work_date, clock_in, clock_out, status, source, note, created_by, updated_by)
-           SELECT tc.employee_id, tc.work_date, tc.clock_in, tc.clock_out,
-             CASE WHEN tc.clock_in > COALESCE(
-                 (SELECT s.start_time FROM shift_assignments a JOIN shifts s ON s.id = a.shift_id
-                  WHERE a.employee_id = tc.employee_id AND a.start_date <= tc.work_date AND (a.end_date IS NULL OR a.end_date >= tc.work_date)
-                  ORDER BY a.start_date DESC LIMIT 1),
-                 (SELECT value FROM settings WHERE key = 'attendance.default_start_time'), '09:00')
-               THEN 'late' ELSE 'present' END,
-             'manual', 'แก้ไขเวลา TC-' || tc.id, ?, ?
+          `INSERT INTO attendance_records (employee_id, work_date, clock_in, clock_out, status, source, note, shift_id, created_by, updated_by)
+           SELECT tc.employee_id, tc.work_date, tc.clock_in, tc.clock_out, ?, 'manual', 'แก้ไขเวลา TC-' || tc.id, ?, ?, ?
            FROM time_corrections tc WHERE tc.id = ?
            ON CONFLICT (employee_id, work_date) DO UPDATE SET
              clock_in = COALESCE(excluded.clock_in, attendance_records.clock_in),
              clock_out = COALESCE(excluded.clock_out, attendance_records.clock_out),
              status = CASE WHEN excluded.clock_in IS NULL THEN attendance_records.status ELSE excluded.status END,
+             shift_id = CASE WHEN excluded.clock_in IS NULL THEN attendance_records.shift_id ELSE excluded.shift_id END,
              source = 'manual', note = excluded.note, updated_at = datetime('now'), updated_by = excluded.updated_by`,
-        ).bind(user.id, user.id, req.ref_id),
+        ).bind(status, shiftId, user.id, user.id, req.ref_id),
       );
     }
   } else {
