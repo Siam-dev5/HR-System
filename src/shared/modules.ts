@@ -198,10 +198,16 @@ export const MODULES: readonly ModuleDef[] = [
     key: 'overtime', path: '/overtime', title: 'คำขอ OT', group: 'hrm', table: 'overtime_requests', description: 'คำขอทำงานล่วงเวลา (ผ่าน Workflow)', labelExpr: "'OT-' || id", ownerField: 'employee_id', workflow: 'overtime',
     fields: [ref('employee_id', 'พนักงาน', 'employees', RL), date('work_date', 'วันที่', RL), num('hours', 'ชั่วโมง', { ...RL, min: 0.5, max: 12 }), sel('rate', 'อัตรา (เท่า)', ['1.5', '2', '3'], RL), text('reason', 'เหตุผล', RL), workflowStatus],
   }),
+  // Feishu OT export: kept in overtime_import_records (never overtime_requests, which payroll reads)
+  page('overtime_import', '/overtime/import', 'นำเข้าข้อมูล OT', 'hrm', 'overtime_import.import', '/api/overtime-imports/fields'),
+  page('overtime_import_history', '/overtime/imports', 'ประวัติการนำเข้า OT', 'hrm', 'overtime_import.view', '/api/overtime-imports'),
   crud({
     key: 'leave', path: '/leave', title: 'การลา', group: 'hrm', table: 'leave_requests', description: 'คำขอลา (ผ่าน Workflow)', labelExpr: "'LV-' || id", ownerField: 'employee_id', workflow: 'leave', defaultSort: 'start_date DESC',
     fields: [ref('employee_id', 'พนักงาน', 'employees', RL), ref('leave_type_id', 'ประเภทการลา', 'leave_types', RL), date('start_date', 'ตั้งแต่', RL), date('end_date', 'ถึง', RL), num('days', 'จำนวนวัน', { ...RL, min: 0.5, max: 365 }), text('reason', 'เหตุผล', L), workflowStatus],
   }),
+  // Feishu leave export: kept in leave_import_records (never leave_requests, which payroll reads)
+  page('leave_import', '/leave/import', 'นำเข้าข้อมูลการลา', 'hrm', 'leave_import.import', '/api/leave-imports/fields'),
+  page('leave_import_history', '/leave/imports', 'ประวัติการนำเข้าการลา', 'hrm', 'leave_import.view', '/api/leave-imports'),
   crud({
     key: 'performance_cycles', path: '/performance/cycles', title: 'รอบประเมิน', group: 'hrm', table: 'performance_cycles', description: 'รอบการประเมิน KPI/OKR', labelExpr: codeName, codeField: 'code',
     fields: [text('code', 'รหัส', { ...RL, unique: true }), text('name', 'ชื่อรอบ', RL), date('start_date', 'เริ่ม', RL), date('end_date', 'สิ้นสุด', RL), sel('status', 'สถานะ', ['planning', 'active', 'closed'], RL)],
