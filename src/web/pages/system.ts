@@ -499,8 +499,8 @@ export async function renderHelp(main: HTMLElement): Promise<void> {
           h('li', null, 'เงินเดือน: สร้างงวด → คำนวณ → อนุมัติ (คนละคนกับผู้คำนวณ) → เผยแพร่ พนักงานดูสลิปได้ที่ สลิปเงินเดือนของฉัน'),
           h('li', null, 'การสร้าง แก้ไข ลบ อนุมัติ Export และการเข้าสู่ระบบทั้งหมดถูกบันทึกใน Audit Log'))),
       h('section', { class: 'card' }, h('h2', null, 'เมนูและสิทธิ์ที่ต้องใช้'),
-        h('table', { class: 'table' }, h('thead', null, h('tr', null, h('th', null, 'เมนู'), h('th', null, 'สิทธิ์'), h('th', null, 'บัญชีของคุณ'))),
-          h('tbody', null, d.modules.map((m) => h('tr', null, h('td', null, m.allowed ? link(m.path, m.title) : m.title), h('td', null, h('code', null, m.permission)), h('td', null, m.allowed ? '✓ เข้าถึงได้' : '—')))))),
+        h('div', { class: 'table-scroll' }, h('table', { class: 'table' }, h('thead', null, h('tr', null, h('th', null, 'เมนู'), h('th', null, 'สิทธิ์'), h('th', null, 'บัญชีของคุณ'))),
+          h('tbody', null, d.modules.map((m) => h('tr', null, h('td', null, m.allowed ? link(m.path, m.title) : m.title), h('td', null, h('code', null, m.permission)), h('td', null, m.allowed ? '✓ เข้าถึงได้' : '—'))))))),
       can('settings.manage') ? h('p', { class: 'muted' }, 'ผู้ดูแลระบบ: ดูวิธีติดตั้ง/ย้ายฐานข้อมูลได้ใน README ของโปรเจกต์') : null,
     );
   } catch (e) {

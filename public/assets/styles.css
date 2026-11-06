@@ -310,6 +310,15 @@ input[aria-invalid='true'], select[aria-invalid='true'], textarea[aria-invalid='
 .table.clickable tbody tr:focus-visible { box-shadow: inset 3px 0 0 var(--primary); }
 .table.compact td { padding: 0.35rem 0.5rem; }
 .table .num { text-align: right; font-variant-numeric: tabular-nums; }
+/* phones: a 100%-wide table squeezed every column to its narrowest and wrapped names / departments over 4–6 lines
+   (rows of 80–140px), although the table scrolled sideways anyway. Columns now take their natural width — codes,
+   names, dates and badges stay on one line — and the table scrolls inside .table-wrap; long text wraps at 16rem.
+   Only inside a horizontal scroller (.table-wrap, or the frameless .table-scroll for a table inside a card). */
+.table-scroll { overflow-x: auto; }
+@media (max-width: 600px) {
+  .table-wrap .table, .table-scroll .table { width: max-content; min-width: 100%; }
+  .table-wrap .table td, .table-scroll .table td { max-width: 16rem; }
+}
 .table tr.total td { font-weight: 700; border-top: 2px solid var(--border); }
 .actions { display: flex; gap: 0.3rem; flex-wrap: wrap; }
 .truncate { max-width: 340px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
@@ -321,8 +330,19 @@ input[aria-invalid='true'], select[aria-invalid='true'], textarea[aria-invalid='
 .s-rejected, .s-cancelled, .s-absent, .s-terminated, .s-error { color: var(--danger); border-color: color-mix(in srgb, var(--danger) 30%, transparent); background: color-mix(in srgb, var(--danger) 9%, var(--surface)); }
 
 /* charts */
-.bars { display: flex; flex-direction: column; gap: 0.5rem; }
-.bar-row { display: grid; grid-template-columns: minmax(120px, 34%) 1fr 48px; gap: 0.6rem; align-items: center; font-size: 0.88rem; }
+/* one grid for the whole chart (rows are subgrids, so bars line up): the label column is as wide as the longest label
+   and only wraps when it really does not fit beside a ≥ 5rem bar — a fixed 34% / 120px column wrapped short names */
+.bars { container-type: inline-size; display: grid; grid-template-columns: minmax(0, max-content) minmax(5rem, 1fr) minmax(2.5rem, auto); gap: 0.5rem 0.6rem; align-items: center; }
+.bars > .empty { grid-column: 1 / -1; }
+.bar-row { display: grid; grid-column: 1 / -1; grid-template-columns: subgrid; align-items: center; font-size: 0.88rem; }
+.bar-label { min-width: 0; overflow-wrap: anywhere; }
+/* a very narrow chart: label and value on one line, the bar underneath at full width */
+@container (max-width: 17.5rem) {
+  .bar-row { grid-template-columns: minmax(0, 1fr) auto; grid-template-areas: 'label value' 'track track'; row-gap: 0.3rem; }
+  .bar-label { grid-area: label; }
+  .bar-track { grid-area: track; }
+  .bar-value { grid-area: value; }
+}
 .bar-track { background: var(--surface-3); border-radius: var(--radius-pill); height: 12px; overflow: hidden; }
 .bar-fill { display: block; height: 100%; background: var(--primary); border-radius: var(--radius-pill); }
 .bar-value { text-align: right; font-variant-numeric: tabular-nums; }
