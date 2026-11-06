@@ -790,3 +790,84 @@ input[aria-invalid='true'], select[aria-invalid='true'], textarea[aria-invalid='
 .compliance-row.is-warn > summary strong { color: var(--warn); }
 .compliance-list { columns: 2; column-gap: 1.5rem; margin: 0.4rem 0 0; }
 @media (max-width: 600px) { .compliance-list { columns: 1; } }
+
+/* ---- Attendance file import wizard ---------------------------------------------------------- */
+.visually-hidden { position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px; overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; border: 0; }
+.stepper { list-style: none; margin: 0; padding: 0; display: flex; flex-wrap: wrap; gap: 0.4rem; counter-reset: none; }
+.stepper li { display: flex; align-items: center; gap: 0.45rem; padding: 0.35rem 0.75rem 0.35rem 0.4rem; border: 1px solid var(--border); border-radius: var(--radius-pill); background: var(--surface); color: var(--muted); font-size: 0.86rem; font-weight: 600; }
+.stepper .step-no { display: inline-grid; place-items: center; width: 1.5rem; height: 1.5rem; border-radius: 50%; background: var(--surface-3); color: var(--text-2); font-size: 0.8rem; }
+.stepper li.current { border-color: var(--primary); color: var(--primary); }
+.stepper li.current .step-no { background: var(--primary); color: var(--primary-text); }
+.stepper li.done { color: var(--ok); }
+.stepper li.done .step-no { background: color-mix(in srgb, var(--ok) 15%, var(--surface)); color: var(--ok); }
+.wizard-step h2:focus { outline: none; }
+.dropzone { display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 0.35rem; min-height: 9rem; padding: 1.25rem; border: 2px dashed var(--border-strong); border-radius: var(--radius); background: var(--surface-2); text-align: center; cursor: pointer; }
+.dropzone:hover, .dropzone.drag { border-color: var(--primary); background: color-mix(in srgb, var(--primary) 6%, var(--surface)); }
+.dropzone:focus-visible { outline: 2px solid var(--primary); outline-offset: 2px; }
+.file-info .dl { margin: 0; }
+.mapping-table select { width: 100%; max-width: 22rem; }
+.req { color: var(--danger); }
+.clock-rows .issues { min-width: 14rem; }
+.s-superseded { color: var(--text-2); }
+
+/* ---- Shift settings / groups ---------------------------------------------------------------- */
+.shift-swatch { display: inline-block; width: 0.75rem; height: 0.75rem; border-radius: 3px; margin-right: 0.35rem; vertical-align: -1px; background: var(--shift-color, #94a3b8); border: 1px solid color-mix(in srgb, var(--shift-color, #94a3b8) 60%, #000); }
+.break-list { display: flex; flex-direction: column; gap: 0.4rem; margin-bottom: 0.5rem; }
+.break-row { display: flex; align-items: center; gap: 0.4rem; flex-wrap: wrap; }
+.break-row input { max-width: 9rem; }
+.weekday-checks { display: flex; flex-wrap: wrap; gap: 0.5rem 1rem; }
+fieldset.plain { border: 1px solid var(--border); border-radius: var(--radius-sm); padding: 0.6rem 0.8rem; margin: 0; min-width: 0; }
+fieldset.plain legend { font-weight: 600; color: var(--heading); padding: 0 0.3rem; }
+.pick-list { max-height: 45vh; overflow-y: auto; border: 1px solid var(--border); border-radius: var(--radius-sm); padding: 0.4rem 0.6rem; display: flex; flex-direction: column; gap: 0.25rem; }
+tr.is-future td { color: var(--primary); }
+.rotation-steps .inline-form { display: flex; gap: 0.4rem; align-items: center; }
+
+/* ---- Group schedule calendar --------------------------------------------------------------- */
+.schedule-filters { flex-wrap: wrap; align-items: flex-end; gap: 0.6rem; }
+.schedule-filters .field { margin: 0; min-width: 9rem; }
+.schedule-actions { flex-wrap: wrap; gap: 0.4rem; margin-bottom: 0.4rem; }
+.schedule-actions select { max-width: 18rem; }
+.schedule-legend { display: flex; flex-wrap: wrap; gap: 0.35rem 0.9rem; margin: 0.4rem 0 0.6rem; color: var(--text-2); }
+.legend-item { display: inline-flex; align-items: center; gap: 0.25rem; }
+.locked-key { display: inline-block; width: 0.9rem; height: 0.9rem; border-radius: 3px; border: 1px solid var(--border-strong); background: repeating-linear-gradient(45deg, var(--surface-3) 0 3px, var(--surface) 3px 6px); }
+.schedule-wrap { overflow: auto; max-height: 70vh; border: 1px solid var(--border); border-radius: var(--radius-sm); }
+.schedule-grid { border-collapse: separate; border-spacing: 0; font-size: 0.78rem; min-width: 100%; }
+.schedule-grid th, .schedule-grid td { border-right: 1px solid var(--border); border-bottom: 1px solid var(--border); }
+.schedule-grid thead th { position: sticky; top: 0; z-index: 2; background: var(--surface-2); padding: 0.25rem 0.15rem; min-width: 3.4rem; text-align: center; font-weight: 600; cursor: default; }
+.schedule-grid thead th.is-rest { background: var(--surface-3); }
+.schedule-grid thead th.is-holiday { background: color-mix(in srgb, var(--danger) 14%, var(--surface)); }
+.schedule-grid thead th.is-today { box-shadow: inset 0 -3px 0 var(--primary); }
+.sch-d { display: block; font-size: 0.85rem; font-variant-numeric: tabular-nums; }
+.sch-wd { display: block; color: var(--muted); font-size: 0.7rem; }
+.schedule-grid .sch-emp { position: sticky; left: 0; z-index: 1; background: var(--surface); text-align: left; min-width: 11rem; max-width: 14rem; padding: 0.3rem 0.5rem; }
+.schedule-grid thead .sch-emp { z-index: 3; background: var(--surface-2); }
+.schedule-grid tbody .sch-emp { display: table-cell; cursor: default; font-weight: 400; }
+.sch-code { font-weight: 700; margin-right: 0.3rem; }
+.sch-name { display: inline; }
+.sch-emp .muted { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.sch-cell { position: relative; height: 2.6rem; padding: 0.15rem; text-align: center; vertical-align: middle; background: var(--surface); }
+.sch-cell[tabindex] { cursor: pointer; }
+.sch-cell.k-shift { background: color-mix(in srgb, var(--shift-color) 16%, var(--surface)); box-shadow: inset 3px 0 0 var(--shift-color); }
+.sch-cell.is-holiday:not(.k-shift) { background: color-mix(in srgb, var(--danger) 7%, var(--surface)); }
+.sch-cell.is-locked { background-image: repeating-linear-gradient(45deg, transparent 0 4px, color-mix(in srgb, var(--border-strong) 45%, transparent) 4px 6px); }
+.sch-cell.is-pending { outline: 2px dashed var(--warn); outline-offset: -3px; }
+.sch-cell.is-selected { outline: 2px solid var(--primary); outline-offset: -2px; background-color: color-mix(in srgb, var(--primary) 14%, var(--surface)); }
+.sch-cell.is-today:not(.k-shift):not(.is-selected) { background-color: color-mix(in srgb, var(--primary) 5%, var(--surface)); }
+.sch-cell:focus-visible { outline: 2px solid var(--primary); outline-offset: -2px; }
+.sch-shift { display: flex; flex-direction: column; line-height: 1.15; }
+.sch-shift small { color: var(--text-2); font-size: 0.66rem; }
+.sch-off, .sch-hol, .sch-leave { display: inline-block; padding: 0 0.3rem; border-radius: 4px; font-size: 0.7rem; font-weight: 600; }
+.sch-off { background: var(--surface-3); color: var(--text-2); }
+.sch-hol { background: color-mix(in srgb, var(--danger) 18%, var(--surface)); color: var(--danger); }
+.sch-leave { background: color-mix(in srgb, var(--warn) 20%, var(--surface)); color: var(--warn); margin-top: 1px; }
+.sch-src { position: absolute; top: 1px; right: 2px; font-size: 0.58rem; font-weight: 700; line-height: 1; padding: 1px 2px; border-radius: 3px; }
+.legend-item .sch-src { position: static; }
+.src-G { color: var(--text-2); background: var(--surface-3); }
+.src-I { color: var(--on-fill); background: var(--primary); }
+@media (max-width: 600px) {
+  .schedule-filters .field { min-width: 0; flex: 1 1 45%; }
+  .schedule-grid .sch-emp { min-width: 7.5rem; max-width: 8.5rem; }
+  .sch-name { display: none; }
+  .stepper .step-label { display: none; }
+  .stepper li.current .step-label { display: inline; }
+}

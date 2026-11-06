@@ -5,7 +5,7 @@ import { h, mount, toast, fmtDate, errorBox } from './dom';
 import { state, currentPath, link, moduleByPath, navigate, setRouteRenderer, setTitle } from './app';
 import { renderLogin, renderRegister, renderForcedMfa, renderForcedPassword } from './pages/auth';
 import { renderCrud } from './pages/crud';
-import { PAGES, renderPayslipView } from './pages/registry';
+import { CRUD_SCREENS, PAGES, renderPayslipView } from './pages/registry';
 import { closeMenus, closeNotifications, headerMenus } from './header';
 import { icon, menuIcon } from './icons';
 import { applyTheme, watchSystemTheme } from './theme';
@@ -267,7 +267,7 @@ function renderRoute(main: HTMLElement): void {
     return;
   }
   try {
-    if (mod.kind === 'crud') void renderCrud(main, mod, params);
+    if (mod.kind === 'crud') void (CRUD_SCREENS[mod.key] ? CRUD_SCREENS[mod.key]!(main, params) : renderCrud(main, mod, params));
     else {
       const page = PAGES[mod.key];
       if (!page) throw new Error(`ยังไม่มีหน้าจอสำหรับ ${mod.key}`);

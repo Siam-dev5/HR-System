@@ -5,7 +5,7 @@ const LABELS: Record<string, string> = {
   pending: 'รออนุมัติ', approved: 'อนุมัติ', rejected: 'ไม่อนุมัติ', cancelled: 'ยกเลิก',
   open: 'เปิด', in_progress: 'กำลังดำเนินการ', done: 'เสร็จสิ้น', closed: 'ปิด', on_hold: 'พักไว้', filled: 'ได้คนแล้ว',
   resign: 'ลาออก', retire: 'เกษียณ', terminate: 'เลิกจ้าง', contract_end: 'ครบสัญญา', cleared: 'เคลียร์แล้ว',
-  present: 'มาทำงาน', late: 'มาสาย', absent: 'ขาดงาน', leave: 'ลา', web: 'เว็บ', device: 'เครื่องสแกน', manual: 'บันทึกเอง',
+  present: 'มาทำงาน', late: 'มาสาย', absent: 'ขาดงาน', leave: 'ลา', web: 'เว็บ', device: 'เครื่องสแกน', manual: 'บันทึกเอง', import: 'นำเข้าไฟล์',
   website: 'เว็บไซต์', referral: 'แนะนำ', jobboard: 'Job board', agency: 'บริษัทจัดหา', other: 'อื่น ๆ',
   applied: 'สมัครแล้ว', screening: 'คัดกรอง', interview: 'สัมภาษณ์', offer: 'เสนองาน', hired: 'รับเข้าทำงาน',
   planning: 'วางแผน', draft: 'ร่าง', submitted: 'ส่งแล้ว', calibrated: 'Calibrate แล้ว',
