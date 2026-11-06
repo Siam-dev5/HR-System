@@ -268,6 +268,7 @@ const SETTING_GROUPS: Array<{ title: string; match: (key: string) => boolean; no
   { title: 'เงินเดือน & ประกันสังคม', match: (k) => k.startsWith('payroll.') && !k.startsWith('payroll.ewf_') },
   { title: 'เวลาทำงาน', match: (k) => k.startsWith('attendance.') },
   { title: 'องค์กร', match: (k) => k.startsWith('org.') },
+  { title: 'ทดลองงาน (แจ้งเตือนวันที่ 90 · เปลี่ยนสถานะวันที่ 120)', match: (k) => k.startsWith('probation.') },
 ];
 
 function settingInput(s: SettingItem, inputs: Map<string, HTMLInputElement>, suffix?: string): HTMLElement {
@@ -324,10 +325,126 @@ function ewfCard(items: SettingItem[], inputs: Map<string, HTMLInputElement>): H
   return card;
 }
 
+interface JobRun {
+  id: number;
+  run_date: string;
+  trigger: 'scheduled' | 'manual';
+  status: 'running' | 'ok' | 'partial' | 'error';
+  started_at: string;
+  finished_at: string | null;
+  summary: Record<string, number> | null;
+  error: string | null;
+  failures: Array<{ employeeId: number; kind: string; attempts: number; error?: string }> | null;
+}
+
+interface JobInfo {
+  today: string;
+  nextRun: string;
+  settings: { notifications: boolean; reminderIntervalDays: number; autoActivate: boolean };
+  runs: JobRun[];
+}
+
+interface JobResult {
+  runId: number | null;
+  status: string;
+  summary: Record<string, number>;
+  items: Array<{ employeeId: number; empCode: string; kind: string; due: string; result: string; notified?: number }>;
+}
+
+const RUN_STATUS: Record<string, string> = { running: 'กำลังทำงาน', ok: 'สำเร็จ', partial: 'สำเร็จบางส่วน', error: 'ล้มเหลว' };
+const RUN_TRIGGER: Record<string, string> = { scheduled: 'ตามเวลา (Cron)', manual: 'สั่งรันเอง' };
+const JOB_ACTION: Record<string, string> = { day90_notice: 'แจ้งครบ 90 วัน', reminder: 'แจ้งเตือนติดตาม', activate: 'เปลี่ยนเป็นปฏิบัติงาน', activate_due: 'แจ้งให้เปลี่ยนสถานะ' };
+const JOB_RESULT: Record<string, string> = { done: 'ทำแล้ว', would_do: 'จะทำ', skipped: 'ทำไปแล้วก่อนหน้า', suppressed: 'บันทึกโดยไม่แจ้งซ้ำ', failed: 'ผิดพลาด' };
+
+const runBadge = (status: string) => h('span', { class: `badge-status s-${status}` }, RUN_STATUS[status] ?? status);
+const count = (v: number | undefined) => String(v ?? 0);
+
+/**
+ * Run log of the daily probation job (Super Admin only, as is the whole settings page): last and next run, what the
+ * last run did, errors and retries, a dry run that writes nothing, and a manual run of the same idempotent job.
+ * `initial` is fetched together with the settings, so the page renders once (no layout shift above the Save button).
+ */
+function probationJobCard(initial: JobInfo | Error): HTMLElement {
+  const body = h('div');
+  const preview = h('div', { class: 'job-preview', 'aria-live': 'polite' });
+  const card = h('section', { class: 'card', id: 'probation-job' },
+    h('h2', null, 'งานอัตโนมัติ: ทดลองงาน'),
+    h('p', { class: 'muted small' }, 'Job Run Log · ทำงานทุกวันเวลา 00:05 และ 08:05 (เวลาไทย) รอบที่สองเป็นการลองซ้ำของรอบแรก'),
+    body);
+  const run = async (dryRun: boolean, btn: HTMLButtonElement) => {
+    if (!dryRun && !(await confirmDialog('รันงานทดลองงานทันที', 'ระบบจะส่งแจ้งเตือนและเปลี่ยนสถานะพนักงานที่ครบ 120 วันตามค่าตั้งปัจจุบัน งานที่ทำไปแล้วจะไม่ทำซ้ำ', 'รันทันที'))) return;
+    btn.disabled = true;
+    try {
+      const r = await post<JobResult>('/api/admin/jobs/probation/run', { dryRun });
+      if (dryRun) {
+        const todo = r.items.filter((i) => i.result !== 'skipped');
+        mount(preview,
+          h('div', { class: 'alert' }, h('strong', null, 'ผลทดลองรัน (ยังไม่บันทึกหรือแจ้งเตือนใด ๆ): '),
+            `ประมวลผล ${count(r.summary.processed)} คน · แจ้งเตือน ${count(r.summary.notifications)} รายการ · เปลี่ยนสถานะ ${count(r.summary.activated)} คน`),
+          todo.length
+            ? h('div', { class: 'table-wrap' }, h('table', { class: 'table' },
+                h('thead', null, h('tr', null, ['รหัสพนักงาน', 'การดำเนินการ', 'ครบกำหนด', 'ผล', 'ผู้รับแจ้ง'].map((t) => h('th', null, t)))),
+                h('tbody', null, todo.map((i) => h('tr', null, h('td', null, i.empCode), h('td', null, JOB_ACTION[i.kind] ?? i.kind), h('td', null, fmtDate(i.due)),
+                  h('td', null, JOB_RESULT[i.result] ?? i.result), h('td', null, count(i.notified)))))))
+            : h('p', { class: 'muted' }, 'วันนี้ไม่มีรายการที่ต้องทำ'));
+      } else {
+        toast(`รันแล้ว: ${RUN_STATUS[r.status] ?? r.status}`, r.status === 'ok' ? 'ok' : 'error');
+        mount(preview);
+        await load();
+      }
+    } catch (e) {
+      toast(e instanceof Error ? e.message : String(e), 'error');
+    } finally {
+      btn.disabled = false;
+    }
+  };
+  const show = (d: JobInfo | Error) => {
+    if (d instanceof Error) {
+      mount(body, errorBox(d));
+      return;
+    }
+    const last = d.runs[0];
+    const s = last?.summary ?? {};
+    const kpi = (label: string, value: HTMLElement | string, cls = '') => h('div', { class: `card kpi ${cls}` }, h('div', { class: 'kpi-label' }, label), h('div', { class: 'kpi-value' }, value));
+    const dry: HTMLButtonElement = h('button', { class: 'btn', type: 'button', onclick: () => void run(true, dry) }, 'ทดลองรัน (Dry Run)') as HTMLButtonElement;
+    const now: HTMLButtonElement = h('button', { class: 'btn primary', type: 'button', onclick: () => void run(false, now) }, 'รันทันที') as HTMLButtonElement;
+    mount(body,
+      h('p', { class: 'muted small' },
+        `แจ้งเตือน: ${d.settings.notifications ? 'เปิด' : 'ปิด'} · แจ้งเตือนซ้ำทุก ${d.settings.reminderIntervalDays} วัน · เปลี่ยนสถานะอัตโนมัติวันที่ 120: ${d.settings.autoActivate ? 'เปิด' : 'ปิด'} · ผู้รับแจ้ง: HR ที่แก้ไขข้อมูลพนักงานได้ทุกบริษัท และ Super Admin`),
+      h('div', { class: 'kpis' },
+        kpi('ทำงานล่าสุด', last ? h('span', null, fmtDate(last.started_at), ' ', runBadge(last.status)) : '-', 'kpi-sm'),
+        kpi('รอบถัดไป', fmtDate(d.nextRun), 'kpi-sm'),
+        kpi('พนักงานที่ประมวลผล', count(s.processed)),
+        kpi('แจ้งเตือนที่ส่ง', count(s.notifications)),
+        kpi('เปลี่ยนสถานะอัตโนมัติ', count(s.activated)),
+        kpi('ผิดพลาด / ลองซ้ำ', `${count(s.failed)} / ${count(s.retries)}`, s.failed ? 'kpi-bad' : s.retries ? 'kpi-warn' : '')),
+      h('div', { class: 'toolbar' }, h('div', { class: 'spacer' }), dry, now),
+      preview,
+      d.runs.length
+        ? h('div', { class: 'table-wrap' }, h('table', { class: 'table' },
+            h('thead', null, h('tr', null, ['วันที่ประมวลผล', 'การเรียก', 'สถานะ', 'เริ่ม', 'เสร็จ', 'ประมวลผล', 'แจ้งเตือน', 'เปลี่ยนสถานะ', 'ลองซ้ำ', 'ผิดพลาด', 'รายละเอียด'].map((t) => h('th', null, t)))),
+            h('tbody', null, d.runs.map((r) => h('tr', null,
+              h('td', null, fmtDate(r.run_date)), h('td', null, RUN_TRIGGER[r.trigger] ?? r.trigger), h('td', null, runBadge(r.status)),
+              h('td', null, fmtDate(r.started_at)), h('td', null, fmtDate(r.finished_at)),
+              h('td', null, count(r.summary?.processed)), h('td', null, count(r.summary?.notifications)), h('td', null, count(r.summary?.activated)),
+              h('td', null, count(r.summary?.retries)), h('td', null, count(r.summary?.failed)),
+              h('td', { class: 'small' }, r.failures?.length
+                ? r.failures.map((f) => h('div', null, `พนักงาน #${f.employeeId} · ${JOB_ACTION[f.kind] ?? f.kind} · ลอง ${f.attempts} ครั้ง · ${f.error ?? ''}`))
+                : r.status === 'error' ? (r.error ?? '') : '-'))))))
+        : h('p', { class: 'muted' }, 'ยังไม่มีประวัติการทำงาน'));
+  };
+  const load = async () => show(await get<JobInfo>('/api/admin/jobs/probation').catch((e: unknown) => (e instanceof Error ? e : new Error(String(e)))));
+  show(initial);
+  return card;
+}
+
 export async function renderSettings(main: HTMLElement): Promise<void> {
   mount(main, loading());
   try {
-    const items = await get<SettingItem[]>('/api/admin/settings');
+    const [items, jobs] = await Promise.all([
+      get<SettingItem[]>('/api/admin/settings'),
+      get<JobInfo>('/api/admin/jobs/probation').catch((e: unknown) => (e instanceof Error ? e : new Error(String(e)))),
+    ]);
     const inputs = new Map<string, HTMLInputElement>();
     const known = new Set<string>();
     const cards = SETTING_GROUPS.map((g) => {
@@ -342,6 +459,8 @@ export async function renderSettings(main: HTMLElement): Promise<void> {
     const msg = h('div', { class: 'form-msg', role: 'alert' });
     mount(main,
       h('p', { class: 'muted lead' }, 'เฉพาะ Super Admin เท่านั้นที่ดูและแก้ไขค่าตั้งระบบได้ ทุกการเปลี่ยนแปลงถูกบันทึกใน Audit Log'),
+      // the run log comes first: the settings form ends with its Save button, the last thing on the page
+      probationJobCard(jobs),
       h('form', { class: 'stack', onsubmit: async (e: Event) => {
         e.preventDefault();
         msg.textContent = '';

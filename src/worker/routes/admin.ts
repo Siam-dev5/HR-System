@@ -8,6 +8,9 @@ import { ROLE } from '../../shared/permissions';
 import { generatePassword, hashPassword } from '../../shared/crypto';
 import { DATE_RE, badRequest, conflict, forbidden, intParam, notFound, readJson, str } from '../lib/http';
 import { audit } from '../lib/audit';
+import { bangkokNow } from '../lib/time';
+import { PROBATION_JOB, probationSettings, runProbationJob } from '../lib/probation-job';
+import { PROBATION_CRONS, nextScheduledRun } from '../../shared/probation';
 import { currentUser, requireAuth, requireSuperAdmin } from '../auth';
 
 const PERMISSION_PATTERN = /^(\*|\*\.[a-z_]+|[a-z_]+\.(\*|[a-z_]+))$/;
@@ -325,4 +328,40 @@ adminRoutes.put('/settings', requireSuperAdmin, async (c) => {
     await audit(c, 'settings.updated', 'settings', null, { changes });
   }
   return c.json({ ok: true, changed: changes.length });
+});
+
+// ---- Scheduled jobs ------------------------------------------------------------------------------------------------
+// The probation job normally runs from the cron trigger (src/worker/index.ts). A Super Admin can see its run log,
+// preview today's actions (dry run, writes nothing) or run it now; a manual run is the same idempotent job.
+adminRoutes.get('/jobs/probation', requireSuperAdmin, async (c) => {
+  const { results } = await c.env.DB.prepare('SELECT id, run_date, trigger, status, started_at, finished_at, summary, error FROM job_runs WHERE job = ? ORDER BY id DESC LIMIT 30')
+    .bind(PROBATION_JOB)
+    .all<{ id: number; run_date: string; trigger: string; status: string; started_at: string; finished_at: string | null; summary: string | null; error: string | null }>();
+  return c.json({
+    today: bangkokNow().date,
+    nextRun: nextScheduledRun(Date.now()),
+    schedule: PROBATION_CRONS,
+    settings: await probationSettings(c.env.DB),
+    // a partial run keeps its failed steps as JSON in "error"; a failed run keeps the plain message
+    runs: results.map((r) => {
+      let failures: unknown = null;
+      if (r.status === 'partial' && r.error) {
+        try {
+          failures = JSON.parse(r.error);
+        } catch {
+          failures = null;
+        }
+      }
+      return { ...r, summary: r.summary ? (JSON.parse(r.summary) as Record<string, number>) : null, failures };
+    }),
+  });
+});
+
+adminRoutes.post('/jobs/probation/run', requireSuperAdmin, async (c) => {
+  const user = currentUser(c);
+  const body = await readJson<{ dryRun?: unknown }>(c);
+  const dryRun = body.dryRun === true;
+  const result = await runProbationJob(c.env.DB, { today: bangkokNow().date, trigger: 'manual', requestedBy: { id: user.id, username: user.username }, dryRun });
+  if (!dryRun) await audit(c, 'job.manual_run', 'job_runs', result.runId, { job: PROBATION_JOB, status: result.status, summary: result.summary });
+  return c.json(result);
 });

@@ -124,6 +124,8 @@ export interface ListResponse {
   total: number;
   page: number;
   pageSize: number;
+  /** server date (Asia/Bangkok, YYYY-MM-DD) that date-relative values such as tenure are counted to */
+  asOf?: string;
 }
 
 export interface NotificationItem {

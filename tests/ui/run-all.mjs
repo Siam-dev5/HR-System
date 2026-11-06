@@ -7,7 +7,11 @@ import { writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { ROOT, EXE, arg, outDir } from './lib/env.mjs';
 
+feature/employee-probation-payroll-cycle
+const SUITES = ['ui-smoke', 'ui-auth', 'ui-header', 'ui-footer', 'ui-workstreams', 'ui-period-admin', 'ui-org', 'ui-avatar', 'ui-holidays', 'ui-sidebar', 'ui-responsive', 'ui-employees', 'ui-jobs', 'ui-c3', 'ui-d'];
+
 const SUITES = ['ui-smoke', 'ui-auth', 'ui-header', 'ui-footer', 'ui-workstreams', 'ui-period-admin', 'ui-org', 'ui-avatar', 'ui-holidays', 'ui-sidebar', 'ui-responsive', 'ui-c3', 'ui-d'];
+main
 const only = arg('only');
 const baseline = arg('baseline');
 const selected = typeof only === 'string' ? only.split(',').map((s) => s.trim()) : SUITES;

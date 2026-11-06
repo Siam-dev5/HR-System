@@ -325,9 +325,9 @@ input[aria-invalid='true'], select[aria-invalid='true'], textarea[aria-invalid='
 .pager { display: flex; gap: 0.6rem; align-items: center; justify-content: flex-end; padding: 0.75rem 0; color: var(--muted); font-size: var(--fs-sm); }
 /* status badges: soft fill, text colour from the status */
 .badge-status { display: inline-block; padding: 0.12rem 0.6rem; border-radius: var(--radius-pill); font-size: 0.78rem; font-weight: 600; line-height: 1.5; white-space: nowrap; color: var(--text-2); background: var(--surface-3); border: 1px solid var(--border); }
-.s-approved, .s-published, .s-active, .s-completed, .s-present { color: var(--ok); border-color: color-mix(in srgb, var(--ok) 30%, transparent); background: color-mix(in srgb, var(--ok) 10%, var(--surface)); }
-.s-pending, .s-calculated, .s-late, .s-probation { color: var(--warn); border-color: color-mix(in srgb, var(--warn) 30%, transparent); background: color-mix(in srgb, var(--warn) 10%, var(--surface)); }
-.s-rejected, .s-cancelled, .s-absent, .s-terminated { color: var(--danger); border-color: color-mix(in srgb, var(--danger) 30%, transparent); background: color-mix(in srgb, var(--danger) 9%, var(--surface)); }
+.s-approved, .s-published, .s-active, .s-completed, .s-present, .s-ok { color: var(--ok); border-color: color-mix(in srgb, var(--ok) 30%, transparent); background: color-mix(in srgb, var(--ok) 10%, var(--surface)); }
+.s-pending, .s-calculated, .s-late, .s-probation, .s-partial { color: var(--warn); border-color: color-mix(in srgb, var(--warn) 30%, transparent); background: color-mix(in srgb, var(--warn) 10%, var(--surface)); }
+.s-rejected, .s-cancelled, .s-absent, .s-terminated, .s-error { color: var(--danger); border-color: color-mix(in srgb, var(--danger) 30%, transparent); background: color-mix(in srgb, var(--danger) 9%, var(--surface)); }
 
 /* charts */
 /* one grid for the whole chart (rows are subgrids, so bars line up): the label column is as wide as the longest label
@@ -630,6 +630,7 @@ input[aria-invalid='true'], select[aria-invalid='true'], textarea[aria-invalid='
 .s-superseded, .s-rolled_back { color: var(--muted); }
 .kpi-bad .kpi-value { color: var(--danger); }
 .kpi-warn .kpi-value { color: var(--warn); }
+.kpi-sm .kpi-value { font-size: 1rem; font-weight: 600; }
 .issues { margin: 0; padding-left: 1rem; font-size: 0.82rem; }
 .issue-error { color: var(--danger); }
 .issue-warning { color: var(--warn); }

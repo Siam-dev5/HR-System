@@ -146,7 +146,7 @@ export const MODULES: readonly ModuleDef[] = [
     searchFields: ['emp_code', 'first_name', 'last_name', 'email'],
     fields: [
       text('emp_code', 'รหัสพนักงาน', { ...RL, unique: true }), text('first_name', 'ชื่อ', RL), text('last_name', 'นามสกุล', RL), email('email', 'อีเมล', L), text('phone', 'โทรศัพท์'),
-      ref('company_id', 'บริษัท', 'companies', { required: true }), ref('branch_id', 'สาขา', 'branches'), ref('department_id', 'หน่วยงาน', 'departments', L), ref('position_id', 'ตำแหน่ง', 'positions', L), ref('manager_id', 'หัวหน้า', 'employees'),
+      ref('company_id', 'บริษัท', 'companies', { required: true, list: true }), ref('branch_id', 'สาขา', 'branches'), ref('department_id', 'หน่วยงาน', 'departments', L), ref('position_id', 'ตำแหน่ง', 'positions', L), ref('manager_id', 'หัวหน้า', 'employees'),
       date('hire_date', 'วันเริ่มงาน', { required: true }), date('probation_end', 'ครบทดลองงาน'), sel('employment_type', 'ประเภทการจ้าง', ['permanent', 'contract', 'probation', 'intern'], { required: true }),
       sel('status', 'สถานะ', ['active', 'probation', 'resigned', 'terminated'], RL),
       date('termination_date', 'วันพ้นสภาพ (วันทำงานวันสุดท้าย)'), ref('person_id', 'ตัวตนเดียวกับพนักงาน (กรณีโอนย้ายบริษัท)', 'employees'),
