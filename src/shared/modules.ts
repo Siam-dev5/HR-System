@@ -175,9 +175,13 @@ export const MODULES: readonly ModuleDef[] = [
     fields: [ref('requisition_id', 'ใบขอสรรหา', 'requisitions', RL), text('full_name', 'ชื่อ-นามสกุล', RL), email('email', 'อีเมล', L), text('phone', 'โทรศัพท์'), sel('source', 'แหล่งที่มา', ['website', 'referral', 'jobboard', 'agency', 'other'], L), sel('stage', 'ขั้นตอน', ['applied', 'screening', 'interview', 'offer', 'hired', 'rejected'], RL), date('pdpa_consent_until', 'เก็บข้อมูลถึง (PDPA)', L), area('note', 'หมายเหตุ')],
   }),
   crud({
-    key: 'attendance', path: '/attendance', title: 'เวลาทำงาน', group: 'hrm', table: 'attendance_records', description: 'บันทึกเวลาเข้า-ออก', labelExpr: "work_date || ' #' || employee_id", ownerField: 'employee_id', defaultSort: 'work_date DESC, id DESC',
-    fields: [ref('employee_id', 'พนักงาน', 'employees', RL), date('work_date', 'วันที่', RL), time('clock_in', 'เวลาเข้า', L), time('clock_out', 'เวลาออก', L), sel('status', 'สถานะ', ['present', 'late', 'absent', 'leave'], RL), sel('source', 'ที่มา', ['web', 'device', 'manual'], L), text('note', 'หมายเหตุ')],
+    key: 'attendance', path: '/attendance', title: 'บันทึกเวลาทำงาน', group: 'hrm', table: 'attendance_records', description: 'บันทึกเวลาเข้า-ออก', labelExpr: "work_date || ' #' || employee_id", ownerField: 'employee_id', defaultSort: 'work_date DESC, id DESC',
+    fields: [ref('employee_id', 'พนักงาน', 'employees', RL), date('work_date', 'วันที่', RL), time('clock_in', 'เวลาเข้า', L), time('clock_out', 'เวลาออก', L), sel('status', 'สถานะ', ['present', 'late', 'absent', 'leave'], RL), sel('source', 'ที่มา', ['web', 'device', 'manual', 'import'], L), text('note', 'หมายเหตุ')],
   }),
+  page('attendance_file_import', '/attendance/file-import', 'นำเข้าไฟล์เวลาทำงาน', 'hrm', 'attendance_file.import', '/api/attendance-files/fields'),
+  page('attendance_file_history', '/attendance/file-imports', 'ประวัติการนำเข้าเวลา', 'hrm', 'attendance_file.view', '/api/attendance-files'),
+  page('shift_groups', '/shifts/groups', 'กลุ่มกะ', 'hrm', 'shift_groups.view', '/api/shifts/groups'),
+  page('shift_schedule', '/shifts/schedule', 'ตารางกะกลุ่ม', 'hrm', 'shift_schedule.view', '/api/shifts/schedule'),
   crud({
     key: 'shifts', path: '/shifts', title: 'กะการทำงาน', group: 'hrm', table: 'shifts', description: 'กำหนดกะและเวลาเข้างาน', labelExpr: codeName, codeField: 'code', defaultSort: 'code',
     fields: [text('code', 'รหัสกะ', { ...RL, unique: true }), text('name', 'ชื่อกะ', RL), time('start_time', 'เวลาเข้า', RL), time('end_time', 'เวลาออก', RL), num('break_minutes', 'พัก (นาที)', { list: true, min: 0 }), bool('active', 'ใช้งาน', L)],
@@ -377,7 +381,7 @@ export function permissionCatalogue(): string[] {
   }
   for (const p of PAGE_MODULES) perms.add(p.perm);
   for (const extra of ['payroll.calculate', 'payroll.approve', 'payroll.publish', 'payroll.export', 'workflow.approve', 'workflow.approve_any', 'reports.export',
-    'attendance_import.create', 'attendance_import.update', 'ot_review.update', 'payroll_preview.export', 'org_chart.update', 'org_chart.import', 'org_chart.export', 'payslip_ytd.view',
+    'attendance_import.create', 'attendance_import.update', 'ot_review.update', 'attendance_file.import', 'shift_groups.manage', 'shift_schedule.manage', 'payroll_preview.export', 'org_chart.update', 'org_chart.import', 'org_chart.export', 'payslip_ytd.view',
     'holiday_calendar.create', 'holiday_calendar.update', 'holiday_calendar.delete', 'holiday_calendar.approve', 'holiday_calendar.import', 'holiday_calendar.export']) perms.add(extra);
   for (const r of RESERVED_PERMISSIONS) perms.delete(r);
   return [...perms].sort();

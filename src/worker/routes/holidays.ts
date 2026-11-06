@@ -240,7 +240,7 @@ holidayRoutes.get('/export.xlsx', requirePerm(P.export), async (c) => {
 });
 
 // ---- day classification (attendance integration) -------------------------------------------------
-async function applicable(db: D1Database, companyId: number, from: string, to: string): Promise<{ holidays: ApplicableHoliday[]; weeklyRest: number[] }> {
+export async function applicable(db: D1Database, companyId: number, from: string, to: string): Promise<{ holidays: ApplicableHoliday[]; weeklyRest: number[] }> {
   const { results: cals } = await db
     .prepare("SELECT id, company_id, weekly_rest_days, country_code FROM holiday_calendars WHERE active = 1 AND (company_id = ?1 OR (company_id IS NULL AND country_code = COALESCE((SELECT country_code FROM holiday_calendars WHERE company_id = ?1 AND active = 1), ?2)))")
     .bind(companyId, DEFAULT_COUNTRY)

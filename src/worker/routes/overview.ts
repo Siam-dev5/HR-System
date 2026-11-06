@@ -7,6 +7,9 @@ import { DATE_RE, badRequest, conflict, forbidden, intParam } from '../lib/http'
 import { audit } from '../lib/audit';
 import { loadSettings, settingText } from '../lib/settings';
 import { bangkokNow } from '../lib/time';
+import { SHIFT_COLUMNS, shiftForDay, shiftTimes, type ShiftRow } from '../lib/shift-resolver';
+import { checkClock } from '../../shared/shifts';
+import { addDays } from '../../shared/payroll';
 import { companyScope, requireCompany } from '../lib/companies';
 import { can, canOpen, currentUser, requireAuth, requirePerm } from '../auth';
 import { toMe } from './auth';
@@ -168,26 +171,38 @@ overviewRoutes.post('/ess/clock', requirePerm('ess.view'), async (c) => {
   const body = (await c.req.json().catch(() => ({}))) as { action?: string };
   const { date, time } = bangkokNow();
   const db = c.env.DB;
-  const existing = await db.prepare('SELECT id, clock_in, clock_out FROM attendance_records WHERE employee_id = ? AND work_date = ?').bind(user.employeeId, date).first<{ id: number; clock_in: string | null; clock_out: string | null }>();
+  type Rec = { id: number; work_date: string; clock_in: string | null; clock_out: string | null; shift_id: number | null };
+  const existing = await db.prepare('SELECT id, work_date, clock_in, clock_out, shift_id FROM attendance_records WHERE employee_id = ? AND work_date = ?').bind(user.employeeId, date).first<Rec>();
   if (body.action === 'in') {
     if (existing?.clock_in) throw conflict('ลงเวลาเข้าแล้ววันนี้');
-    const shift = await db
-      .prepare('SELECT s.start_time FROM shift_assignments a JOIN shifts s ON s.id = a.shift_id WHERE a.employee_id = ? AND a.start_date <= ? AND (a.end_date IS NULL OR a.end_date >= ?) ORDER BY a.start_date DESC LIMIT 1')
-      .bind(user.employeeId, date, date)
-      .first<{ start_time: string }>();
-    const start = shift?.start_time ?? settingText(await loadSettings(db), 'attendance.default_start_time', '09:00');
-    const status = time > start ? 'late' : 'present';
-    if (existing) await db.prepare("UPDATE attendance_records SET clock_in = ?, status = ?, source = 'web', updated_at = datetime('now'), updated_by = ? WHERE id = ?").bind(time, status, user.id, existing.id).run();
-    else await db.prepare("INSERT INTO attendance_records (employee_id, work_date, clock_in, status, source, created_by, updated_by) VALUES (?, ?, ?, ?, 'web', ?, ?)").bind(user.employeeId, date, time, status, user.id, user.id).run();
-    await audit(c, 'attendance.clock_in', 'attendance', user.employeeId, { date, time, status });
+    // the shift in force today (schedule entry, shift group, then the legacy assignment); lateness = after its start
+    const day = await shiftForDay(db, user.employeeId, date);
+    const shift = day.kind === 'shift' ? day.shift : null;
+    const defaultStart = settingText(await loadSettings(db), 'attendance.default_start_time', '09:00');
+    const check = checkClock(shift ? shiftTimes(shift) : null, time, null, { defaultStart });
+    const status = check.status;
+    if (existing) await db.prepare("UPDATE attendance_records SET clock_in = ?, status = ?, source = 'web', shift_id = ?, late_minutes = ?, updated_at = datetime('now'), updated_by = ? WHERE id = ?").bind(time, status, shift?.id ?? null, check.lateMinutes, user.id, existing.id).run();
+    else await db.prepare("INSERT INTO attendance_records (employee_id, work_date, clock_in, status, source, shift_id, late_minutes, created_by, updated_by) VALUES (?, ?, ?, ?, 'web', ?, ?, ?, ?)").bind(user.employeeId, date, time, status, shift?.id ?? null, check.lateMinutes, user.id, user.id).run();
+    await audit(c, 'attendance.clock_in', 'attendance', user.employeeId, { date, time, status, shift_id: shift?.id ?? null });
     return c.json({ ok: true, date, time, status });
   }
   if (body.action === 'out') {
-    if (!existing?.clock_in) throw conflict('ยังไม่ได้ลงเวลาเข้า');
-    if (existing.clock_out) throw conflict('ลงเวลาออกแล้ววันนี้');
-    await db.prepare("UPDATE attendance_records SET clock_out = ?, updated_at = datetime('now'), updated_by = ? WHERE id = ?").bind(time, user.id, existing.id).run();
-    await audit(c, 'attendance.clock_out', 'attendance', user.employeeId, { date, time });
-    return c.json({ ok: true, date, time });
+    let rec = existing;
+    // after midnight, an overnight shift's open record of yesterday is the one to close
+    if (!rec?.clock_in) {
+      const y = await db.prepare('SELECT a.id, a.work_date, a.clock_in, a.clock_out, a.shift_id FROM attendance_records a JOIN shifts s ON s.id = a.shift_id WHERE a.employee_id = ? AND a.work_date = ? AND a.clock_in IS NOT NULL AND a.clock_out IS NULL AND s.end_time <= s.start_time').bind(user.employeeId, addDays(date, -1)).first<Rec>();
+      if (y) rec = y;
+    }
+    if (!rec?.clock_in) throw conflict('ยังไม่ได้ลงเวลาเข้า');
+    if (rec.clock_out) throw conflict('ลงเวลาออกแล้ววันนี้');
+    const shift = rec.shift_id ? await db.prepare(`SELECT ${SHIFT_COLUMNS} FROM shifts WHERE id = ?`).bind(rec.shift_id).first<ShiftRow>() : null;
+    const check = checkClock(shift ? shiftTimes(shift) : null, rec.clock_in, time, { outNextDay: rec.work_date !== date });
+    await db
+      .prepare("UPDATE attendance_records SET clock_out = ?, clock_out_next_day = ?, early_leave_minutes = ?, worked_minutes = ?, updated_at = datetime('now'), updated_by = ? WHERE id = ?")
+      .bind(time, check.outNextDay ? 1 : 0, shift ? check.earlyLeaveMinutes : null, check.workedMinutes, user.id, rec.id)
+      .run();
+    await audit(c, 'attendance.clock_out', 'attendance', user.employeeId, { date: rec.work_date, time });
+    return c.json({ ok: true, date: rec.work_date, time });
   }
   throw badRequest('action ต้องเป็น in หรือ out');
 });
