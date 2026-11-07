@@ -246,7 +246,7 @@ export const clockTime = (p: Punch | null): string | null => (p && CLOCK_RESULTS
 export type DailyIssueCode =
   | 'missing_employee' | 'unreadable_cell' | 'unknown_result' | 'no_record_in' | 'no_record_out' | 'no_record_time_kept' | 'pending_out'
   | 'missing_clock_in' | 'missing_clock_out' | 'late' | 'early_leave' | 'leave' | 'overtime' | 'out_of_office' | 'rest_day'
-  | 'unknown_employee' | 'wrong_company' | 'future_date' | 'not_employed' | 'period_locked' | 'duplicate_in_file' | 'duplicate_existing';
+  | 'unknown_employee' | 'wrong_company' | 'missing_company' | 'company_unmatched' | 'company_conflict' | 'attendance_exempt' | 'future_date' | 'not_employed' | 'period_locked' | 'duplicate_in_file' | 'duplicate_existing';
 export interface DailyIssue {
   code: DailyIssueCode;
   level: 'error' | 'warning' | 'info';
@@ -257,6 +257,8 @@ export interface DailyRow {
   row_no: number;
   /** sheet cell the day came from, e.g. "J5" */
   source_ref: string;
+  /** 0-based row of the worksheet the day came from */
+  source_row: number;
   employee_code: string | null;
   employee_name: string | null;
   department: string | null;
@@ -343,7 +345,7 @@ export function parseDailyRows(grid: readonly Cell[][], headerRow: number, m: Da
         worked = span;
       }
       rows.push({
-        row_no: rows.length + 1, source_ref: `${colName(col)}${r + 1}`, ...base, work_date: date, cell, day,
+        row_no: rows.length + 1, source_ref: `${colName(col)}${r + 1}`, source_row: r, ...base, work_date: date, cell, day,
         clock_in: cin, clock_out: cout, out_next_day: next, late_minutes: late, early_leave_minutes: early, worked_minutes: worked, issues,
       });
     }
