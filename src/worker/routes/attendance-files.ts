@@ -8,7 +8,8 @@ import type { CompanyOption } from '../../shared/types';
 import { currentUser, requireAuth, requirePerm } from '../auth';
 import { audit } from '../lib/audit';
 import { companyScope, requireCompany } from '../lib/companies';
-import { badRequest, conflict, csv, intParam, notFound, readJson, safeName, str } from '../lib/http';
+import { readCompanyRule, type CompanyMode, type CompanyRule } from '../../shared/company-rules';
+import { badRequest, conflict, csv, forbidden, intParam, notFound, readJson, safeName, str } from '../lib/http';
 import { loadSettings, settingText } from '../lib/settings';
 import { bangkokNow } from '../lib/time';
 import { lockedPeriods, resolveDays, shiftTimes } from '../lib/shift-resolver';
@@ -38,7 +39,12 @@ async function sha256Hex(s: string): Promise<string> {
 }
 
 interface FileInput {
-  company: CompanyOption;
+  /** the chosen company; null only for a combined Feishu daily file (the company of each row comes from the rule) */
+  company: CompanyOption | null;
+  mode: CompanyMode;
+  rule: CompanyRule | null;
+  /** companies in the user's scope */
+  companies: CompanyOption[];
   fileName: string;
   fileType: ClockFileType;
   fileSize: number | null;
@@ -80,8 +86,18 @@ function readMapping(v: unknown): ClockMapping | null {
 }
 
 async function readInput(c: Context<AppEnv>, body: Record<string, unknown>): Promise<FileInput> {
-  const company = await requireCompany(c.env.DB, currentUser(c), body.company_id === undefined || body.company_id === null ? undefined : String(body.company_id));
-  if (!company) throw badRequest('กรุณาเลือกบริษัท');
+  const mode: CompanyMode = body.company_mode === 'combined' ? 'combined' : 'single';
+  const scope = await companyScope(c.env.DB, currentUser(c));
+  const company = mode === 'single' ? await requireCompany(c.env.DB, currentUser(c), body.company_id === undefined || body.company_id === null ? undefined : String(body.company_id)) : null;
+  if (mode === 'single' && !company) throw badRequest('กรุณาเลือกบริษัท');
+  let rule: CompanyRule | null;
+  try {
+    rule = readCompanyRule(body.company_rule, MAX_COLS);
+  } catch (e) {
+    throw badRequest(e instanceof Error ? e.message : String(e));
+  }
+  // every company named by the rule must be one the user may import into (never trusted from the browser)
+  for (const id of Object.values(rule?.values ?? {})) if (id !== null && !scope.items.some((x) => x.id === id)) throw forbidden('ไม่มีสิทธิ์เข้าถึงข้อมูลของบริษัทที่จับคู่ไว้');
   const fileName = str(body, 'file_name', { required: true, max: 200 }) as string;
   const fileType = body.file_type;
   if (!CLOCK_FILE_TYPES.includes(fileType as ClockFileType)) throw badRequest('รองรับเฉพาะไฟล์ .xlsx .xls และ .csv');
@@ -103,8 +119,9 @@ async function readInput(c: Context<AppEnv>, body: Record<string, unknown>): Pro
   if (wrong) throw badRequest(wrong);
   if (kind.template && kind.template !== template) throw badRequest(`Worksheet นี้มีโครงสร้างแบบ ${TEMPLATE_LABEL[kind.template]} ไม่ตรงกับ Template ที่เลือก (${TEMPLATE_LABEL[template]})`);
   if (template === FEISHU_DAILY_TEMPLATE && kind.template !== FEISHU_DAILY_TEMPLATE) throw badRequest('Worksheet นี้ไม่ใช่รายงาน Feishu Daily Attendance (ไม่พบหัวตาราง Employee ID และคอลัมน์วันที่)');
+  if (template !== FEISHU_DAILY_TEMPLATE && (mode === 'combined' || rule)) throw badRequest('ไฟล์รวมหลายบริษัท / การระบุบริษัทจากคอลัมน์ รองรับเฉพาะรายงาน Feishu Daily Attendance');
   return {
-    company, fileName, fileType: fileType as ClockFileType, fileSize: size, sha256: sha,
+    company, mode, rule, companies: scope.items, fileName, fileType: fileType as ClockFileType, fileSize: size, sha256: sha,
     sheetName, source: str(body, 'source', { max: 100 }),
     grid, headerRow, template,
     mapping: template === CLOCK_TEMPLATE ? readMapping(body.mapping) : null,
@@ -141,13 +158,13 @@ async function evaluate(db: D1Database, user: AuthUser, input: FileInput): Promi
   const headerRow = input.headerRow ?? findClockHeaderRow(input.grid);
   const headers = headerLabels(input.grid, headerRow);
   const signature = await sha256Hex(layoutSignature(headers));
-  const saved = await db.prepare('SELECT mapping_json FROM attendance_file_mappings WHERE company_id = ? AND header_signature = ?').bind(input.company.id, signature).first<{ mapping_json: string }>();
+  const saved = await db.prepare('SELECT mapping_json FROM attendance_file_mappings WHERE company_id = ? AND header_signature = ?').bind(input.company!.id, signature).first<{ mapping_json: string }>();
   const remembered = saved ? (JSON.parse(saved.mapping_json) as ClockMapping) : null;
   const mapping = input.mapping ?? autoClockMapping(headers, remembered);
   const mappingProblems = validMapping(mapping, headers.length);
   const { results: previous } = await db
     .prepare('SELECT id, created_at, file_name FROM attendance_file_imports WHERE company_id = ? AND file_sha256 = ? ORDER BY id DESC LIMIT 5')
-    .bind(input.company.id, input.sha256)
+    .bind(input.company!.id, input.sha256)
     .all<{ id: number; created_at: string; file_name: string }>();
   const base = { headerRow, headers, signature, mapping, remembered: !!remembered && !input.mapping, mappingProblems, previous };
   if (mappingProblems.length) return { ...base, rows: [] };
@@ -167,14 +184,14 @@ async function evaluate(db: D1Database, user: AuthUser, input: FileInput): Promi
   const dates = parsed.map((r) => r.work_date).filter((d): d is string => !!d).sort();
   const from = dates[0] ?? today;
   const to = dates[dates.length - 1] ?? today;
-  const mine = emps.filter((e) => e.company_id === input.company.id).map((e) => e.id);
+  const mine = emps.filter((e) => e.company_id === input.company!.id).map((e) => e.id);
   const [locked, existing, resolved, holidays, leaves, settings] = await Promise.all([
-    lockedPeriods(db, input.company.id, from, to),
+    lockedPeriods(db, input.company!.id, from, to),
     mine.length
       ? db.prepare('SELECT employee_id, work_date FROM attendance_records WHERE employee_id IN (SELECT value FROM json_each(?1)) AND work_date BETWEEN ?2 AND ?3').bind(JSON.stringify(mine), from, to).all<{ employee_id: number; work_date: string }>()
       : Promise.resolve({ results: [] as Array<{ employee_id: number; work_date: string }> }),
     resolveDays(db, mine, from, to > today ? today : to),
-    applicable(db, input.company.id, from, to),
+    applicable(db, input.company!.id, from, to),
     mine.length
       ? db.prepare("SELECT employee_id, start_date, end_date FROM leave_requests WHERE status = 'approved' AND employee_id IN (SELECT value FROM json_each(?1)) AND start_date <= ?3 AND end_date >= ?2").bind(JSON.stringify(mine), from, to).all<{ employee_id: number; start_date: string; end_date: string }>()
       : Promise.resolve({ results: [] as Array<{ employee_id: number; start_date: string; end_date: string }> }),
@@ -190,10 +207,10 @@ async function evaluate(db: D1Database, user: AuthUser, input: FileInput): Promi
     const out: EvaluatedRow = { ...p, issues, employee_id: null, employee_name: null, status: 'valid', attendance_status: null, shift_id: null, shift_label: null, late_minutes: null, early_leave_minutes: null, worked_minutes: null };
     const emp = p.employee_code ? byCode.get(p.employee_code.toUpperCase()) : undefined;
     if (p.employee_code && !emp) issues.push(issue('unknown_employee', 'error', `ไม่พบพนักงานรหัส ${p.employee_code}`));
-    else if (emp && emp.company_id !== input.company.id) {
+    else if (emp && emp.company_id !== input.company!.id) {
       // a user limited to their own company does not learn that the code exists elsewhere
       const visible = scope.scope === 'all' || scope.items.some((x) => x.id === emp.company_id);
-      issues.push(visible ? issue('wrong_company', 'error', `พนักงานรหัส ${p.employee_code} ไม่ได้อยู่ในบริษัท ${input.company.name}`) : issue('unknown_employee', 'error', `ไม่พบพนักงานรหัส ${p.employee_code}`));
+      issues.push(visible ? issue('wrong_company', 'error', `พนักงานรหัส ${p.employee_code} ไม่ได้อยู่ในบริษัท ${input.company!.name}`) : issue('unknown_employee', 'error', `ไม่พบพนักงานรหัส ${p.employee_code}`));
     } else if (emp) {
       out.employee_id = emp.id;
       out.employee_name = emp.name;
@@ -262,50 +279,71 @@ const sha256Of = (s: string) => sha256Hex(s);
 
 async function previousImports(db: D1Database, input: FileInput) {
   const { results } = await db
-    .prepare('SELECT id, created_at, file_name FROM attendance_file_imports WHERE company_id = ? AND file_sha256 = ? AND COALESCE(sheet_name, \'\') = COALESCE(?, \'\') ORDER BY id DESC LIMIT 5')
-    .bind(input.company.id, input.sha256, input.sheetName)
+    .prepare(`SELECT id, created_at, file_name FROM attendance_file_imports WHERE (?1 IS NULL OR company_id = ?1) AND file_sha256 = ?2 AND COALESCE(sheet_name, '') = COALESCE(?3, '')
+              AND company_id IN (SELECT value FROM json_each(?4)) ORDER BY id DESC LIMIT 5`)
+    .bind(input.company?.id ?? null, input.sha256, input.sheetName, JSON.stringify(input.companies.map((x) => x.id)))
     .all<{ id: number; created_at: string; file_name: string }>();
   return results;
 }
 
-function summarizeDaily(ev: DailyEvaluation) {
-  const n = (s: EvaluatedDailyRow['status']) => ev.rows.filter((r) => r.status === s).length;
+function countRows(rows: readonly EvaluatedDailyRow[]) {
+  const n = (s: EvaluatedDailyRow['status']) => rows.filter((r) => r.status === s).length;
   const valid = n('valid');
   const warning = n('warning');
+  return { total: rows.length, valid, warning, duplicate: n('duplicate'), invalid: n('invalid'), importable: valid + warning };
+}
+
+function summarizeDaily(ev: DailyEvaluation) {
   return {
-    total: ev.rows.length, valid, warning, duplicate: n('duplicate'), invalid: n('invalid'), importable: valid + warning,
+    ...countRows(ev.rows),
     source_rows: ev.sourceRows, empty_days: ev.emptyDays, with_clock: ev.rows.filter((r) => (r.status === 'valid' || r.status === 'warning') && (r.clock_in || r.clock_out)).length,
     events: ev.rows.filter((r) => r.status === 'valid' || r.status === 'warning').reduce((s, r) => s + r.day.events.length, 0),
+    unassigned: ev.rows.filter((r) => r.company_id === null).length,
+    exempt_days: ev.rows.filter((r) => r.exempt).length,
   };
 }
 
+/** Valid / Warning / Duplicate / Invalid per company of the file (rows without a company are counted apart). */
+function perCompany(ev: DailyEvaluation, companies: readonly CompanyOption[]) {
+  const ids = [...new Set(ev.rows.map((r) => r.company_id).filter((x): x is number => x !== null))];
+  return ids.map((id) => {
+    const c = companies.find((x) => x.id === id);
+    return { id, code: c?.code ?? String(id), name: c?.name ?? String(id), ...countRows(ev.rows.filter((r) => r.company_id === id)) };
+  });
+}
+
 const publicDailyRow = (r: EvaluatedDailyRow) => ({
-  row_no: r.row_no, source_ref: r.source_ref, employee_code: r.employee_code, employee_id: r.employee_id, employee_name: r.employee_display ?? r.employee_name, work_date: r.work_date,
-  cell: r.cell, clock_in: r.clock_in, clock_out: r.clock_out, out_next_day: r.out_next_day, in_result: r.day.clock_in ? { label: r.day.clock_in.label, result: r.day.clock_in.result, time: r.day.clock_in.time } : null,
+  row_no: r.row_no, source_ref: r.source_ref, company_id: r.company_id, company_value: r.company_value, employee_code: r.employee_code, employee_id: r.employee_id, employee_name: r.employee_display ?? r.employee_name,
+  work_date: r.work_date, cell: r.cell, clock_in: r.clock_in, clock_out: r.clock_out, out_next_day: r.out_next_day,
+  in_result: r.day.clock_in ? { label: r.day.clock_in.label, result: r.day.clock_in.result, time: r.day.clock_in.time } : null,
   out_result: r.day.clock_out ? { label: r.day.clock_out.label, result: r.day.clock_out.result, time: r.day.clock_out.time } : null, day_kind: r.day.kind,
   events: r.day.events.map((e) => ({ kind: e.kind, label: e.label, amount: e.amount, unit: e.unit, ranges: e.ranges, all_day: e.all_day, overnight: e.overnight })),
-  status: r.status, issues: r.issues, attendance_status: r.attendance_status, late_minutes: r.late_minutes, early_leave_minutes: r.early_leave_minutes, worked_minutes: r.worked_minutes,
+  exempt: r.exempt, status: r.status, issues: r.issues, attendance_status: r.attendance_status, late_minutes: r.late_minutes, early_leave_minutes: r.early_leave_minutes, worked_minutes: r.worked_minutes,
 });
 
+const dailyInput = (input: FileInput) => ({ mode: input.mode, company: input.company, companies: input.companies, rule: input.rule, grid: input.grid, headerRow: input.headerRow, mapping: input.dailyMapping });
+
+/** Preview: reads only (nothing is written, not even the remembered mapping). */
 attendanceFileRoutes.post('/preview', requirePerm('attendance_file.import'), async (c) => {
   const input = await readInput(c, await readJson(c));
   const db = c.env.DB;
   if (input.template === FEISHU_DAILY_TEMPLATE) {
-    const ev = await evaluateDaily(db, currentUser(c), { company: input.company, grid: input.grid, headerRow: input.headerRow, mapping: input.dailyMapping }, sha256Of);
+    const ev = await evaluateDaily(db, currentUser(c), dailyInput(input), sha256Of);
     return c.json({
-      template: input.template, sheet_name: input.sheetName, company: input.company, header_row: ev.headerRow, headers: ev.headers, mapping: ev.mapping, remembered: ev.remembered,
-      mapping_problems: ev.mappingProblems, fields: fieldList(input.template), day_columns: ev.dayColumns, previous: await previousImports(db, input), summary: summarizeDaily(ev), rows: ev.rows.map(publicDailyRow),
+      template: input.template, sheet_name: input.sheetName, company_mode: input.mode, company: input.company, company_rule: input.rule, remembered_rule: ev.rememberedRule,
+      header_row: ev.headerRow, headers: ev.headers, mapping: ev.mapping, remembered: ev.remembered, mapping_problems: ev.mappingProblems, fields: fieldList(input.template), day_columns: ev.dayColumns,
+      previous: await previousImports(db, input), summary: summarizeDaily(ev), companies: perCompany(ev, input.companies), rows: ev.rows.map(publicDailyRow),
     });
   }
   const ev = await evaluate(db, currentUser(c), input);
   return c.json({
-    template: input.template, sheet_name: input.sheetName, company: input.company, header_row: ev.headerRow, headers: ev.headers, mapping: ev.mapping, remembered: ev.remembered, mapping_problems: ev.mappingProblems,
-    fields: fieldList(input.template), previous: ev.previous, summary: summarize(ev.rows), rows: ev.rows.map(publicRow),
+    template: input.template, sheet_name: input.sheetName, company_mode: input.mode, company: input.company, header_row: ev.headerRow, headers: ev.headers, mapping: ev.mapping, remembered: ev.remembered,
+    mapping_problems: ev.mappingProblems, fields: fieldList(input.template), previous: ev.previous, summary: summarize(ev.rows), rows: ev.rows.map(publicRow),
   });
 });
 
 const BATCH_SELECT = `SELECT b.id, b.company_id, c.name AS company, c.code AS company_code, b.file_name, b.file_type, b.file_size, b.sheet_name, b.source, b.total_rows, b.imported_count, b.duplicate_count,
-  b.warning_count, b.invalid_count, b.status, b.created_at, b.created_by, u.username AS created_by_name, b.template_code, b.template_version, b.source_rows,
+  b.warning_count, b.invalid_count, b.status, b.created_at, b.created_by, u.username AS created_by_name, b.template_code, b.template_version, b.source_rows, b.group_id,
   (SELECT COUNT(*) FROM attendance_raw_records x WHERE x.batch_id = b.id AND x.attendance_record_id IS NOT NULL) AS record_count
   FROM attendance_file_imports b JOIN companies c ON c.id = b.company_id LEFT JOIN users u ON u.id = b.created_by`;
 
@@ -330,9 +368,14 @@ attendanceFileRoutes.post('/', requirePerm('attendance_file.import'), async (c) 
     if (again.created_by !== user.id) throw conflict('รหัสการนำเข้านี้ถูกใช้แล้ว');
     return c.json({ ...again, repeated: true });
   }
+  const groupAgain = await db.prepare('SELECT created_by FROM import_groups WHERE idempotency_key = ?').bind(key).first<{ created_by: number | null }>();
+  if (groupAgain) {
+    if (groupAgain.created_by !== user.id) throw conflict('รหัสการนำเข้านี้ถูกใช้แล้ว');
+    return c.json({ ...(await groupView(c, 'g.idempotency_key = ?', key, false)), repeated: true });
+  }
   const input = await readInput(c, body);
   const batchId = `(SELECT id FROM attendance_file_imports WHERE idempotency_key = ?1)`;
-  if (input.template === FEISHU_DAILY_TEMPLATE) return importDaily(c, key, input, batchId);
+  if (input.template === FEISHU_DAILY_TEMPLATE) return importDaily(c, key, input);
   const ev = await evaluate(db, user, input);
   if (ev.mappingProblems.length) throw badRequest(ev.mappingProblems.join(' · '));
   if (!ev.rows.length) throw badRequest('ไม่พบแถวข้อมูลในไฟล์');
@@ -340,7 +383,7 @@ attendanceFileRoutes.post('/', requirePerm('attendance_file.import'), async (c) 
   const stmts: D1PreparedStatement[] = [
     db.prepare(`INSERT INTO attendance_file_imports (company_id, file_name, file_type, file_sha256, file_size, sheet_name, source, idempotency_key, mapping_json, total_rows, status, created_by)
                 VALUES (?2, ?3, ?4, ?5, ?6, ?7, ?8, ?1, ?9, ?10, 'failed', ?11)`)
-      .bind(key, input.company.id, input.fileName, input.fileType, input.sha256, input.fileSize, input.sheetName, input.source, JSON.stringify(ev.mapping), ev.rows.length, user.id),
+      .bind(key, input.company!.id, input.fileName, input.fileType, input.sha256, input.fileSize, input.sheetName, input.source, JSON.stringify(ev.mapping), ev.rows.length, user.id),
   ];
   for (const part of chunks(ev.rows)) {
     const json = JSON.stringify(part.map((r) => ({
@@ -376,7 +419,7 @@ attendanceFileRoutes.post('/', requirePerm('attendance_file.import'), async (c) 
     WHERE idempotency_key = ?1`).bind(key));
   stmts.push(db.prepare(`UPDATE attendance_file_imports SET status = CASE WHEN imported_count = 0 THEN 'failed' WHEN imported_count = total_rows THEN 'completed' ELSE 'partial' END WHERE idempotency_key = ?1`).bind(key));
   stmts.push(db.prepare(`INSERT INTO attendance_file_mappings (company_id, header_signature, mapping_json, updated_by) VALUES (?1, ?2, ?3, ?4)
-    ON CONFLICT (company_id, header_signature) DO UPDATE SET mapping_json = excluded.mapping_json, updated_at = datetime('now'), updated_by = excluded.updated_by`).bind(input.company.id, ev.signature, JSON.stringify(ev.mapping), user.id));
+    ON CONFLICT (company_id, header_signature) DO UPDATE SET mapping_json = excluded.mapping_json, updated_at = datetime('now'), updated_by = excluded.updated_by`).bind(input.company!.id, ev.signature, JSON.stringify(ev.mapping), user.id));
   try {
     await db.batch(stmts);
   } catch (e) {
@@ -389,41 +432,111 @@ attendanceFileRoutes.post('/', requirePerm('attendance_file.import'), async (c) 
   const batch = await db.prepare(`${BATCH_SELECT} WHERE b.idempotency_key = ?`).bind(key).first<BatchRow>();
   if (!batch) throw new Error('import batch missing after commit');
   await audit(c, 'attendance_file.imported', 'attendance_file_imports', batch.id, {
-    company_id: input.company.id, file_name: input.fileName, file_type: input.fileType, total: s.total, imported: batch.imported_count, duplicate: batch.duplicate_count, invalid: batch.invalid_count, warning: batch.warning_count,
+    company_id: input.company!.id, file_name: input.fileName, file_type: input.fileType, total: s.total, imported: batch.imported_count, duplicate: batch.duplicate_count, invalid: batch.invalid_count, warning: batch.warning_count,
   });
   return c.json({ ...batch, repeated: false }, 201);
 });
 
-/** Confirmed import of a Feishu daily report: one atomic batch (see lib/feishu-daily-import.ts). */
-async function importDaily(c: Context<AppEnv>, key: string, input: FileInput, batchId: string) {
+const GROUP_SELECT = `SELECT g.id, g.company_mode, g.template_code, g.file_name, g.file_type, g.sheet_name, g.company_rule_json, g.total_rows, g.company_count, g.unassigned_count, g.created_at, g.created_by,
+  u.username AS created_by_name FROM import_groups g LEFT JOIN users u ON u.id = g.created_by`;
+
+/**
+ * A combined import: the group, the batches of the companies the user may see, and — only for its creator or an
+ * all-company user — the rows without a company.
+ */
+async function groupView(c: Context<AppEnv>, where: string, arg: string | number, withRows: boolean) {
   const db = c.env.DB;
   const user = currentUser(c);
-  const ev = await evaluateDaily(db, user, { company: input.company, grid: input.grid, headerRow: input.headerRow, mapping: input.dailyMapping }, sha256Of);
+  const g = await db.prepare(`${GROUP_SELECT} WHERE ${where}`).bind(arg).first<Record<string, unknown> & { id: number; created_by: number | null; company_rule_json: string | null }>();
+  if (!g) return null;
+  const scope = await companyScope(db, user);
+  const { results: batches } = await db
+    .prepare(`${BATCH_SELECT} WHERE b.group_id = ?1 AND (?2 IS NULL OR b.company_id IN (SELECT value FROM json_each(?2))) ORDER BY c.code`)
+    .bind(g.id, scope.scope === 'all' ? null : JSON.stringify(scope.items.map((x) => x.id)))
+    .all<BatchRow>();
+  const mayUnassigned = scope.scope === 'all' || g.created_by === user.id;
+  if (!batches.length && !mayUnassigned) return null;
+  const { company_rule_json, ...rest } = g;
+  const unassigned = withRows && mayUnassigned
+    ? (await db.prepare('SELECT row_no, source_ref, employee_code, work_date, company_value, issues_json FROM import_group_unassigned_rows WHERE group_id = ? ORDER BY row_no').bind(g.id).all<Record<string, unknown>>()).results
+        .map(({ issues_json, ...r }) => ({ ...r, issues: JSON.parse(String(issues_json)) }))
+    : null;
+  return { ...rest, company_rule: company_rule_json ? JSON.parse(company_rule_json) : null, batches, unassigned_rows: unassigned, unassigned_visible: mayUnassigned };
+}
+
+/**
+ * Confirmed import of a Feishu daily report (see lib/feishu-daily-import.ts). One company: one batch. A combined file:
+ * one group with one batch per company and the rows without a company kept apart. Everything is written in one D1
+ * batch (all or nothing for the database write); a row that is invalid never blocks the valid rows of any company.
+ */
+async function importDaily(c: Context<AppEnv>, key: string, input: FileInput) {
+  const db = c.env.DB;
+  const user = currentUser(c);
+  const ev = await evaluateDaily(db, user, dailyInput(input), sha256Of);
   if (ev.mappingProblems.length) throw badRequest(ev.mappingProblems.join(' · '));
   if (!ev.rows.length) throw badRequest('ไม่พบข้อมูลรายวันในไฟล์');
   const s = summarizeDaily(ev);
-  const stmts: D1PreparedStatement[] = [
-    db.prepare(`INSERT INTO attendance_file_imports (company_id, file_name, file_type, file_sha256, file_size, sheet_name, source, idempotency_key, mapping_json, total_rows, status, created_by, template_code, template_version, source_rows)
-                VALUES (?2, ?3, ?4, ?5, ?6, ?7, ?8, ?1, ?9, ?10, 'failed', ?11, ?12, 1, ?13)`)
-      .bind(key, input.company.id, input.fileName, input.fileType, input.sha256, input.fileSize, input.sheetName, input.source ?? 'Feishu', JSON.stringify(ev.mapping), ev.rows.length, user.id, FEISHU_DAILY_TEMPLATE, ev.sourceRows),
-    ...dailyStatements(db, key, batchId, ev, { companyId: input.company.id, fileName: input.fileName, userId: user.id }),
-  ];
+  const batchSql = (groupSql: string) => `INSERT INTO attendance_file_imports (company_id, file_name, file_type, file_sha256, file_size, sheet_name, source, idempotency_key, mapping_json, total_rows, status, created_by, template_code, template_version, source_rows, group_id)
+    VALUES (?2, ?3, ?4, ?5, ?6, ?7, ?8, ?1, ?9, ?10, 'failed', ?11, ?12, 1, ?13, ${groupSql})`;
+  const batchRef = '(SELECT id FROM attendance_file_imports WHERE idempotency_key = ?1)';
+  const stmts: D1PreparedStatement[] = [];
+  const parts: Array<{ companyId: number; key: string; rows: EvaluatedDailyRow[] }> = [];
+  if (input.mode === 'single') {
+    parts.push({ companyId: input.company!.id, key, rows: ev.rows });
+    stmts.push(db.prepare(batchSql('NULL')).bind(key, input.company!.id, input.fileName, input.fileType, input.sha256, input.fileSize, input.sheetName, input.source ?? 'Feishu', JSON.stringify(ev.mapping), ev.rows.length, user.id, FEISHU_DAILY_TEMPLATE, ev.sourceRows));
+    stmts.push(...dailyStatements(db, key, batchRef, ev.rows, { companyId: input.company!.id, fileName: input.fileName, userId: user.id, remember: { signature: ev.signature, mapping: ev.mapping } }));
+  } else {
+    const companies = perCompany(ev, input.companies);
+    const unassigned = ev.rows.filter((r) => r.company_id === null);
+    stmts.push(db.prepare(`INSERT INTO import_groups (import_type, company_mode, template_code, file_name, file_type, file_sha256, file_size, sheet_name, idempotency_key, company_rule_json, total_rows, company_count, unassigned_count, created_by)
+      VALUES ('attendance', 'combined', ?2, ?3, ?4, ?5, ?6, ?7, ?1, ?8, ?9, ?10, ?11, ?12)`)
+      .bind(key, FEISHU_DAILY_TEMPLATE, input.fileName, input.fileType, input.sha256, input.fileSize, input.sheetName, JSON.stringify(input.rule), ev.rows.length, companies.length, unassigned.length, user.id));
+    for (const co of companies) {
+      const bkey = `${key}-c${co.id}`;
+      const rows = ev.rows.filter((r) => r.company_id === co.id);
+      parts.push({ companyId: co.id, key: bkey, rows });
+      stmts.push(db.prepare(batchSql('(SELECT id FROM import_groups WHERE idempotency_key = ?14)'))
+        .bind(bkey, co.id, input.fileName, input.fileType, input.sha256, input.fileSize, input.sheetName, input.source ?? 'Feishu', JSON.stringify(ev.mapping), rows.length, user.id, FEISHU_DAILY_TEMPLATE, ev.sourceRows, key));
+      stmts.push(...dailyStatements(db, bkey, batchRef, rows, { companyId: co.id, fileName: input.fileName, userId: user.id, remember: null }));
+    }
+    for (const part of chunks(unassigned)) {
+      const json = JSON.stringify(part.map((r) => ({
+        r: r.row_no, ref: r.source_ref, c: r.employee_code, d: r.work_date, cv: r.company_value, is: JSON.stringify(r.issues),
+        raw: JSON.stringify({ cell: r.cell, name: r.employee_name, department: r.department, position: r.position, group: r.group, shift: r.shift, company_value: r.company_value, in: r.day.clock_in, out: r.day.clock_out }),
+      })));
+      stmts.push(db.prepare(`INSERT INTO import_group_unassigned_rows (group_id, row_no, source_ref, employee_code, work_date, company_value, raw_json, issues_json)
+        SELECT (SELECT id FROM import_groups WHERE idempotency_key = ?1), json_extract(value, '$.r'), json_extract(value, '$.ref'), json_extract(value, '$.c'), json_extract(value, '$.d'), json_extract(value, '$.cv'),
+               json_extract(value, '$.raw'), json_extract(value, '$.is') FROM json_each(?2)`).bind(key, json));
+    }
+    stmts.push(db.prepare(`INSERT INTO import_company_rules (import_type, template_code, header_signature, mapping_json, company_rule_json, updated_by) VALUES ('attendance', ?1, ?2, ?3, ?4, ?5)
+      ON CONFLICT (import_type, template_code, header_signature) DO UPDATE SET mapping_json = excluded.mapping_json, company_rule_json = excluded.company_rule_json, updated_at = datetime('now'), updated_by = excluded.updated_by`)
+      .bind(FEISHU_DAILY_TEMPLATE, ev.signature, JSON.stringify(ev.mapping), JSON.stringify(input.rule), user.id));
+  }
   try {
     await db.batch(stmts);
   } catch (e) {
     if (String(e).includes('UNIQUE') && String(e).includes('idempotency_key')) {
-      const row = await db.prepare(`${BATCH_SELECT} WHERE b.idempotency_key = ?`).bind(key).first<BatchRow>();
-      if (row) return c.json({ ...row, repeated: true });
+      const again = input.mode === 'single' ? await db.prepare(`${BATCH_SELECT} WHERE b.idempotency_key = ?`).bind(key).first<BatchRow>() : await groupView(c, 'g.idempotency_key = ?', key, false);
+      if (again) return c.json({ ...again, repeated: true });
     }
     throw e;
   }
-  const batch = await db.prepare(`${BATCH_SELECT} WHERE b.idempotency_key = ?`).bind(key).first<BatchRow>();
-  if (!batch) throw new Error('import batch missing after commit');
-  await audit(c, 'attendance_file.imported', 'attendance_file_imports', batch.id, {
-    company_id: input.company.id, template: FEISHU_DAILY_TEMPLATE, file_name: input.fileName, sheet_name: input.sheetName, file_type: input.fileType, source_rows: ev.sourceRows,
-    total: s.total, imported: batch.imported_count, records: batch.record_count, duplicate: batch.duplicate_count, invalid: batch.invalid_count, warning: batch.warning_count,
+  const batches: BatchRow[] = [];
+  for (const p of parts) {
+    const b = await db.prepare(`${BATCH_SELECT} WHERE b.idempotency_key = ?`).bind(p.key).first<BatchRow>();
+    if (!b) throw new Error('import batch missing after commit');
+    batches.push(b);
+    await audit(c, 'attendance_file.imported', 'attendance_file_imports', b.id, {
+      company_id: p.companyId, template: FEISHU_DAILY_TEMPLATE, company_mode: input.mode, file_name: input.fileName, sheet_name: input.sheetName, file_type: input.fileType, source_rows: ev.sourceRows,
+      total: p.rows.length, imported: b.imported_count, records: b.record_count, duplicate: b.duplicate_count, invalid: b.invalid_count, warning: b.warning_count,
+    });
+  }
+  if (input.mode === 'single') return c.json({ ...batches[0]!, repeated: false }, 201);
+  const group = await groupView(c, 'g.idempotency_key = ?', key, false);
+  await audit(c, 'attendance_file.group_imported', 'import_groups', Number(group!.id), {
+    file_name: input.fileName, sheet_name: input.sheetName, company_rule_column: input.rule?.column ?? null, companies: batches.map((b) => b.company_id), total: s.total, unassigned: s.unassigned,
   });
-  return c.json({ ...batch, repeated: false }, 201);
+  return c.json({ ...group, repeated: false }, 201);
 }
 
 async function visibleBatch(c: Context<AppEnv>, id: number): Promise<BatchRow> {
@@ -433,6 +546,13 @@ async function visibleBatch(c: Context<AppEnv>, id: number): Promise<BatchRow> {
   if (scope.scope !== 'all' && !scope.items.some((x) => x.id === b.company_id)) throw notFound('ไม่พบประวัติการนำเข้า');
   return b;
 }
+
+/** A combined import: its batches (companies in the user's scope) and, for its creator or an all-company user, the rows without a company. */
+attendanceFileRoutes.get('/groups/:id', requirePerm('attendance_file.view'), async (c) => {
+  const g = await groupView(c, 'g.id = ?', intParam(c.req.param('id')), true);
+  if (!g) throw notFound('ไม่พบประวัติการนำเข้า');
+  return c.json(g);
+});
 
 attendanceFileRoutes.get('/', requirePerm('attendance_file.view'), async (c) => {
   const user = currentUser(c);

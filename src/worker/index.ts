@@ -16,6 +16,7 @@ import { holidayRoutes } from './routes/holidays';
 import { attendanceFileRoutes } from './routes/attendance-files';
 import { shiftRoutes } from './routes/shifts';
 import { requestImportRoutes } from './routes/request-imports';
+import { attendanceExemptionRoutes } from './routes/attendance-exemptions';
 import { bangkokNow } from './lib/time';
 import { runProbationJob } from './lib/probation-job';
 
@@ -56,6 +57,7 @@ app.route('/api/attendance-files', attendanceFileRoutes);
 app.route('/api/shifts', shiftRoutes);
 app.route('/api/leave-imports', requestImportRoutes('leave'));
 app.route('/api/overtime-imports', requestImportRoutes('overtime'));
+app.route('/api/attendance-exemptions', attendanceExemptionRoutes);
 app.route('/api/org-design', orgRoutes);
 app.route('/api/employees', avatarRoutes);
 app.route('/api/holidays', holidayRoutes);
