@@ -64,7 +64,7 @@ async function calendarOr404(c: Context<AppEnv>, id: number, write: boolean): Pr
 }
 
 const HOLIDAY_SELECT = `SELECT h.id, h.calendar_id, cal.code AS calendar_code, cal.country_code, cal.company_id, co.name AS company, h.holiday_date, h.year, h.name, h.name_en,
-  h.holiday_type, h.status, h.origin, h.verification, h.source_reference, h.source_url, h.region, h.note, h.created_by, h.updated_at, h.approved_at,
+  h.holiday_type, h.status, h.origin, h.verification, h.source_reference, h.source_url, h.region, h.note, h.created_by, h.content_updated_by, h.updated_at, h.approved_at,
   (SELECT u.username FROM users u WHERE u.id = h.approved_by) AS approved_by_name,
   (SELECT s.original_holiday_id FROM holiday_substitutions s WHERE s.substitute_holiday_id = h.id) AS substitute_for,
   (SELECT COUNT(*) FROM holiday_substitutions s JOIN holidays x ON x.id = s.substitute_holiday_id WHERE s.original_holiday_id = h.id AND x.status <> 'inactive') AS substituted,
@@ -390,7 +390,7 @@ holidayRoutes.post('/pay-rules/:id/deactivate', requirePerm(P.delete), async (c)
 const WORK_SELECT = `SELECT w.id, w.employee_id, e.emp_code, e.first_name || ' ' || e.last_name AS employee, e.company_id, e.employment_type, w.holiday_id, h.name AS holiday_name,
   h.holiday_type, w.work_date, w.normal_hours, w.ot_hours, w.evidence_source, w.attendance_record_id, w.attendance_import_row_id, w.evidence_ref, w.excluded_from_regular_ot,
   w.status, w.note, w.review_reason, (SELECT u.username FROM users u WHERE u.id = w.reviewed_by) AS reviewer, w.reviewed_at, w.payroll_period_id,
-  (SELECT p.code FROM payroll_periods p WHERE p.id = w.payroll_period_id) AS payroll_period, w.created_by, w.updated_at
+  (SELECT p.code FROM payroll_periods p WHERE p.id = w.payroll_period_id) AS payroll_period, w.created_by, w.content_updated_by, w.updated_at
   FROM holiday_work_records w JOIN employees e ON e.id = w.employee_id JOIN holidays h ON h.id = w.holiday_id`;
 
 /** Users without organisation-wide employee access only see their own records. */
@@ -535,9 +535,9 @@ holidayRoutes.put('/work/:id', requirePerm(P.update), async (c) => {
   await assertPeriodOpen(c.env.DB, w.companyId, w.date);
   const res = await c.env.DB.prepare(
     `UPDATE holiday_work_records SET normal_hours = ?, ot_hours = ?, evidence_source = ?, attendance_record_id = ?, attendance_import_row_id = ?, evidence_ref = ?, note = ?,
-       updated_at = datetime('now'), updated_by = ? WHERE id = ? AND status = 'pending' AND updated_at = ?`,
+       content_updated_by = ?, updated_at = datetime('now'), updated_by = ? WHERE id = ? AND status = 'pending' AND updated_at = ?`,
   )
-    .bind(w.normal, w.ot, w.source, w.attendanceRecordId, w.importRowId, w.evidenceRef, w.note, user.id, cur.id, cur.updated_at)
+    .bind(w.normal, w.ot, w.source, w.attendanceRecordId, w.importRowId, w.evidenceRef, w.note, user.id, user.id, cur.id, cur.updated_at)
     .run();
   if (!res.meta.changes) throw conflict('รายการนี้ถูกแก้ไขหรือเปลี่ยนสถานะไปแล้ว กรุณาโหลดใหม่');
   await audit(c, 'holiday_work.updated', 'holiday_work_records', cur.id, { from: { normal: cur.normal_hours, ot: cur.ot_hours, source: cur.evidence_source }, to: { normal: w.normal, ot: w.ot, source: w.source } });
@@ -550,7 +550,7 @@ holidayRoutes.post('/work/:id/approve', requirePerm(P.approve), async (c) => {
   const w = await workOr404(c, intParam(c.req.param('id')));
   const body = await readJson(c);
   if (w.status !== 'pending') throw conflict('อนุมัติได้เฉพาะรายการที่รออนุมัติ');
-  const ap = checkMakerChecker(user, [w.created_by], approvalNote(body, 'reason') ?? approvalNote(body), 'ผู้อนุมัติต้องไม่ใช่ผู้บันทึก (Segregation of duties)');
+  const ap = checkMakerChecker(user, [w.created_by, w.content_updated_by ?? w.created_by], approvalNote(body, 'reason') ?? approvalNote(body), 'ผู้อนุมัติต้องไม่ใช่ผู้บันทึกหรือผู้แก้ไขรายการ (Segregation of duties)');
   if (body.excluded_from_regular_ot !== true) throw badRequest('ต้องยืนยันว่าชั่วโมงนี้ไม่ได้รวมอยู่ใน OT ปกติที่ยืนยันแล้ว (excluded_from_regular_ot = true) เพื่อป้องกันการจ่ายซ้ำ');
   const ot = await db.prepare("SELECT id FROM overtime_requests WHERE employee_id = ? AND work_date = ? AND status = 'approved' LIMIT 1").bind(w.employee_id, w.work_date).first<{ id: number }>();
   if (ot) throw conflict(`มีคำขอ OT ที่อนุมัติแล้วของวันเดียวกัน (OT-${ot.id}) ต้องยกเลิกคำขอนั้นหรือปฏิเสธรายการนี้ (ป้องกันการจ่ายซ้ำ)`);
@@ -563,7 +563,7 @@ holidayRoutes.post('/work/:id/approve', requirePerm(P.approve), async (c) => {
     .bind(user.id, str(body, 'reason', { max: 500 }), w.id)
     .run();
   if (!res.meta.changes) throw conflict('รายการนี้ถูกอนุมัติ/เปลี่ยนสถานะไปแล้ว หรือวันหยุดถูกปิดใช้งาน');
-  await audit(c, 'holiday_work.approved', 'holiday_work_records', w.id, { employee: w.employee_id, date: w.work_date, normal: w.normal_hours, ot: w.ot_hours, source: w.evidence_source, created_by: w.created_by, approved_by: user.id, self_approved: ap.selfApproved, note: ap.note });
+  await audit(c, 'holiday_work.approved', 'holiday_work_records', w.id, { employee: w.employee_id, date: w.work_date, normal: w.normal_hours, ot: w.ot_hours, source: w.evidence_source, created_by: w.created_by, content_updated_by: w.content_updated_by ?? w.created_by, approved_by: user.id, self_approved: ap.selfApproved, note: ap.note });
   return c.json(await workOr404(c, w.id));
 });
 
@@ -724,10 +724,10 @@ holidayRoutes.put('/:id', requirePerm(P.update), async (c) => {
   const keys = Object.keys(next);
   try {
     const res = await c.env.DB.prepare(
-      `UPDATE holidays SET ${keys.map((k) => `${k} = ?`).join(', ')}, updated_at = datetime('now'), updated_by = ?
+      `UPDATE holidays SET ${keys.map((k) => `${k} = ?`).join(', ')}, content_updated_by = ?, updated_at = datetime('now'), updated_by = ?
        WHERE id = ? AND updated_at = ? AND (? = 0 OR NOT EXISTS (SELECT 1 FROM holiday_work_records w WHERE w.holiday_id = holidays.id))`,
     )
-      .bind(...keys.map((k) => next[k]), user.id, h.id, h.updated_at, touchesPayroll || touchesSource ? 1 : 0)
+      .bind(...keys.map((k) => next[k]), user.id, user.id, h.id, h.updated_at, touchesPayroll || touchesSource ? 1 : 0)
       .run();
     if (!res.meta.changes) throw conflict('วันหยุดนี้ถูกแก้ไขหรือถูกอ้างอิงไปแล้ว กรุณาโหลดใหม่');
   } catch (e) {
@@ -761,12 +761,12 @@ holidayRoutes.post('/:id/approve', requirePerm(P.approve), async (c) => {
   const h = await holidayOr404(c, intParam(c.req.param('id')), true);
   if (h.status !== 'draft') throw conflict('อนุมัติได้เฉพาะวันหยุดที่เป็นร่าง');
   if (h.verification !== 'verified') throw conflict('ต้องตรวจสอบแหล่งที่มา (ประกาศอย่างเป็นทางการ) ก่อนอนุมัติ');
-  const ap = checkMakerChecker(user, [h.created_by], approvalNote(await approvalBody(c)), 'ผู้อนุมัติต้องไม่ใช่ผู้สร้าง / ผู้นำเข้าวันหยุด (Segregation of duties)');
+  const ap = checkMakerChecker(user, [h.created_by, h.content_updated_by ?? h.created_by], approvalNote(await approvalBody(c)), 'ผู้อนุมัติต้องไม่ใช่ผู้สร้าง ผู้นำเข้า หรือผู้แก้ไขวันหยุด (Segregation of duties)');
   const res = await c.env.DB.prepare("UPDATE holidays SET status = 'approved', approved_by = ?, approved_at = datetime('now'), updated_at = datetime('now'), updated_by = ? WHERE id = ? AND status = 'draft' AND verification = 'verified' AND updated_at = ?")
     .bind(user.id, user.id, h.id, h.updated_at)
     .run();
   if (!res.meta.changes) throw conflict('วันหยุดนี้ถูกแก้ไขหรือเปลี่ยนสถานะไปแล้ว กรุณาโหลดใหม่');
-  await audit(c, 'holiday.approved', 'holidays', h.id, { date: h.holiday_date, type: h.holiday_type, calendar: h.calendar_code, source_reference: h.source_reference, created_by: h.created_by, approved_by: user.id, self_approved: ap.selfApproved, note: ap.note });
+  await audit(c, 'holiday.approved', 'holidays', h.id, { date: h.holiday_date, type: h.holiday_type, calendar: h.calendar_code, source_reference: h.source_reference, created_by: h.created_by, content_updated_by: h.content_updated_by ?? h.created_by, approved_by: user.id, self_approved: ap.selfApproved, note: ap.note });
   return c.json(await holidayOr404(c, h.id, false));
 });
 

@@ -54,7 +54,12 @@ export async function renderPayroll(main: HTMLElement): Promise<void> {
                 p.status === 'calculated' && !forced(p) && can('payroll.calculate') ? h('button', { class: 'btn small', onclick: () => void act(p, 'reopen', 'เปิดแก้ไข (กลับเป็นร่าง)') }, 'เปิดแก้ไข') : null,
                 (p.status === 'draft' || p.status === 'calculated') && forced(p) && adminCan(PERIOD_ADMIN.forceRecalculate) ? h('button', { class: 'btn small', onclick: () => void adminDialog(p, 'calculate', reload) }, 'คำนวณใหม่ (Super Admin)') : null,
                 p.status === 'calculated' && forced(p) && adminCan(PERIOD_ADMIN.forceRecalculate) ? h('button', { class: 'btn small', onclick: () => void adminDialog(p, 'revert', reload) }, 'เปิดแก้ไข (Super Admin)') : null,
-                p.status === 'calculated' && can('payroll.approve') ? h('button', { class: 'btn small primary', onclick: () => void act(p, 'approve', 'อนุมัติ') }, 'อนุมัติ') : null,
+                p.status === 'calculated' && can('payroll.approve')
+                  // maker-checker (enforced by the API): the calculator does not approve, except a Super Admin with a note
+                  ? p.calculated_by === state.meta?.me.id && !isSuperAdmin()
+                    ? h('span', { class: 'muted small maker-note' }, 'คุณเป็นผู้คำนวณงวดนี้ ต้องให้ผู้อนุมัติคนอื่นอนุมัติ')
+                    : h('button', { class: 'btn small primary', onclick: () => void act(p, 'approve', 'อนุมัติ') }, 'อนุมัติ')
+                  : null,
                 can('payroll_preview.view') ? link(`/payroll/preview?period_id=${p.id}`, 'Preview', { class: 'btn small' }) : null,
                 p.status === 'approved' && can('payroll.publish') ? h('button', { class: 'btn small primary', onclick: () => void act(p, 'publish', 'เผยแพร่') }, 'เผยแพร่') : null,
                 p.employees ? link(`/payroll/payslips?period_id=${p.id}`, 'ดูสลิป', { class: 'btn small' }) : null,

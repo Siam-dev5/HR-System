@@ -30,10 +30,14 @@ Notes:
 
 `src/worker/lib/approval.ts` applies one rule everywhere a record is approved:
 
-- **Holidays** (`/api/holidays/:id/approve`), **holiday pay rules** (`/pay-rules/:id/approve`) and **holiday work**
-  (`/work/:id/approve`): the creator does not approve.
-- **Payroll** (`/api/payroll/periods/:id/approve`): the user who calculated the period does not approve, when the
-  setting `payroll.require_separate_approver` is on. The setting is unchanged by this work; see the release checklist.
+- **Holidays** (`/api/holidays/:id/approve`) and **holiday work** (`/work/:id/approve`): neither the creator nor the
+  last content editor (`content_updated_by`, migration 0015; the creator when nobody has edited since) approves. A
+  content edit records its editor; source verification, approval and deactivation do not.
+- **Holiday pay rules** (`/pay-rules/:id/approve`): the creator does not approve (rules have no edit endpoint).
+- **Payroll** (`/api/payroll/periods/:id/approve`): the user who calculated the period does not approve — always.
+  The old setting `payroll.require_separate_approver` is no longer read and cannot switch this check off.
+- **Publish** (`/api/payroll/periods/:id/publish`): only an approved period; the `payroll.published` audit records
+  `calculated_by`, `approved_by`, `published_by` and `published_at`.
 - **Workflow requests** (`/api/workflow/:id/decide`): the requester, and the employee the request is about, do not
   decide it.
 
@@ -82,7 +86,7 @@ they created, calculated or requested.
      git-ignored credentials file.
 5. **Link every manager account to its employee record** before relying on workflow approvals. Without a link the
    manager approves nothing.
-6. **Review the maker-checker configuration.** Check `payroll.require_separate_approver`: when it is off, a user with
-   both `payroll.calculate` and `payroll.approve` can approve a period they calculated. Changing it is a separate,
-   approved settings change.
+6. **Maker-checker configuration.** Payroll maker-checker no longer depends on `payroll.require_separate_approver`
+   (the setting is kept for compatibility but ignored). Apply migration `0015` before deploying the Worker that reads
+   `content_updated_by`.
 7. **Draft records waiting for a Super Admin's own approval** (e.g. holidays) can be approved after deploy, with a note.

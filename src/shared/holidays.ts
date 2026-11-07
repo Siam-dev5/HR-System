@@ -51,6 +51,8 @@ export interface HolidayRow {
   /** a traditional / labour holiday on a weekly rest day without a substitute day yet */
   needs_substitute?: boolean;
   created_by: number | null;
+  /** last user who changed the content (null: none since creation — the creator) */
+  content_updated_by?: number | null;
   approved_by_name: string | null;
   approved_at: string | null;
 }
@@ -109,6 +111,8 @@ export interface HolidayWorkRow {
   payroll_period_id: number | null;
   payroll_period: string | null;
   created_by: number | null;
+  /** last user who changed the content (null: none since creation — the creator) */
+  content_updated_by?: number | null;
 }
 
 export interface HolidayListResponse {
