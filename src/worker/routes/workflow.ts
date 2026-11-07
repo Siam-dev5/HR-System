@@ -2,7 +2,7 @@ import { Hono } from 'hono';
 import type { Context } from 'hono';
 import type { AppEnv, AuthUser } from '../env';
 import type { CrudModule } from '../../shared/modules';
-import { crudModule } from '../../shared/modules';
+import { crudModule, isSuperAdmin } from '../../shared/modules';
 import type { WorkflowRequestRow } from '../../shared/types';
 import { badRequest, conflict, forbidden, intParam, notFound, readJson, str } from '../lib/http';
 import { audit, notify } from '../lib/audit';
@@ -78,11 +78,32 @@ interface RequestRow {
   requester: string;
 }
 
-function canApproveStep(user: AuthUser, req: RequestRow, step: StepDef | undefined): boolean {
-  if (req.requester_user_id === user.id) return false; // no self-approval
-  if (req.employee_id !== null && req.employee_id === user.employeeId) return false;
+/** The request is the approver's own (they asked for it, or it is about their own employee record). */
+const ownRequest = (user: AuthUser, req: RequestRow) => req.requester_user_id === user.id || (req.employee_id !== null && req.employee_id === user.employeeId);
+
+/**
+ * Employees in the user's reporting line (direct and indirect reports through employees.manager_id). A role approver
+ * such as the HR Manager approves only requests of these employees; a user without an employee record has no team.
+ */
+async function teamOf(db: D1Database, user: AuthUser): Promise<ReadonlySet<number>> {
+  if (user.employeeId === null) return new Set();
+  const { results } = await db
+    .prepare(
+      `WITH RECURSIVE team(id, depth) AS (
+         SELECT id, 1 FROM employees WHERE manager_id = ?1
+         UNION SELECT e.id, t.depth + 1 FROM employees e JOIN team t ON e.manager_id = t.id WHERE t.depth < 10
+       ) SELECT DISTINCT id FROM team WHERE id <> ?1`,
+    )
+    .bind(user.employeeId)
+    .all<{ id: number }>();
+  return new Set(results.map((r) => r.id));
+}
+
+function canApproveStep(user: AuthUser, req: RequestRow, step: StepDef | undefined, team: ReadonlySet<number>): boolean {
+  // no self-approval — except a Super Admin, the highest authority (by role, never inherited through a permission)
+  if (ownRequest(user, req) && !isSuperAdmin(user.roles)) return false;
   if (can(user, 'workflow.approve_any')) return true;
-  return !!step && can(user, 'workflow.approve') && user.roles.includes(step.role_code);
+  return !!step && can(user, 'workflow.approve') && user.roles.includes(step.role_code) && req.employee_id !== null && team.has(req.employee_id);
 }
 
 function toRow(r: RequestRow, stepDefs: Map<string, StepDef[]>): WorkflowRequestRow {
@@ -113,7 +134,8 @@ workflowRoutes.get('/inbox', async (c) => {
   const defs = new Map<string, StepDef[]>();
   for (const t of ['leave', 'overtime', 'time_correction']) defs.set(t, await steps(c.env.DB, t));
   const { results: pending } = await c.env.DB.prepare(`${REQUEST_SELECT} WHERE w.status = 'pending' ORDER BY w.created_at`).all<RequestRow>();
-  const toApprove = pending.filter((r) => canApproveStep(user, r, defs.get(r.type)?.find((s) => s.step === r.current_step)));
+  const team = await teamOf(c.env.DB, user);
+  const toApprove = pending.filter((r) => canApproveStep(user, r, defs.get(r.type)?.find((s) => s.step === r.current_step), team));
   const { results: mine } = await c.env.DB.prepare(`${REQUEST_SELECT} WHERE w.requester_user_id = ? ORDER BY w.created_at DESC LIMIT 100`).bind(user.id).all<RequestRow>();
   return c.json({ toApprove: toApprove.map((r) => toRow(r, defs)), mine: mine.map((r) => toRow(r, defs)) });
 });
@@ -130,7 +152,12 @@ workflowRoutes.post('/:id/decide', async (c) => {
   if (req.status !== 'pending') throw conflict('คำขอนี้ดำเนินการแล้ว');
   const defs = await steps(c.env.DB, req.type);
   const step = defs.find((s) => s.step === req.current_step);
-  if (!canApproveStep(user, req, step)) throw forbidden(req.requester_user_id === user.id ? 'ไม่สามารถอนุมัติคำขอของตนเองได้' : 'คุณไม่ใช่ผู้อนุมัติของขั้นนี้');
+  if (!canApproveStep(user, req, step, await teamOf(c.env.DB, user))) {
+    throw forbidden(ownRequest(user, req) ? 'ไม่สามารถอนุมัติคำขอของตนเองได้' : 'คุณไม่ใช่ผู้อนุมัติของขั้นนี้ หรือผู้ขอไม่ได้อยู่ในทีมของคุณ');
+  }
+  // a Super Admin deciding their own request must leave a note (kept with the decision and in the audit)
+  const selfDecided = ownRequest(user, req);
+  if (selfDecided && (!comment || comment.trim().length < 3)) throw badRequest('Super Admin ดำเนินการคำขอของตนเอง ต้องระบุหมายเหตุ (อย่างน้อย 3 ตัวอักษร)');
 
   const next = defs.find((s) => s.step > req.current_step);
   const final = decision === 'rejected' || !next;
@@ -177,6 +204,6 @@ workflowRoutes.post('/:id/decide', async (c) => {
   } else {
     await notifyRole(db, next.role_code, req.requester_user_id, 'มีคำขอรออนุมัติ', req.summary);
   }
-  await audit(c, `workflow.${decision}`, req.module_key, req.ref_id, { requestId: id, step: req.current_step, final });
+  await audit(c, `workflow.${decision}`, req.module_key, req.ref_id, { requestId: id, step: req.current_step, final, requester: req.requester_user_id, approver: user.id, self_approved: selfDecided, comment });
   return c.json({ ok: true, status: final ? decision : 'pending', currentStep: final ? req.current_step : next.step });
 });

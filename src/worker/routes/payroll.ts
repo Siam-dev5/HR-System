@@ -1,4 +1,5 @@
 import { Hono } from 'hono';
+import { approvalBody, approvalNote, checkMakerChecker } from '../lib/approval';
 import type { Context } from 'hono';
 import type { AppEnv } from '../env';
 import type { CompanyOption, DeletedPeriod, PayrollPeriod, PayrollPreviewResponse, PayslipCalc, PayslipDetail, PayslipSummary, PayslipYtd, PeriodImpact, PreviewIssue, YtdTotals } from '../../shared/types';
@@ -195,15 +196,17 @@ payrollRoutes.post('/periods/:id/approve', requirePerm('payroll.approve'), async
   const p = await period(db, intParam(c.req.param('id')));
   if (p.status !== 'calculated') throw conflict('อนุมัติได้เฉพาะงวดที่คำนวณแล้ว');
   if (!p.employees) throw conflict('งวดนี้ไม่มีสลิปเงินเดือน');
-  if (settingBool(await loadSettings(db), 'payroll.require_separate_approver', true) && p.calculated_by === user.id) {
-    throw forbidden('ผู้อนุมัติต้องไม่ใช่ผู้คำนวณงวดเงินเดือน (Segregation of duties)');
-  }
+  const note = approvalNote(await approvalBody(c));
+  const separate = settingBool(await loadSettings(db), 'payroll.require_separate_approver', true);
+  const ap = separate
+    ? checkMakerChecker(user, [p.calculated_by], note, 'ผู้อนุมัติต้องไม่ใช่ผู้คำนวณงวดเงินเดือน (Segregation of duties)')
+    : { selfApproved: p.calculated_by === user.id, note };
   const pending = await pendingOt(db, p.id);
   if (pending) throw conflict(`มี OT จาก Feishu รอ HR ตรวจสอบ ${pending} รายการ ต้องยืนยันหรือปฏิเสธก่อนอนุมัติ`);
   if (p.kind === 'mid_month') await assertCalculable(db, p);
   const done = await db.prepare("UPDATE payroll_periods SET status = 'approved', reopened_from = NULL, approved_by = ?, approved_at = datetime('now'), updated_at = datetime('now'), updated_by = ? WHERE id = ? AND status = 'calculated' AND deleted_at IS NULL").bind(user.id, user.id, p.id).run();
   if (!done.meta.changes) throw conflict('งวดนี้ถูกอนุมัติหรือเปลี่ยนสถานะไปแล้ว');
-  await audit(c, 'payroll.approved', 'payroll_periods', p.id, p.reopened_from ? { reopenedFrom: p.reopened_from } : undefined);
+  await audit(c, 'payroll.approved', 'payroll_periods', p.id, { calculated_by: p.calculated_by, approved_by: user.id, self_approved: ap.selfApproved, note: ap.note, ...(p.reopened_from ? { reopenedFrom: p.reopened_from } : {}) });
   return c.json(await period(db, p.id));
 });
 
