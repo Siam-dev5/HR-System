@@ -250,7 +250,7 @@ input, select, textarea {
 }
 textarea { line-height: 1.5; }
 :is(input, textarea):not(.auth *)::placeholder { color: var(--muted); opacity: 0.85; }
-input[type='checkbox'], input[type='radio'] { width: auto; min-height: 0; accent-color: var(--primary); }
+input[type='checkbox'], input[type='radio'] { width: auto; min-height: 0; padding: 0; accent-color: var(--primary); }
 input[type='file'] { padding: 0.35rem 0.5rem; }
 :is(input, select, textarea):hover:not(:disabled):not(:focus):not(.auth *) { border-color: color-mix(in srgb, var(--primary) 45%, var(--border-strong)); }
 input:focus, select:focus, textarea:focus { outline: 2px solid transparent; border-color: var(--primary); box-shadow: var(--focus-ring); }
@@ -892,4 +892,21 @@ tr.is-future td { color: var(--primary); }
 .appr-rejected, .appr-cancelled { color: var(--danger); border-color: color-mix(in srgb, var(--danger) 30%, transparent); background: color-mix(in srgb, var(--danger) 9%, var(--surface)); }
 @media (max-width: 600px) {
   .sheet-options { grid-template-columns: 1fr; }
+}
+
+/* ---- Feishu import V1.1: company step, per-company results, attendance exemption ---- */
+.company-mode { display: flex; flex-wrap: wrap; gap: 0.5rem 1.25rem; margin-bottom: 0.75rem; }
+.company-mode legend { font-weight: 600; padding: 0 0.25rem; }
+.company-values select { width: 100%; max-width: 22rem; }
+.company-values tr.is-unassigned td:first-child, .company-summary tr.is-unassigned td:first-child { color: var(--danger); }
+.detected-companies { margin: 0.25rem 0 0.75rem; padding-left: 1.1rem; }
+.exempt-note { margin: 0.25rem 0; }
+.exemption-panel { border: 1px solid var(--border); border-radius: var(--radius-sm); padding: 0.65rem 0.8rem; background: var(--surface-2); }
+.exemption-head { margin-bottom: 0.35rem; }
+.exemption-status { margin: 0 0 0.5rem; }
+.exemption-add { display: grid; grid-template-columns: repeat(auto-fit, minmax(10rem, 1fr)); gap: 0.5rem; align-items: end; margin-top: 0.6rem; }
+.exemption-add .exemption-reason { grid-column: span 2; }
+.exemption-table td.actions { white-space: nowrap; }
+@media (max-width: 600px) {
+  .exemption-add .exemption-reason { grid-column: auto; }
 }

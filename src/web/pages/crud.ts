@@ -3,8 +3,9 @@ import type { CrudMeta, ListResponse, LookupOption, Row } from '../../shared/typ
 import { del, get, post, put, qs, ApiFailure } from '../api';
 import { h, mount, modal, toast, confirmDialog, loading, errorBox, fmtDate, fmtMoney, fmtNum } from '../dom';
 import { optionLabel } from '../labels';
-import { basePath, state } from '../app';
+import { basePath, can, state } from '../app';
 import { avatarPanel } from '../avatar';
+import { exemptionPanel } from './exemptions';
 import { formatTenure, probationTimeline, tenure, tenureEnd } from '../../shared/probation';
 
 const lookupCache = new Map<string, Promise<LookupOption[]>>();
@@ -227,6 +228,8 @@ async function openForm(m: CrudMeta, row: Row | null, onSaved: () => void, asOf?
     if (timeline) fields.unshift(timeline);
   }
   if (m.key === 'employees' && row) fields.unshift(avatarPanel({ id: Number(row.id), name: `${row.first_name ?? ''} ${row.last_name ?? ''}`.trim() }));
+  // attendance exemption: its own API (outside collect()), shown to users who may view it
+  if (m.key === 'employees' && row && can('attendance_exemption.view')) fields.push(exemptionPanel(Number(row.id)));
   const msg = h('div', { class: 'form-msg', role: 'alert' });
   const collect = (): Record<string, unknown> => {
     const out: Record<string, unknown> = {};
