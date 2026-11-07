@@ -10,7 +10,21 @@ import { parseCsv, readXlsx, type Cell } from '../../shared/xlsx';
 import { get, post, put, del, qs } from '../api';
 import { h, mount, loading, errorBox, fmtDate, fmtNum, modal, toast, confirmDialog, promptDialog, type Child } from '../dom';
 import { optionLabel } from '../labels';
-import { state } from '../app';
+import { isSuperAdmin, state } from '../app';
+
+/**
+ * Approve action under maker-checker (the API enforces the same rule): the maker of a record sees a note instead of
+ * the button; a Super Admin approving their own record is asked for an approval note, kept in the audit log.
+ */
+function approveAction(createdBy: number | null, label: string, cls: string, approve: (body: Record<string, unknown>) => Promise<unknown>, run: (fn: () => Promise<unknown>) => () => Promise<void>): HTMLElement {
+  const me = state.meta?.me;
+  if (!me || createdBy !== me.id) return h('button', { class: cls, onclick: run(() => approve({})) }, label);
+  if (!isSuperAdmin()) return h('span', { class: 'muted small maker-note' }, 'คุณเป็นผู้สร้างรายการนี้ ต้องให้ผู้อนุมัติคนอื่นอนุมัติ');
+  return h('button', { class: cls, 'data-self-approve': '1', onclick: async () => {
+    const note = await promptDialog('อนุมัติรายการที่คุณสร้างเอง (Super Admin)', 'บันทึกการอนุมัติ (เก็บไว้ใน Audit Log)', 'อนุมัติ');
+    if (note) await run(() => approve({ note }))();
+  } }, `${label} (Super Admin)`);
+}
 
 type Tab = 'calendar' | 'list' | 'work' | 'rules';
 type View = 'month' | 'year';
@@ -217,7 +231,7 @@ async function detailDialog(data: HolidayListResponse, id: number, reload: () =>
       if (ref) await act(() => post(`/api/holidays/${id}/verify`, { source_reference: ref }), 'บันทึกการตรวจสอบแหล่งที่มาแล้ว')();
     } }, 'ตรวจสอบแหล่งที่มา'));
   }
-  if (d.status === 'draft' && data.can.approve && d.verification === 'verified') actions.push(h('button', { class: 'btn primary', onclick: act(() => post(`/api/holidays/${id}/approve`), 'อนุมัติวันหยุดแล้ว') }, 'อนุมัติ'));
+  if (d.status === 'draft' && data.can.approve && d.verification === 'verified') actions.push(approveAction(d.created_by, 'อนุมัติ', 'btn primary', (body) => post(`/api/holidays/${id}/approve`, body), (fn) => act(fn, 'อนุมัติวันหยุดแล้ว')));
   if (d.status === 'approved' && data.can.create && d.holiday_type !== 'substitute' && !d.substitutes.length) actions.push(h('button', { class: 'btn', onclick: () => (m.close(), substituteForm(d, reload)) }, 'กำหนดวันหยุดชดเชย'));
   if (d.status !== 'inactive' && data.can.update) actions.push(h('button', { class: 'btn', onclick: () => (m.close(), holidayForm(data, d, reload)) }, 'แก้ไข'));
   if (d.status !== 'inactive' && data.can.delete && !d.payroll_locked) {
@@ -379,11 +393,15 @@ async function workView(data: HolidayListResponse, year: number, reload: () => v
             h('td', null, h('span', { class: `badge-status s-${r.status}` }, optionLabel(r.status)), r.payroll_period ? h('div', { class: 'muted small' }, `🔒 งวด ${r.payroll_period}`) : null, r.review_reason ? h('div', { class: 'muted small' }, r.review_reason) : null),
             h('td', null,
               r.status === 'pending' && data.can.approve
-                ? [h('button', { class: 'btn small primary', onclick: async () => {
+                ? [r.created_by === state.meta?.me.id && !isSuperAdmin()
+                    ? h('span', { class: 'muted small maker-note' }, 'คุณเป็นผู้บันทึกรายการนี้ ต้องให้ผู้อนุมัติคนอื่นอนุมัติ')
+                    : h('button', { class: 'btn small primary', onclick: async () => {
                     if (await confirmDialog('อนุมัติการทำงานวันหยุด', `อนุมัติ ${r.normal_hours} ชม.ปกติ + ${r.ot_hours} ชม. OT ของ ${r.emp_code} วันที่ ${thaiDate(r.work_date)}? การอนุมัติถือเป็นการยืนยันว่าชั่วโมงนี้ไม่ได้รวมอยู่ใน OT ปกติที่ยืนยันแล้ว`, 'อนุมัติ')) {
-                      await act(() => post(`/api/holidays/work/${r.id}/approve`, { excluded_from_regular_ot: true }), 'อนุมัติแล้ว')();
+                      const note = r.created_by === state.meta?.me.id ? await promptDialog('อนุมัติรายการที่คุณบันทึกเอง (Super Admin)', 'บันทึกการอนุมัติ (เก็บไว้ใน Audit Log)', 'อนุมัติ') : null;
+                      if (r.created_by === state.meta?.me.id && !note) return;
+                      await act(() => post(`/api/holidays/work/${r.id}/approve`, { excluded_from_regular_ot: true, ...(note ? { note } : {}) }), 'อนุมัติแล้ว')();
                     }
-                  } }, 'อนุมัติ'),
+                  } }, r.created_by === state.meta?.me.id ? 'อนุมัติ (Super Admin)' : 'อนุมัติ'),
                    h('button', { class: 'btn small', onclick: async () => {
                      const reason = await promptDialog('ไม่อนุมัติ', 'เหตุผล', 'ไม่อนุมัติ');
                      if (reason) await act(() => post(`/api/holidays/work/${r.id}/reject`, { reason }), 'บันทึกแล้ว')();
@@ -463,7 +481,7 @@ async function rulesView(data: HolidayListResponse, reload: () => void): Promise
             h('td', null, `${thaiDate(r.effective_from)} – ${r.effective_to ? thaiDate(r.effective_to) : 'ไม่กำหนด'}`), h('td', { class: 'small' }, r.legal_basis),
             h('td', null, statusBadge(r.status), r.approved_by_name ? h('div', { class: 'muted small' }, r.approved_by_name) : null),
             h('td', null,
-              r.status === 'draft' && data.can.approve ? h('button', { class: 'btn small primary', onclick: act(() => post(`/api/holidays/pay-rules/${r.id}/approve`), 'อนุมัติกฎแล้ว') }, 'อนุมัติ') : null,
+              r.status === 'draft' && data.can.approve ? approveAction(r.created_by, 'อนุมัติ', 'btn small primary', (body) => post(`/api/holidays/pay-rules/${r.id}/approve`, body), (fn) => act(fn, 'อนุมัติกฎแล้ว')) : null,
               r.status !== 'inactive' && data.can.delete
                 ? h('button', { class: 'btn small', onclick: async () => {
                     const reason = await promptDialog('ปิดใช้งานกฎ', 'เหตุผล', 'ปิดใช้งาน');

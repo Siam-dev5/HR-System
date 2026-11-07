@@ -2,7 +2,7 @@ import type { DeletedPeriod, PayrollPeriod, PayslipDetail, PayslipSummary, Paysl
 import { PROBATION_LABEL } from '../../shared/payroll-columns';
 import { PERIOD_ADMIN } from '../../shared/permissions';
 import { get, post, put, qs } from '../api';
-import { h, mount, loading, errorBox, fmtDate, fmtMoney, modal, toast, confirmDialog } from '../dom';
+import { h, mount, loading, errorBox, fmtDate, fmtMoney, modal, toast, confirmDialog, promptDialog } from '../dom';
 import { optionLabel } from '../labels';
 import { basePath, can, isSuperAdmin, link, state } from '../app';
 
@@ -21,8 +21,12 @@ export async function renderPayroll(main: HTMLElement): Promise<void> {
         ? await confirmDialog('คำนวณงวด Legacy ใหม่', `งวด ${p.name} มีสลิป ${p.legacy_slips} รายการที่คำนวณด้วยเวอร์ชันก่อนหน้า (ยอดสุทธิรวมเดิม ${fmtMoney(p.total_net)} บาท) การคำนวณใหม่จะใช้กติกาปัจจุบัน (คิดตามวันมีสิทธิ์ แยกช่วงทดลองงาน ใช้ OT/ลาจาก Feishu ที่ยืนยันแล้ว) และยอดอาจเปลี่ยน สลิปเดิมจะถูกแทนที่ — แนะนำให้ Export ยอดเดิมเก็บไว้ก่อน ยืนยันคำนวณใหม่?`, 'ยืนยันคำนวณใหม่', true)
         : await confirmDialog(label, `${label} งวด ${p.name}?`, label);
       if (!ok) return;
+      // a Super Admin approving a period they calculated adds an approval note (kept in the audit log)
+      const selfApproval = action === 'approve' && p.calculated_by === state.meta?.me.id && isSuperAdmin();
+      const note = selfApproval ? await promptDialog('อนุมัติงวดที่คุณคำนวณเอง (Super Admin)', 'บันทึกการอนุมัติ (เก็บไว้ใน Audit Log)', 'อนุมัติ') : null;
+      if (selfApproval && !note) return;
       try {
-        await post(`/api/payroll/periods/${p.id}/${action}`, legacy ? { confirm_legacy_recalculation: true } : undefined);
+        await post(`/api/payroll/periods/${p.id}/${action}`, legacy ? { confirm_legacy_recalculation: true } : note ? { note } : undefined);
         toast(`${label}เรียบร้อย`);
         void renderPayroll(main);
       } catch (e) {
