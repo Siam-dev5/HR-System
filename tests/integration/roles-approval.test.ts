@@ -246,3 +246,99 @@ describe('workflow: the manager approves their reporting line; self-approval onl
     for (const who of [leader(), hrpay(), c.hradmin!]) expect((await who.post(`/api/workflow/${requestOf(r.body.id)}/decide`, { decision: 'approved', comment: 'ลองอนุมัติ' })).status).toBe(403);
   });
 });
+
+describe('hardening: payroll maker-checker always on (the old setting cannot switch it off)', () => {
+  const make = async (who: Client, month: string) => {
+    const p = await who.post('/api/payroll/periods', { company_id: ids.co, code: `ZH-${Y}-${month}`, name: `zz hardening ${month}`, start_date: `${Y}-${month}-01`, end_date: `${Y}-${month}-28`, pay_date: `${Y}-${month}-28` });
+    expect(p.status, p.text).toBe(201);
+    expect((await who.post(`/api/payroll/periods/${p.body.id}/calculate`)).status).toBe(200);
+    return p.body.id as number;
+  };
+  it('setup: the old setting is off, as in some deployments', () => {
+    H.sql("UPDATE settings SET value = 'false' WHERE key = 'payroll.require_separate_approver'");
+    expect(one("SELECT value FROM settings WHERE key = 'payroll.require_separate_approver'").value).toBe('false');
+  });
+  it('a calculator cannot approve their own period, even with the setting off and with a note; another user can', async () => {
+    const id = await make(c.payroll!, '05');
+    expect((await c.payroll!.post(`/api/payroll/periods/${id}/approve`)).status).toBe(403);
+    expect((await c.payroll!.post(`/api/payroll/periods/${id}/approve`, { note: 'ขออนุมัติเองเพราะค่าตั้งปิดอยู่' })).status).toBe(403);
+    expect(one(`SELECT status FROM payroll_periods WHERE id = ${id}`).status).toBe('calculated');
+    const ok = await leader().post(`/api/payroll/periods/${id}/approve`);
+    expect(ok.status, ok.text).toBe(200);
+    const a = JSON.parse(audit('payroll.approved', 'payroll_periods', id)!.details);
+    expect(a).toMatchObject({ period_id: id, calculated_by: userId('it_payroll'), approved_by: userId('it_leader'), self_approved: false, note: null });
+    expect(typeof a.approved_at).toBe('string');
+    ids.h05 = id;
+  });
+  it('a Super Admin self-approval with the setting off still needs a note (at least 3 characters)', async () => {
+    const id = await make(admin(), '06');
+    expect((await admin().post(`/api/payroll/periods/${id}/approve`)).status).toBe(400);
+    expect((await admin().post(`/api/payroll/periods/${id}/approve`, { note: 'ok' })).status).toBe(400);
+    expect(one(`SELECT status FROM payroll_periods WHERE id = ${id}`).status).toBe('calculated');
+    const ok = await admin().post(`/api/payroll/periods/${id}/approve`, { note: 'zz_test ไม่มีผู้อนุมัติอื่น' });
+    expect(ok.status, ok.text).toBe(200);
+    expect(JSON.parse(audit('payroll.approved', 'payroll_periods', id)!.details)).toMatchObject({ calculated_by: userId('it_admin'), approved_by: userId('it_admin'), self_approved: true, note: 'zz_test ไม่มีผู้อนุมัติอื่น' });
+  });
+  it('a role with wildcard permissions but not super_admin cannot approve payroll at all (HR Admin)', async () => {
+    const id = await make(c.payroll!, '07');
+    expect((await c.hradmin!.post(`/api/payroll/periods/${id}/approve`, { note: 'ขออนุมัติ' })).status).toBe(403);
+  });
+});
+
+describe('hardening: publish only after approval; the audit links calculator, approver and publisher', () => {
+  it('publish refuses draft and calculated periods', async () => {
+    const draft = await hrpay().post('/api/payroll/periods', { company_id: ids.co, code: `ZH-${Y}-08`, name: 'zz draft', start_date: `${Y}-08-01`, end_date: `${Y}-08-28`, pay_date: `${Y}-08-28` });
+    expect((await hrpay().post(`/api/payroll/periods/${draft.body.id}/publish`)).status).toBe(409);
+    const calc = await hrpay().post('/api/payroll/periods', { company_id: ids.co, code: `ZH-${Y}-09`, name: 'zz calculated', start_date: `${Y}-09-01`, end_date: `${Y}-09-28`, pay_date: `${Y}-09-28` });
+    expect((await hrpay().post(`/api/payroll/periods/${calc.body.id}/calculate`)).status).toBe(200);
+    expect((await hrpay().post(`/api/payroll/periods/${calc.body.id}/publish`)).status).toBe(409);
+    expect(one(`SELECT status FROM payroll_periods WHERE id = ${calc.body.id}`).status).toBe('calculated');
+  });
+  it('publishing an approved period records calculated_by, approved_by, published_by and the time', async () => {
+    const ok = await hrpay().post(`/api/payroll/periods/${ids.h05}/publish`);
+    expect(ok.status, ok.text).toBe(200);
+    const row = one(`SELECT calculated_by, approved_by, published_by, published_at FROM payroll_periods WHERE id = ${ids.h05}`);
+    expect(row).toMatchObject({ calculated_by: userId('it_payroll'), approved_by: userId('it_leader'), published_by: userId('it_hrpay') });
+    const a = JSON.parse(audit('payroll.published', 'payroll_periods', ids.h05!)!.details);
+    expect(a).toMatchObject({ period_id: ids.h05, calculated_by: userId('it_payroll'), approved_by: userId('it_leader'), published_by: userId('it_hrpay'), published_at: row.published_at });
+    expect(typeof a.notified).toBe('number');
+  });
+});
+
+describe('hardening: holiday content editor and holiday-work editor cannot approve their own changes', () => {
+  const mk = (who: Client, md: string, name: string) => who.post('/api/holidays', { calendar_id: 1, holiday_date: `${Y}-${md}`, name, holiday_type: 'traditional', source_reference: 'zz_test ประกาศ' });
+  it('a user who edited the content of a holiday made by someone else cannot approve it; a third user can', async () => {
+    const h = await mk(c.hradmin!, '09-01', 'zz_test วันหยุด E');
+    expect(h.status, h.text).toBe(201);
+    const edit = await leader().put(`/api/holidays/${h.body.id}`, { name: 'zz_test วันหยุด E (แก้ชื่อ)' });
+    expect(edit.status, edit.text).toBe(200);
+    expect(one(`SELECT content_updated_by FROM holidays WHERE id = ${h.body.id}`).content_updated_by).toBe(userId('it_leader'));
+    expect((await leader().post(`/api/holidays/${h.body.id}/verify`)).status).toBe(200);
+    const self = await leader().post(`/api/holidays/${h.body.id}/approve`, { note: 'ขออนุมัติที่แก้เอง' });
+    expect(self.status).toBe(403);
+    expect(self.body.error.message).toContain('ผู้แก้ไข');
+    expect((await c.hradmin!.post(`/api/holidays/${h.body.id}/approve`)).status).toBe(403); // the creator
+    const ok = await c.leader2!.post(`/api/holidays/${h.body.id}/approve`);
+    expect(ok.status, ok.text).toBe(200);
+    expect(JSON.parse(audit('holiday.approved', 'holidays', h.body.id)!.details)).toMatchObject({ created_by: userId('it_hradmin'), content_updated_by: userId('it_leader'), approved_by: userId('it_leader2'), self_approved: false });
+  });
+  it('source verification does not make the verifier the content editor (the verifier may approve)', async () => {
+    const h = await mk(c.hradmin!, '09-02', 'zz_test วันหยุด F');
+    expect((await leader().post(`/api/holidays/${h.body.id}/verify`, { source_reference: 'zz_test ประกาศฉบับจริง' })).status).toBe(200);
+    expect(one(`SELECT content_updated_by, verified_by FROM holidays WHERE id = ${h.body.id}`)).toEqual({ content_updated_by: null, verified_by: userId('it_leader') });
+    expect((await leader().post(`/api/holidays/${h.body.id}/approve`)).status).toBe(200);
+  });
+  it('a holiday-work editor cannot approve the record they changed; the creator neither; a third user can', async () => {
+    const hol = Number(one("SELECT id FROM holidays WHERE name = 'zz_test วันหยุด A'").id);
+    const w = await c.hradmin!.post('/api/holidays/work', { employee_id: ids.ZR1, holiday_id: hol, normal_hours: 4, evidence_source: 'manual', evidence_ref: 'zz_test ใบสั่งงาน 1' });
+    expect(w.status, w.text).toBe(201);
+    const edit = await leader().put(`/api/holidays/work/${w.body.id}`, { normal_hours: 8, evidence_source: 'manual', evidence_ref: 'zz_test ใบสั่งงาน 1 (แก้)' });
+    expect(edit.status, edit.text).toBe(200);
+    expect(one(`SELECT content_updated_by FROM holiday_work_records WHERE id = ${w.body.id}`).content_updated_by).toBe(userId('it_leader'));
+    expect((await leader().post(`/api/holidays/work/${w.body.id}/approve`, { excluded_from_regular_ot: true, note: 'ขออนุมัติที่แก้เอง' })).status).toBe(403);
+    expect((await c.hradmin!.post(`/api/holidays/work/${w.body.id}/approve`, { excluded_from_regular_ot: true })).status).toBe(403);
+    const ok = await c.leader2!.post(`/api/holidays/work/${w.body.id}/approve`, { excluded_from_regular_ot: true });
+    expect(ok.status, ok.text).toBe(200);
+    expect(JSON.parse(audit('holiday_work.approved', 'holiday_work_records', w.body.id)!.details)).toMatchObject({ created_by: userId('it_hradmin'), content_updated_by: userId('it_leader'), approved_by: userId('it_leader2') });
+  });
+});
