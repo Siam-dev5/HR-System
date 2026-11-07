@@ -137,3 +137,76 @@ order and cell grammar with made-up data.
    - the new tables exist and are empty;
    - `foreign_key_check`;
    - the payroll fingerprint is unchanged.
+
+## V1.1 — one file for several companies, and attendance exemptions
+
+Migration `0013_multicompany_import_exemption.sql` (rollback `scripts/rollback/0013_multicompany_import_exemption.down.sql`).
+It is additive: new tables, one nullable column (`attendance_file_imports.group_id`), triggers and permissions.
+
+### The company of each row (attendance wizard, step 2 "Worksheet / บริษัท")
+
+The company is **never inferred from the employee-code prefix**. In Production, an IAMDP employee has an `ST…` code, and
+the Starlive daily file contains Flying Fish staff with `ST…` codes. Employees are always looked up by **company + code**.
+A code that belongs to another company is refused, never matched across companies.
+
+- **บริษัทเดียว (separate file):** HR selects the company, and every row is checked against it.
+  - Optionally, a company column of the file (or e.g. `Group`) can be matched to companies. A row whose value names
+    another company, or isn't matched, is invalid.
+  - An empty value keeps the selected company.
+- **หลายบริษัทในไฟล์เดียว (combined file):** HR chooses the column that identifies the company and matches each of its
+  values to a company.
+  - Only exact matches on company code, name or id are suggested; e.g. `Team A` or `ST` is never auto-matched.
+  - A row with an empty or unmatched value has no company. It is invalid and kept apart as raw data
+    (`import_group_unassigned_rows`); it is never assigned to the selected company.
+  - The real daily report has no company column; HR can use `Group` or `Department`.
+  - The rule is remembered per file layout (`import_company_rules`).
+- **Before validation:** step 2 shows the detected companies with their row counts and flags rows without a company.
+- **Validation:** step 4 shows Valid / Warning / Duplicate / Invalid per company, and a filter to inspect one company.
+- **Batches:** a combined file creates one `import_groups` row and **one `attendance_file_imports` batch per company**.
+  - Each batch has its own raw rows, records, counts, error report and audit (`attendance_file.imported`), plus
+    `attendance_file.group_imported` for the group.
+  - Everything is written in one D1 batch: all or nothing for the database write. An invalid row (or a whole
+    company of invalid rows) never blocks the valid rows of the other companies.
+  - The idempotency key is per group; repeating a confirmation returns the same group.
+- **Visibility:** the group page (`/attendance/file-imports?group=<id>`) lists the batches of the companies the user
+  can see. The unassigned rows are shown only to the importer or an all-company user.
+- **Preview** is read-only: no batch, row, rule, mapping or audit is written.
+- **Scope:** every company named in a rule must be in the user's company scope (checked on the server; 403 otherwise).
+
+Combined files apply to the Feishu daily template. Time-clock files (`CLOCK_FILE_V1`) and the leave / OT imports
+remain one company per import, with other companies' employees refused.
+
+### Attendance exemption (Employee Master → พนักงาน → "ยกเว้นการบันทึกเวลา")
+
+- **Data:** `employee_attendance_exemptions` stores, per period:
+  - `effective_from` and `effective_to` (open-ended when empty);
+  - `reason`;
+  - created / updated / revoked by and at, and `revoke_reason`.
+- **Rules:**
+  - Periods of one employee never overlap.
+  - A period is revoked, never deleted (database trigger).
+  - States: active, future, expired, revoked.
+- **Permissions:**
+  - `attendance_exemption.manage` (HR Admin; Super Admin) to add, end-date and revoke;
+  - `attendance_exemption.view` (HR Staff; HR Admin through `*.view`) to view;
+  - the employee must be in a company of the user's scope.
+- **Audit:** every change is audited (`attendance_exemption.created / updated / revoked`, with before / after values).
+- **Effect** (only inside a period, for an employee already resolved inside the row's company):
+  - The attendance import drops the missing-punch warnings (`No record`, missing clock-in / clock-out, `Pending`) and
+    notes "ได้รับยกเว้นการบันทึกเวลา".
+  - Real punches are imported as usual.
+  - Employee / company / date errors are never removed.
+  - Leave, OT and payroll are not affected (nothing in the payroll engine reads exemptions).
+- No employee is exempted by the code or the migration. The employees confirmed in Production (e.g. ST63002, ST65021,
+  ST66012) only become exempt when HR adds a period for them, which is a separate, approved Production change.
+
+### Release (after approval)
+
+1. Back up Production D1 and check that only `0013` is pending (do not re-run 0010–0012).
+2. Apply `0013` once.
+3. Deploy the Worker from the merged `main`.
+4. Verify:
+   - the new tables are empty;
+   - `foreign_key_check`;
+   - the permissions: hr_admin `attendance_exemption.manage`, hr_staff `attendance_exemption.view`;
+   - the payroll fingerprint is unchanged.

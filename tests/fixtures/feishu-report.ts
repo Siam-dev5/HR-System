@@ -119,3 +119,17 @@ export function feishuReport(o: FeishuFixtureOptions): Sheet[] {
     { name: 'Overtime', rows: [filter('Overtime', otRows.length), OT_HEAD, ...otRows] },
   ];
 }
+
+/**
+ * A daily-report worksheet with the given people (the real export's three header rows; `group` fills the Group
+ * column, which a combined file may use to identify the company). Every value is made up.
+ */
+export function dailySheet(start: string, people: ReadonlyArray<{ code: string; group: string; cells: readonly string[] }>): Sheet {
+  const n = Math.max(...people.map((p) => p.cells.length));
+  const days = Array.from({ length: n }, (_, i) => addDays(start, i));
+  const group1: Cell[] = ['Name', ...Array<string>(DAILY_IDENTITY.length - 1 + days.length).fill('Basic information')];
+  const group2: Cell[] = [...DAILY_IDENTITY, ...days.map(() => 'Daily attendance result')];
+  const head: Cell[] = [...DAILY_IDENTITY, ...days.map(dayHead)];
+  const rows = people.map((p): Cell[] => [`zz_test ${p.code}`, p.code, 'zz_test ฝ่าย', 'zz_test งาน', 'Active', '2024-01-01', p.group, 'วันทำงาน 09:00-18:00', ...days.map((_, i) => p.cells[i] ?? '-')]);
+  return { name: 'Sheet1', rows: [group1, group2, head, ...rows] };
+}

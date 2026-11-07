@@ -14,12 +14,19 @@ import {
   type DailyIssue, type DailyMapping, type DailyRow,
 } from '../../shared/feishu-daily';
 import { MAX_CLOCK_ROWS } from '../../shared/clock-import';
+import { matchEmployee, rowCompany, type CompanyMode, type CompanyRule } from '../../shared/company-rules';
+import { coversDate, exemptIssues, type ExemptionPeriod } from '../../shared/exemptions';
 import type { Cell } from '../../shared/xlsx';
 
 export type DailyRowStatus = 'valid' | 'warning' | 'duplicate' | 'invalid';
 export interface EvaluatedDailyRow extends DailyRow {
+  /** company of the row (null: none could be identified — the row is unassigned) */
+  company_id: number | null;
+  /** value of the company column, when there is one */
+  company_value: string | null;
   employee_id: number | null;
   employee_display: string | null;
+  exempt: boolean;
   status: DailyRowStatus;
   attendance_status: 'present' | 'late' | null;
 }
@@ -29,6 +36,8 @@ export interface DailyEvaluation {
   signature: string;
   mapping: DailyMapping;
   remembered: boolean;
+  /** the company rule remembered for this file layout (combined files) */
+  rememberedRule: CompanyRule | null;
   mappingProblems: string[];
   dayColumns: Array<{ col: number; date: string }>;
   sourceRows: number;
@@ -36,7 +45,12 @@ export interface DailyEvaluation {
   rows: EvaluatedDailyRow[];
 }
 export interface DailyInput {
-  company: CompanyOption;
+  mode: CompanyMode;
+  /** the chosen company (single); null for a combined file */
+  company: CompanyOption | null;
+  /** companies the rule may name (all of them in the user's scope) */
+  companies: readonly CompanyOption[];
+  rule: CompanyRule | null;
   grid: Cell[][];
   headerRow: number | null;
   mapping: DailyMapping | null;
@@ -62,6 +76,7 @@ export function readDailyMapping(v: unknown, maxCols: number): DailyMapping | nu
 
 const issue = (code: DailyIssue['code'], level: DailyIssue['level'], message: string): DailyIssue => ({ code, level, message });
 export const hasPunch = (r: { clock_in: string | null; clock_out: string | null }) => !!(r.clock_in || r.clock_out);
+const none = <T>() => Promise.resolve({ results: [] as T[] });
 
 export async function evaluateDaily(db: D1Database, user: AuthUser, input: DailyInput, signatureOf: (s: string) => Promise<string>): Promise<DailyEvaluation> {
   const found = findDailyHeaderRow(input.grid);
@@ -71,19 +86,28 @@ export async function evaluateDaily(db: D1Database, user: AuthUser, input: Daily
   const headers = Array.from({ length: width }, (_, i) => String(header[i] ?? '').trim());
   const days = dayColumns(header);
   const signature = await signatureOf(headers.map((h) => (/^\d{4}-\d{2}-\d{2}\b/.test(h) ? '<date>' : h)).join('|'));
-  const saved = await db
-    .prepare('SELECT mapping_json FROM import_mapping_templates WHERE company_id = ? AND import_type = ? AND template_code = ? AND header_signature = ?')
-    .bind(input.company.id, 'attendance', FEISHU_DAILY_TEMPLATE, signature)
-    .first<{ mapping_json: string }>();
+  // a one-company file remembers its mapping per company; a combined file per layout, together with its company rule
+  const saved = input.company
+    ? await db.prepare('SELECT mapping_json, NULL AS company_rule_json FROM import_mapping_templates WHERE company_id = ? AND import_type = ? AND template_code = ? AND header_signature = ?')
+        .bind(input.company.id, 'attendance', FEISHU_DAILY_TEMPLATE, signature).first<{ mapping_json: string; company_rule_json: string | null }>()
+    : await db.prepare('SELECT mapping_json, company_rule_json FROM import_company_rules WHERE import_type = ? AND template_code = ? AND header_signature = ?')
+        .bind('attendance', FEISHU_DAILY_TEMPLATE, signature).first<{ mapping_json: string; company_rule_json: string | null }>();
   const remembered = saved ? (JSON.parse(saved.mapping_json) as DailyMapping) : null;
+  const rememberedRule = saved?.company_rule_json ? (JSON.parse(saved.company_rule_json) as CompanyRule) : null;
   const mapping = input.mapping ?? autoDailyMapping(header, remembered);
   const mappingProblems = dailyMappingProblems(mapping, width, days.map((d) => d.col));
-  const base = { headerRow, headers, signature, mapping, remembered: !!remembered && !input.mapping, mappingProblems, dayColumns: days };
+  const ruleColumn = input.rule?.column ?? null;
+  if (input.mode === 'combined' && ruleColumn === null) mappingProblems.push('ไฟล์รวมหลายบริษัทต้องเลือกคอลัมน์ที่ใช้ระบุบริษัท');
+  if (ruleColumn !== null && ruleColumn === mapping.employee_code) mappingProblems.push('คอลัมน์ที่ใช้ระบุบริษัทต้องไม่ใช่คอลัมน์รหัสพนักงาน');
+  if (ruleColumn !== null && days.some((x) => x.col === ruleColumn)) mappingProblems.push('คอลัมน์ที่ใช้ระบุบริษัทต้องไม่ใช่คอลัมน์วันที่');
+  const base = { headerRow, headers, signature, mapping, remembered: !!remembered && !input.mapping, rememberedRule, mappingProblems, dayColumns: days };
   if (mappingProblems.length) return { ...base, sourceRows: 0, emptyDays: 0, rows: [] };
   const parsed = parseDailyRows(input.grid, headerRow, mapping);
   if (parsed.rows.length > MAX_CLOCK_ROWS) throw badRequest(`ไฟล์มีมากกว่า ${MAX_CLOCK_ROWS.toLocaleString()} รายการ (พนักงาน × วัน) กรุณาแบ่งไฟล์`);
 
   const scope = await companyScope(db, user);
+  const visible = (id: number) => scope.scope === 'all' || scope.items.some((x) => x.id === id);
+  const companyName = new Map(input.companies.map((c) => [c.id, c.name]));
   const today = bangkokNow().date;
   const codes = [...new Set(parsed.rows.map((r) => r.employee_code?.toUpperCase()).filter((x): x is string => !!x))];
   const { results: emps } = codes.length
@@ -92,45 +116,69 @@ export async function evaluateDaily(db: D1Database, user: AuthUser, input: Daily
         .bind(JSON.stringify(codes))
         .all<{ id: number; emp_code: string; name: string; company_id: number; hire_date: string | null; termination_date: string | null }>()
     : { results: [] };
-  const byCode = new Map(emps.map((e) => [e.emp_code.toUpperCase(), e]));
   const dates = parsed.rows.map((r) => r.work_date).sort();
   const from = dates[0] ?? today;
   const to = dates[dates.length - 1] ?? today;
-  const mine = emps.filter((e) => e.company_id === input.company.id).map((e) => e.id);
-  const [locked, existing, accepted] = await Promise.all([
-    lockedPeriods(db, input.company.id, from, to),
+  const placed = parsed.rows.map((p) => rowCompany(input.mode, input.company?.id ?? null, input.rule, input.grid[p.source_row] ?? []));
+  const companyIds = [...new Set(placed.flatMap((x) => (x.state === 'ok' ? [x.companyId] : [])))];
+  const mine = emps.filter((e) => companyIds.includes(e.company_id)).map((e) => e.id);
+  type Day = { employee_id: number; work_date: string };
+  const [lockedLists, existing, accepted, exemptions] = await Promise.all([
+    Promise.all(companyIds.map(async (id) => [id, await lockedPeriods(db, id, from, to)] as const)),
     mine.length
-      ? db.prepare('SELECT employee_id, work_date FROM attendance_records WHERE employee_id IN (SELECT value FROM json_each(?1)) AND work_date BETWEEN ?2 AND ?3').bind(JSON.stringify(mine), from, to).all<{ employee_id: number; work_date: string }>()
-      : Promise.resolve({ results: [] as Array<{ employee_id: number; work_date: string }> }),
+      ? db.prepare('SELECT employee_id, work_date FROM attendance_records WHERE employee_id IN (SELECT value FROM json_each(?1)) AND work_date BETWEEN ?2 AND ?3').bind(JSON.stringify(mine), from, to).all<Day>()
+      : none<Day>(),
     // days already imported from a Feishu daily report (a day without clock times has no attendance record)
     mine.length
       ? db.prepare(`SELECT r.employee_id, r.work_date FROM attendance_raw_records r JOIN attendance_file_imports b ON b.id = r.batch_id
                     WHERE b.template_code = ?4 AND r.status IN ('valid', 'warning') AND r.employee_id IN (SELECT value FROM json_each(?1)) AND r.work_date BETWEEN ?2 AND ?3`)
-          .bind(JSON.stringify(mine), from, to, FEISHU_DAILY_TEMPLATE).all<{ employee_id: number; work_date: string }>()
-      : Promise.resolve({ results: [] as Array<{ employee_id: number; work_date: string }> }),
+          .bind(JSON.stringify(mine), from, to, FEISHU_DAILY_TEMPLATE).all<Day>()
+      : none<Day>(),
+    mine.length
+      ? db.prepare(`SELECT employee_id, effective_from, effective_to, revoked_at FROM employee_attendance_exemptions
+                    WHERE revoked_at IS NULL AND employee_id IN (SELECT value FROM json_each(?1)) AND effective_from <= ?3 AND (effective_to IS NULL OR effective_to >= ?2)`)
+          .bind(JSON.stringify(mine), from, to).all<ExemptionPeriod & { employee_id: number }>()
+      : none<ExemptionPeriod & { employee_id: number }>(),
   ]);
+  const locked = new Map(lockedLists);
   const recordKeys = new Set(existing.results.map((r) => `${r.employee_id}|${r.work_date}`));
   const acceptedKeys = new Set(accepted.results.map((r) => `${r.employee_id}|${r.work_date}`));
   const seen = new Set<string>();
 
-  const rows = parsed.rows.map((p): EvaluatedDailyRow => {
-    const issues = [...p.issues];
-    const out: EvaluatedDailyRow = { ...p, issues, employee_id: null, employee_display: null, status: 'valid', attendance_status: null };
-    const emp = p.employee_code ? byCode.get(p.employee_code.toUpperCase()) : undefined;
-    if (p.employee_code && !emp) issues.push(issue('unknown_employee', 'error', `ไม่พบพนักงานรหัส ${p.employee_code}`));
-    else if (emp && emp.company_id !== input.company.id) {
-      const visible = scope.scope === 'all' || scope.items.some((x) => x.id === emp.company_id);
-      issues.push(visible ? issue('wrong_company', 'error', `พนักงานรหัส ${p.employee_code} ไม่ได้อยู่ในบริษัท ${input.company.name}`) : issue('unknown_employee', 'error', `ไม่พบพนักงานรหัส ${p.employee_code}`));
-    } else if (emp) {
-      out.employee_id = emp.id;
-      out.employee_display = emp.name;
+  const rows = parsed.rows.map((p, i): EvaluatedDailyRow => {
+    let issues = [...p.issues];
+    const at = placed[i]!;
+    const out: EvaluatedDailyRow = { ...p, issues, company_id: null, company_value: at.value, employee_id: null, employee_display: null, exempt: false, status: 'valid', attendance_status: null };
+    if (at.state === 'missing') issues.push(issue('missing_company', 'error', 'ไม่พบข้อมูลบริษัทของแถวนี้ (ไม่นำเข้า)'));
+    else if (at.state === 'unmatched') issues.push(issue('company_unmatched', 'error', `ค่า "${at.value}" ยังไม่ได้จับคู่กับบริษัท (ไม่นำเข้า)`));
+    else if (at.state === 'conflict') {
+      out.company_id = input.company!.id;
+      issues.push(issue('company_conflict', 'error', `ข้อมูลบริษัทในไฟล์ ("${at.value}") ไม่ตรงกับบริษัทที่เลือก (${input.company!.name})`));
+    } else out.company_id = at.companyId;
+    if (at.state === 'ok' && p.employee_code) {
+      // an employee is found by company + code, never by the code alone
+      const m = matchEmployee(emps, at.companyId, p.employee_code);
+      if ('employee' in m) {
+        const emp = m.employee;
+        out.employee_id = emp.id;
+        out.employee_display = emp.name;
+        if ((emp.hire_date && p.work_date < emp.hire_date) || (emp.termination_date && p.work_date > emp.termination_date)) issues.push(issue('not_employed', 'error', 'วันที่อยู่นอกช่วงการจ้างงานของพนักงาน'));
+      } else if (m.elsewhere.some(visible)) {
+        // never matched to another company's employee; a user who cannot see that company does not learn it exists
+        issues.push(issue('wrong_company', 'error', `พนักงานรหัส ${p.employee_code} ไม่ได้อยู่ในบริษัท ${companyName.get(at.companyId) ?? at.companyId} (อยู่ในบริษัทอื่น ไม่นำเข้า)`));
+      } else issues.push(issue('unknown_employee', 'error', `ไม่พบพนักงานรหัส ${p.employee_code}`));
     }
     const d = p.work_date;
     if (d > today) issues.push(issue('future_date', 'error', 'วันที่ทำงานเป็นวันในอนาคต'));
-    if (emp && out.employee_id && ((emp.hire_date && d < emp.hire_date) || (emp.termination_date && d > emp.termination_date))) issues.push(issue('not_employed', 'error', 'วันที่อยู่นอกช่วงการจ้างงานของพนักงาน'));
-    const lock = locked.find((l) => l.start_date <= d && l.end_date >= d);
+    const lock = out.company_id !== null ? locked.get(out.company_id)?.find((l) => l.start_date <= d && l.end_date >= d) : undefined;
     if (lock) issues.push(issue('period_locked', 'error', `วันที่อยู่ในงวดเงินเดือน ${lock.code} ที่คำนวณแล้ว (${lock.status}) ต้องเปิดแก้ไขงวดก่อน`));
-    if (!issues.some((i) => i.level === 'error') && out.employee_id) {
+    // exempt from recording time on this day: no warning just for a missing punch; punches are processed as usual
+    if (out.employee_id && exemptions.results.some((x) => x.employee_id === out.employee_id && coversDate(x, d))) {
+      out.exempt = true;
+      issues = exemptIssues(issues, (removed) => issue('attendance_exempt', 'info', `ได้รับยกเว้นการบันทึกเวลา${removed ? ' — ไม่แจ้งเตือนการไม่มีเวลาเข้า-ออก' : ''}`));
+      out.issues = issues;
+    }
+    if (!issues.some((x) => x.level === 'error') && out.employee_id) {
       const key = `${out.employee_id}|${d}`;
       if (seen.has(key)) issues.push(issue('duplicate_in_file', 'info', 'ซ้ำกับแถวก่อนหน้าในไฟล์นี้ (พนักงานและวันที่เดียวกัน)'));
       else if (acceptedKeys.has(key)) issues.push(issue('duplicate_existing', 'info', 'วันนี้ของพนักงานเคยนำเข้าจาก Feishu แล้ว'));
@@ -147,14 +195,17 @@ export async function evaluateDaily(db: D1Database, user: AuthUser, input: Daily
 const CHUNK = 100;
 const chunks = <T>(a: readonly T[]): T[][] => Array.from({ length: Math.ceil(a.length / CHUNK) }, (_, i) => a.slice(i * CHUNK, (i + 1) * CHUNK));
 
-/** Statements after the batch row: raw rows, processed attendance, links, events, counts, status and the mapping. */
-export function dailyStatements(db: D1Database, key: string, batchId: string, ev: DailyEvaluation, ctx: { companyId: number; fileName: string; userId: number }): D1PreparedStatement[] {
+/**
+ * Statements after the batch row of one company: its raw rows, processed attendance, links, events, counts, status and
+ * (for a one-company file) the remembered mapping.
+ */
+export function dailyStatements(db: D1Database, key: string, batchId: string, rows: readonly EvaluatedDailyRow[], ctx: { companyId: number; fileName: string; userId: number; remember: { signature: string; mapping: DailyMapping } | null }): D1PreparedStatement[] {
   const stmts: D1PreparedStatement[] = [];
-  for (const part of chunks(ev.rows)) {
+  for (const part of chunks(rows)) {
     const json = JSON.stringify(part.map((r) => ({
       r: r.row_no, c: r.employee_code, e: r.employee_id, d: r.work_date, i: r.clock_in, o: r.clock_out, n: r.out_next_day ? 1 : 0,
       raw: JSON.stringify({
-        cell: r.cell, name: r.employee_name, department: r.department, position: r.position, employment_status: r.employment_status, group: r.group, shift: r.shift,
+        cell: r.cell, name: r.employee_name, department: r.department, position: r.position, employment_status: r.employment_status, group: r.group, shift: r.shift, company_value: r.company_value,
         in: r.day.clock_in, out: r.day.clock_out,
       }),
       st: r.status, is: JSON.stringify(r.issues), ref: r.source_ref, ir: r.day.clock_in?.label ?? (r.day.kind === 'rest' ? 'Break' : null), or: r.day.clock_out?.label ?? (r.day.kind === 'rest' ? 'Break' : null),
@@ -164,7 +215,7 @@ export function dailyStatements(db: D1Database, key: string, batchId: string, ev
              'Feishu', json_extract(value, '$.raw'), json_extract(value, '$.st'), json_extract(value, '$.is'), json_extract(value, '$.ref'), json_extract(value, '$.ir'), json_extract(value, '$.or')
       FROM json_each(?2)`).bind(key, json));
   }
-  const withClock = ev.rows.filter((r) => (r.status === 'valid' || r.status === 'warning') && hasPunch(r));
+  const withClock = rows.filter((r) => (r.status === 'valid' || r.status === 'warning') && hasPunch(r));
   for (const part of chunks(withClock)) {
     const json = JSON.stringify(part.map((r) => ({
       e: r.employee_id, d: r.work_date, i: r.clock_in, o: r.clock_out, st: r.attendance_status, n: r.out_next_day ? 1 : 0, l: r.late_minutes, x: r.early_leave_minutes, w: r.worked_minutes,
@@ -180,7 +231,7 @@ export function dailyStatements(db: D1Database, key: string, batchId: string, ev
   stmts.push(db.prepare(`UPDATE attendance_raw_records SET attendance_record_id = (SELECT a.id FROM attendance_records a WHERE a.employee_id = attendance_raw_records.employee_id AND a.work_date = attendance_raw_records.work_date AND a.import_batch_id = attendance_raw_records.batch_id)
     WHERE batch_id = ${batchId} AND status IN ('valid', 'warning') AND (clock_in IS NOT NULL OR clock_out IS NOT NULL)`).bind(key));
   stmts.push(db.prepare(`UPDATE attendance_raw_records SET status = 'duplicate' WHERE batch_id = ${batchId} AND status IN ('valid', 'warning') AND (clock_in IS NOT NULL OR clock_out IS NOT NULL) AND attendance_record_id IS NULL`).bind(key));
-  const events = ev.rows.filter((r) => (r.status === 'valid' || r.status === 'warning') && r.day.events.length).flatMap((r) => r.day.events.map((e, i) => ({ r: r.row_no, e: r.employee_id, d: r.work_date, q: i + 1, ev: e })));
+  const events = rows.filter((r) => (r.status === 'valid' || r.status === 'warning') && r.day.events.length).flatMap((r) => r.day.events.map((e, i) => ({ r: r.row_no, e: r.employee_id, d: r.work_date, q: i + 1, ev: e })));
   for (const part of chunks(events)) {
     const json = JSON.stringify(part.map((x) => ({ r: x.r, e: x.e, d: x.d, q: x.q, k: x.ev.kind, l: x.ev.label.slice(0, 200), a: x.ev.amount, u: x.ev.unit, g: x.ev.ranges.join(',') || null, ad: x.ev.all_day ? 1 : 0, on: x.ev.overnight ? 1 : 0, raw: x.ev.raw.slice(0, 500) })));
     stmts.push(db.prepare(`INSERT INTO attendance_day_events (batch_id, raw_record_id, employee_id, work_date, seq, kind, label, amount, unit, ranges, all_day, overnight, raw_text)
@@ -195,8 +246,8 @@ export function dailyStatements(db: D1Database, key: string, batchId: string, ev
       invalid_count = (SELECT COUNT(*) FROM attendance_raw_records WHERE batch_id = attendance_file_imports.id AND status = 'invalid')
     WHERE idempotency_key = ?1`).bind(key));
   stmts.push(db.prepare(`UPDATE attendance_file_imports SET status = CASE WHEN imported_count = 0 THEN 'failed' WHEN imported_count = total_rows THEN 'completed' ELSE 'partial' END WHERE idempotency_key = ?1`).bind(key));
-  stmts.push(db.prepare(`INSERT INTO import_mapping_templates (company_id, import_type, template_code, template_version, header_signature, mapping_json, updated_by) VALUES (?1, 'attendance', ?2, 1, ?3, ?4, ?5)
+  if (ctx.remember) stmts.push(db.prepare(`INSERT INTO import_mapping_templates (company_id, import_type, template_code, template_version, header_signature, mapping_json, updated_by) VALUES (?1, 'attendance', ?2, 1, ?3, ?4, ?5)
     ON CONFLICT (company_id, import_type, template_code, header_signature) DO UPDATE SET mapping_json = excluded.mapping_json, updated_at = datetime('now'), updated_by = excluded.updated_by`)
-    .bind(ctx.companyId, FEISHU_DAILY_TEMPLATE, ev.signature, JSON.stringify(ev.mapping), ctx.userId));
+    .bind(ctx.companyId, FEISHU_DAILY_TEMPLATE, ctx.remember.signature, JSON.stringify(ctx.remember.mapping), ctx.userId));
   return stmts;
 }

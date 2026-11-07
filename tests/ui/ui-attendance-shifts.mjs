@@ -255,7 +255,6 @@ try {
   // ---- attendance file import --------------------------------------------------------------------------------
   await page.goto(BASE + '/attendance/file-import');
   await page.waitForSelector('main .dropzone');
-  await page.selectOption('main .wizard-step select[aria-label="บริษัท"]', { label: 'zz_test บริษัทกะ (ZZS)' });
   await page.setInputFiles('#clock-file', join(FIX, 'fake.xlsx'));
   await page.waitForSelector('main .file-info .alert-error');
   check('step 1: a fake .xlsx is refused by content check', (await page.textContent('main .file-info')).includes('ไม่ใช่ Excel'));
@@ -263,6 +262,9 @@ try {
   await page.waitForSelector('main .file-info .file-rows');
   check('step 1: file name, size and row count', (await page.textContent('main .file-info .file-name')) === 'clock.csv' && (await page.textContent('main .file-info .file-rows')) === '6');
   await page.screenshot({ path: join(OUT, 'import-step1-1440-light.png') });
+  await page.click('main button:has-text("ถัดไป: Worksheet / บริษัท")');
+  await page.waitForSelector('main .company-step');
+  await page.selectOption('main .company-step select[aria-label="บริษัท"]', { label: 'zz_test บริษัทกะ (ZZS)' });
   await page.click('main button:has-text("ถัดไป: จับคู่คอลัมน์")');
   await page.waitForSelector('main .mapping-table');
   const mapped = await page.$$eval('main .mapping-table select', (s) => s.map((x) => x.selectedOptions[0]?.textContent));
@@ -277,13 +279,13 @@ try {
   check('step 3: row errors explained (missing clock-in, unknown employee)', invalid.includes('ไม่มีเวลาเข้างาน') && invalid.includes('ไม่พบพนักงานรหัส ZZ999'));
   await page.screenshot({ path: join(OUT, 'import-step3-1440-light.png'), fullPage: true });
   await page.click('main button:has-text("ถัดไป: ยืนยันการนำเข้า")');
-  await page.waitForSelector('main h2:has-text("4. ยืนยันการนำเข้า")');
+  await page.waitForSelector('main h2:has-text("5. ยืนยันการนำเข้า")');
   check('step 4: summary with the number to import', (await page.textContent('main .kpis')).includes('จำนวนที่จะนำเข้า3'));
   check('nothing saved before confirming', sql('SELECT COUNT(*) AS n FROM attendance_file_imports')[0].n === 0);
   await page.click('main button:has-text("ยืนยันนำเข้า 3 รายการ")');
   await page.waitForSelector('.modal');
   await page.click('.modal button:has-text("ยืนยันนำเข้า")');
-  await page.waitForSelector('main h2:has-text("5. ผลการนำเข้า")');
+  await page.waitForSelector('main h2:has-text("6. ผลการนำเข้า")');
   const res = await page.textContent('main .wizard-step');
   check('step 5: result, operator, source file and error report links', res.includes('สำเร็จ3') && res.includes('s_staff') && res.includes('clock.csv') && (await page.$$('main a:has-text("Error Report")')).length === 2, res.slice(0, 200));
   const dl = await Promise.all([page.waitForEvent('download'), page.click('main a:has-text("Error Report (CSV)")')]);
@@ -297,24 +299,26 @@ try {
   for (const [file, rows] of [['clock.xlsx', '2'], ['clock.xls', '1']]) {
     await page.goto(BASE + '/attendance/file-import');
     await page.waitForSelector('main .dropzone');
-    await page.selectOption('main .wizard-step select[aria-label="บริษัท"]', { label: 'zz_test บริษัทกะ (ZZS)' });
     await page.setInputFiles('#clock-file', join(FIX, file));
     await page.waitForSelector('main .file-info .file-rows');
     check(`${file}: rows counted under the detected header`, (await page.textContent('main .file-info .file-rows')) === rows);
+    await page.click('main button:has-text("ถัดไป: Worksheet / บริษัท")');
+    await page.waitForSelector('main .company-step');
+    await page.selectOption('main .company-step select[aria-label="บริษัท"]', { label: 'zz_test บริษัทกะ (ZZS)' });
     await page.click('main button:has-text("ถัดไป: จับคู่คอลัมน์")');
     await page.waitForSelector('main .mapping-table');
     await page.click('main button:has-text("ถัดไป: ตรวจสอบข้อมูล")');
     await page.waitForSelector('main .kpis');
     await page.click('main button:has-text("ถัดไป: ยืนยันการนำเข้า")');
-    await page.waitForSelector('main h2:has-text("4. ยืนยันการนำเข้า")');
+    await page.waitForSelector('main h2:has-text("5. ยืนยันการนำเข้า")');
     const btn = page.locator('main button:has-text("ยืนยันนำเข้า")');
     if (await btn.isEnabled()) {
       await btn.click();
       await page.waitForSelector('.modal');
       await page.click('.modal button:has-text("ยืนยันนำเข้า")');
-      await page.waitForSelector('main h2:has-text("5. ผลการนำเข้า")');
+      await page.waitForSelector('main h2:has-text("6. ผลการนำเข้า")');
     }
-    check(`${file}: imported through the five steps`, (await page.textContent('main')).includes(file === 'clock.xlsx' ? 'ซ้ำ2' : 'สำเร็จ1') || (await page.textContent('main')).includes('จำนวนซ้ำ2'));
+    check(`${file}: imported through the six steps`, (await page.textContent('main')).includes(file === 'clock.xlsx' ? 'ซ้ำ2' : 'สำเร็จ1') || (await page.textContent('main')).includes('จำนวนซ้ำ2'));
   }
   await page.goto(BASE + '/attendance/file-imports');
   await page.waitForSelector('main .import-history');

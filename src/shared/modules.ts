@@ -388,7 +388,7 @@ export function permissionCatalogue(): string[] {
   for (const p of PAGE_MODULES) perms.add(p.perm);
   for (const extra of ['payroll.calculate', 'payroll.approve', 'payroll.publish', 'payroll.export', 'workflow.approve', 'workflow.approve_any', 'reports.export',
     'attendance_import.create', 'attendance_import.update', 'ot_review.update', 'attendance_file.import', 'shift_groups.manage', 'shift_schedule.manage', 'payroll_preview.export', 'org_chart.update', 'org_chart.import', 'org_chart.export', 'payslip_ytd.view',
-    'holiday_calendar.create', 'holiday_calendar.update', 'holiday_calendar.delete', 'holiday_calendar.approve', 'holiday_calendar.import', 'holiday_calendar.export']) perms.add(extra);
+    'holiday_calendar.create', 'holiday_calendar.update', 'holiday_calendar.delete', 'holiday_calendar.approve', 'holiday_calendar.import', 'holiday_calendar.export', 'attendance_exemption.view', 'attendance_exemption.manage']) perms.add(extra);
   for (const r of RESERVED_PERMISSIONS) perms.delete(r);
   return [...perms].sort();
 }

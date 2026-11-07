@@ -104,7 +104,8 @@ const posted = [];
 async function upload(page, path, inputId, company = 'zz_test บริษัท Feishu (ZZF)') {
   await page.goto(BASE + path);
   await page.waitForSelector('main .dropzone');
-  await page.selectOption('main .wizard-step select[aria-label="บริษัท"]', { label: company });
+  // leave / OT: the company is chosen in step 1; attendance: in step 2 (Worksheet / บริษัท)
+  if (!path.startsWith('/attendance')) await page.selectOption('main .wizard-step select[aria-label="บริษัท"]', { label: company });
   await page.setInputFiles(`#${inputId}`, FILE);
   await page.waitForSelector('main .sheet-picker');
 }
@@ -140,10 +141,13 @@ try {
   check('attendance step 1: Sheet1 preselected, Feishu Daily template, 6 rows', (await selectedSheet(page)) === 'Sheet1' && (await page.textContent('main .file-template')).includes('FEISHU_DAILY_ATTENDANCE_V1') && (await page.textContent('main .file-rows')) === '6');
   await page.click('main .sheet-option[data-sheet="Leave"] input');
   await page.waitForSelector('main .file-info .alert-error');
-  check('attendance: choosing the Leave worksheet is refused and "next" is disabled', (await page.textContent('main .file-info .alert-error')).includes('การลา › นำเข้าข้อมูลการลา') && (await page.isDisabled('main button:has-text("ถัดไป: จับคู่คอลัมน์")')));
+  check('attendance: choosing the Leave worksheet is refused and "next" is disabled', (await page.textContent('main .file-info .alert-error')).includes('การลา › นำเข้าข้อมูลการลา') && (await page.isDisabled('main button:has-text("ถัดไป: Worksheet / บริษัท")')));
   await page.click('main .sheet-option[data-sheet="Sheet1"] input');
   await page.waitForFunction(() => !document.querySelector('main .file-info .alert-error'));
   await page.screenshot({ path: join(OUT, 'attendance-step1-1440-light.png'), fullPage: true });
+  await page.click('main button:has-text("ถัดไป: Worksheet / บริษัท")');
+  await page.waitForSelector('main .company-step');
+  await page.selectOption('main .company-step select[aria-label="บริษัท"]', { label: 'zz_test บริษัท Feishu (ZZF)' });
   await page.click('main button:has-text("ถัดไป: จับคู่คอลัมน์")');
   await page.waitForSelector('main .mapping-table');
   check('attendance step 2: worksheet badge and seven day columns found', (await page.textContent('main .sheet-badge-name')) === 'Sheet1' && (await page.getAttribute('main [data-day-columns]', 'data-day-columns')) === '7');
@@ -158,11 +162,11 @@ try {
   check('attendance step 3: late, overtime event, leave event and No record shown per day', body3.includes('มาสาย 09:09') && body3.includes('OT 18:00-20:00') && body3.includes('Sick leave 4 ชม.') && body3.includes('ไม่มีบันทึก (No record)') && body3.includes('ไม่ถือเป็นขาดงาน'), lateRow.slice(0, 120));
   await page.screenshot({ path: join(OUT, 'attendance-step3-1440-light.png') });
   await page.click('main button:has-text("ถัดไป: ยืนยันการนำเข้า")');
-  await page.waitForSelector('main h2:has-text("4. ยืนยันการนำเข้า")');
+  await page.waitForSelector('main h2:has-text("5. ยืนยันการนำเข้า")');
   await page.click('main button:has-text("ยืนยันนำเข้า 13 รายการ")');
   await page.waitForSelector('.modal');
   await page.click('.modal button:has-text("ยืนยันนำเข้า")');
-  await page.waitForSelector('main h2:has-text("5. ผลการนำเข้า")');
+  await page.waitForSelector('main h2:has-text("6. ผลการนำเข้า")');
   const resA = await page.textContent('main .wizard-step');
   check('attendance step 5: imported 13, 9 attendance records, worksheet shown', resA.includes('สำเร็จ13') && resA.includes('สร้างบันทึกเวลา9') && resA.includes('Sheet1'), resA.slice(0, 160));
   const attPosts = posted.filter((p) => p.path.startsWith('/api/attendance-files'));
