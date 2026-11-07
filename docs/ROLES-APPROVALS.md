@@ -1,0 +1,88 @@
+# Roles, maker-checker and the Super Admin exception
+
+Migration `0014_hr_leader_payroll_roles.sql` (rollback `scripts/rollback/0014_hr_leader_payroll_roles.down.sql`). It
+adds two built-in, privileged roles (MFA required) and their grants. No existing role, permission, user, employee or
+payroll row is changed, and no account is created by the migration.
+
+## Permission matrix
+
+| Capability | Super Admin | HR Admin | **HR Leader** (`hr_leader`) | **HR Payroll** (`hr_payroll`) | Payroll Officer | HR Manager (Manager) |
+|---|---|---|---|---|---|---|
+| View payroll periods / payslips | ✓ | ✓ (`*.view`) | ✓ `payroll.view` | ✓ | ✓ | – |
+| Create / calculate / reopen a calculated period | ✓ | – | ✗ | ✓ `payroll.calculate` | ✓ | – |
+| **Approve** a calculated period | ✓ | – | ✓ `payroll.approve` | ✗ | ✓ | – |
+| Publish / export | ✓ | – | – | ✓ `payroll.publish`, `payroll.export` | ✓ | – |
+| Payroll Preview, Feishu summary import, OT review, pay items | ✓ | partly | Preview (view) | ✓ | ✓ | – |
+| Super Admin period overrides (`payroll.period.*`) | ✓ | – | – | – | – | – |
+| Holiday calendar: create / edit / verify / **approve** / import / export | ✓ | ✓ | ✓ `holiday_calendar.*` | view | – | – |
+| Workflow requests (leave / OT / time correction) | ✓ any | – | – | – | – | ✓ **own reporting line only** |
+| Approve their **own** record | ✓ **with a note** | ✗ | ✗ | ✗ | ✗ | ✗ |
+
+Notes:
+- **HR Leader** holds `employees.all`. This is organisation-wide company scope, needed for the central traditional
+  calendar and for the payroll of every company. Without `employees.view` it does not open employee records.
+- **HR Payroll** holds the employee and pay-item data that payroll needs (`employees.view/all/sensitive`,
+  `employee_pay_items.*` without delete). It has no user, role or approval permissions.
+- **Separation of duties is structural:** HR Payroll has no `payroll.approve` and HR Leader has no `payroll.calculate`,
+  so through these roles the person who calculates a period can never approve it.
+
+## Maker-checker
+
+`src/worker/lib/approval.ts` applies one rule everywhere a record is approved:
+
+- **Holidays** (`/api/holidays/:id/approve`), **holiday pay rules** (`/pay-rules/:id/approve`) and **holiday work**
+  (`/work/:id/approve`): the creator does not approve.
+- **Payroll** (`/api/payroll/periods/:id/approve`): the user who calculated the period does not approve, when the
+  setting `payroll.require_separate_approver` is on. The setting is unchanged by this work; see the release checklist.
+- **Workflow requests** (`/api/workflow/:id/decide`): the requester, and the employee the request is about, do not
+  decide it.
+
+**Super Admin exception:** a Super Admin (the highest authority; nobody above it could approve) may approve a record
+they created, calculated or requested.
+
+- An **approval note** is required (400 without it).
+- The audit log records the creator, the approver, `self_approved: true` and the note.
+- The exception follows membership of the `super_admin` role itself, never a permission. HR Admin's wildcard
+  permissions, HR Leader, HR Payroll and the HR Manager never inherit it: a note in the request body does not help
+  them (403).
+
+## Manager scope (workflow)
+
+- **Step approvers:** a role approver of a workflow step (the HR Manager for leave, OT and time correction) decides only
+  requests of employees in their **reporting line**: direct and indirect reports through `employees.manager_id`, up
+  to 10 levels.
+- **Unlinked managers:** a manager account that is not linked to an employee record has no team and therefore no
+  approvals.
+- **Inbox and API:** the inbox shows exactly what may be approved; a direct API call outside the team is refused (403).
+- **Super Admin** (`workflow.approve_any`) is not limited by team.
+
+## UI
+
+- **Holiday detail, pay rules and holiday work:**
+  - the maker sees "คุณเป็นผู้สร้างรายการนี้ ต้องให้ผู้อนุมัติคนอื่นอนุมัติ" instead of the approve button;
+  - a Super Admin's own record shows "อนุมัติ (Super Admin)", which asks for the approval note.
+- **Payroll:** a Super Admin approving a period they calculated is asked for the note.
+- **Server enforcement:** the API enforces every rule; hiding a button is not the control.
+
+## Release and provisioning checklist (run with an approval for each Production step)
+
+1. **Back up D1** (`docs/BACKUP-RECOVERY.md`) and check that only `0014` is pending.
+2. **Apply `0014` once, then deploy** the Worker from the merged `main`.
+3. **Check existing accounts before provisioning.**
+   - Look up each username (Admin › Users) before creating anything.
+   - If an account exists, never create it again and never reset it without an approval. Changing its roles is a
+     Super Admin action in Admin › Users (audited) and needs no password reset.
+4. **Create new accounts** in Admin › Users › add user (Super Admin).
+   - The system generates a random temporary password shown once and requires a password change at first login.
+   - The new roles are privileged, so MFA enrolment is enforced.
+   - Use a real e-mail address (or none); the form and the script reject invalid addresses.
+   - Do not choose passwords that can be guessed from the username, and do not share passwords in chat or tickets.
+   - Scripted alternative: `scripts/create-user.mjs --create-only --must-change` with `NEW_USER_PASSWORD` from the
+     environment. `--create-only` never touches an existing account, and the password is written only to the
+     git-ignored credentials file.
+5. **Link every manager account to its employee record** before relying on workflow approvals. Without a link the
+   manager approves nothing.
+6. **Review the maker-checker configuration.** Check `payroll.require_separate_approver`: when it is off, a user with
+   both `payroll.calculate` and `payroll.approve` can approve a period they calculated. Changing it is a separate,
+   approved settings change.
+7. **Draft records waiting for a Super Admin's own approval** (e.g. holidays) can be approved after deploy, with a note.

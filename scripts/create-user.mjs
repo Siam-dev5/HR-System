@@ -5,7 +5,9 @@
 //
 // Usage:
 //   node scripts/create-user.mjs --username admin --display "System Administrator" --role super_admin \
-//        [--role hr_admin] [--employee E002] [--must-change] [--out .tmp/user.sql] [--cred-file .secrets/credentials.txt]
+//        [--role hr_admin] [--employee E002] [--must-change] [--create-only] [--email a@b.co] [--out .tmp/user.sql] [--cred-file .secrets/credentials.txt]
+//   --create-only: create the account only if the username is free; an existing account is left untouched (no
+//   password reset, no role change) — use it to provision production accounts.
 //   npx wrangler d1 execute hr-system-db --local --file .tmp/user.sql
 import { mkdirSync, appendFileSync, writeFileSync } from 'node:fs';
 import { dirname } from 'node:path';
@@ -19,6 +21,8 @@ const { values } = parseArgs({
     role: { type: 'string', multiple: true, default: [] },
     employee: { type: 'string' },
     'must-change': { type: 'boolean', default: false },
+    'create-only': { type: 'boolean', default: false },
+    email: { type: 'string' },
     out: { type: 'string', default: '.tmp/create-user.sql' },
     'cred-file': { type: 'string', default: '.secrets/credentials.txt' },
     label: { type: 'string', default: '' },
@@ -33,11 +37,20 @@ const password = process.env.NEW_USER_PASSWORD || generatePassword(20);
 const hash = await hashPassword(password);
 const u = sqlString(values.username);
 
+if (values.email !== undefined && !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(values.email)) {
+  console.error('--email is not a valid e-mail address');
+  process.exit(1);
+}
+const email = values.email ? sqlString(values.email) : 'NULL';
+// --create-only: the account and its roles are written only when this run created it (the new hash identifies the row)
+const mine = values['create-only'] ? ` AND u.password_hash = ${sqlString(hash)}` : '';
 const sql = [
-  `INSERT INTO users (username, display_name, password_hash, must_change_password) VALUES (${u}, ${sqlString(values.display ?? values.username)}, ${sqlString(hash)}, ${values['must-change'] ? 1 : 0})`,
-  `  ON CONFLICT (username) DO UPDATE SET password_hash = excluded.password_hash, must_change_password = excluded.must_change_password, failed_attempts = 0, locked_until = NULL, active = 1;`,
-  ...values.role.map((r) => `INSERT OR IGNORE INTO user_roles (user_id, role_id) SELECT u.id, r.id FROM users u, roles r WHERE u.username = ${u} AND r.code = ${sqlString(r)};`),
-  values.employee ? `UPDATE employees SET user_id = (SELECT id FROM users WHERE username = ${u}) WHERE emp_code = ${sqlString(values.employee)} AND user_id IS NULL;` : '',
+  values['create-only']
+    ? `INSERT INTO users (username, display_name, email, password_hash, must_change_password) SELECT ${u}, ${sqlString(values.display ?? values.username)}, ${email}, ${sqlString(hash)}, ${values['must-change'] ? 1 : 0} WHERE NOT EXISTS (SELECT 1 FROM users WHERE username = ${u});`
+    : [`INSERT INTO users (username, display_name, email, password_hash, must_change_password) VALUES (${u}, ${sqlString(values.display ?? values.username)}, ${email}, ${sqlString(hash)}, ${values['must-change'] ? 1 : 0})`,
+       `  ON CONFLICT (username) DO UPDATE SET password_hash = excluded.password_hash, must_change_password = excluded.must_change_password, failed_attempts = 0, locked_until = NULL, active = 1;`].join('\n'),
+  ...values.role.map((r) => `INSERT OR IGNORE INTO user_roles (user_id, role_id) SELECT u.id, r.id FROM users u, roles r WHERE u.username = ${u} AND r.code = ${sqlString(r)}${mine};`),
+  values.employee ? `UPDATE employees SET user_id = (SELECT u.id FROM users u WHERE u.username = ${u}${mine}) WHERE emp_code = ${sqlString(values.employee)} AND user_id IS NULL AND EXISTS (SELECT 1 FROM users u WHERE u.username = ${u}${mine});` : '',
 ].filter(Boolean).join('\n');
 
 mkdirSync(dirname(values.out), { recursive: true });

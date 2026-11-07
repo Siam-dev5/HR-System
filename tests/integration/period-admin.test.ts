@@ -210,8 +210,10 @@ describe('reopen a closed (published) period', () => {
     expect(status(ids.a!)).toMatchObject({ status: 'calculated', reopened_from: 'published', calc_version: v + 1 });
     expect(archived(ids.a!, 'recalculate')).toBe(2);
     expect(JSON.parse(audits(ids.a!, 'payroll.calculated').at(-1)!.details)).toMatchObject({ forced: true, reopenedFrom: 'published', reason: 'คำนวณใหม่หลังแก้ OT', archivedSlips: 2 });
-    // approval (normal workflow, segregation of duties: not the Super Admin who recalculated) closes the reopened state
-    expect((await who.post(`/api/payroll/periods/${ids.a}/approve`)).status).toBe(403);
+    // approval (normal workflow) closes the reopened state; the Super Admin who recalculated may approve only with an
+    // approval note — without one it is refused and the period stays calculated
+    expect((await who.post(`/api/payroll/periods/${ids.a}/approve`)).status).toBe(400);
+    expect(status(ids.a!).status).toBe('calculated');
     expect((await payroll().post(`/api/payroll/periods/${ids.a}/approve`)).status).toBe(200);
     expect(status(ids.a!)).toMatchObject({ status: 'approved', reopened_from: null });
     expect((await payroll().post(`/api/payroll/periods/${ids.a}/publish`)).status).toBe(200);

@@ -173,6 +173,8 @@ export interface WorkflowRequestRow {
 
 export interface PayrollPeriod {
   id: number;
+  /** user who calculated the period (maker-checker: they do not approve it, except a Super Admin with a note) */
+  calculated_by?: number | null;
   code: string;
   name: string;
   start_date: string;
