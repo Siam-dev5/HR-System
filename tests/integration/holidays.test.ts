@@ -150,10 +150,13 @@ describe('holidays: draft → verified → approved', () => {
     expect(a.status, a.text).toBe(200);
     expect(a.body).toMatchObject({ status: 'approved', approved_by_name: 'it_admin' });
     expect((await admin().post(`/api/holidays/${hol.labour}/approve`)).status).toBe(409);
-    // maker-checker: the creator cannot approve their own holiday
+    // maker-checker: the creator approves their own holiday only as Super Admin and only with an approval note
+    // (roles-approval.test.ts covers the other roles, which are refused with 403)
     const own = await admin().post('/api/holidays', { calendar_id: 1, holiday_date: d('07-28'), name: 'zz own', holiday_type: 'traditional', source_reference: 'ประกาศ' });
     expect((await admin().post(`/api/holidays/${own.body.id}/verify`)).status).toBe(200);
-    expect((await admin().post(`/api/holidays/${own.body.id}/approve`)).status).toBe(403);
+    const noNote = await admin().post(`/api/holidays/${own.body.id}/approve`);
+    expect(noNote.status).toBe(400);
+    expect(noNote.body.error.message).toContain('บันทึกการอนุมัติ');
     expect((await admin().post(`/api/holidays/${own.body.id}/deactivate`, { reason: 'zz test entry' })).status).toBe(200);
     // company holiday approved by another person
     expect((await admin().post(`/api/holidays/${hol.company}/verify`)).status).toBe(200);
@@ -258,9 +261,9 @@ describe('holiday pay rules', () => {
     // an overlapping second rule for the same scope cannot be approved
     const dup = await mk({ effective_from: '2021-01-01', work_multiplier: 1.5 });
     expect((await admin().post(`/api/holidays/pay-rules/${dup.body.id}/approve`)).status).toBe(409);
-    // the creator cannot approve their own rule
+    // the creator cannot approve their own rule without the Super Admin approval note (it stays a draft)
     const mine = await admin().post('/api/holidays/pay-rules', { company_id: co, employment_type: 'probation', holiday_pay_entitled: true, work_multiplier: 1, ot_multiplier: 3, effective_from: '2020-01-01', legal_basis: 'zz' });
-    expect((await admin().post(`/api/holidays/pay-rules/${mine.body.id}/approve`)).status).toBe(403);
+    expect((await admin().post(`/api/holidays/pay-rules/${mine.body.id}/approve`)).status).toBe(400);
     // employment type probation has its own rule (1.5x), so a wrong mapping to the permanent rule (1x) would show
     const probation = await mk({ employment_type: 'probation', work_multiplier: 1.5 });
     expect((await admin().post(`/api/holidays/pay-rules/${probation.body.id}/approve`)).status).toBe(200);
