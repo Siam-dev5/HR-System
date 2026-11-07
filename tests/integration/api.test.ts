@@ -306,6 +306,14 @@ describe('workflow approvals', () => {
     leaveId = r.body.id;
     expect((await clients.employee!.post('/api/m/leave', { leave_type_id: 1, start_date: '2026-11-12', end_date: '2026-11-10', days: 1 })).status).toBe(400);
 
+    // the manager (E002) approves only their reporting line: E007 reports to E005 → E001, so it is out of scope
+    const outside = (await clients.manager!.get('/api/workflow/inbox')).body;
+    expect(outside.toApprove.some((x: { refId: number; type: string }) => x.type === 'leave' && x.refId === leaveId)).toBe(false);
+    const reqId = Number(H.sql(`SELECT id FROM workflow_requests WHERE ref_table = 'leave_requests' AND ref_id = ${leaveId}`)[0]!.id);
+    expect((await clients.manager!.post(`/api/workflow/${reqId}/decide`, { decision: 'approved', comment: 'นอกทีม' })).status).toBe(403);
+    // E007's supervisor E005 now reports to E002: E007 is in E002's reporting line (indirect report)
+    H.sql("UPDATE employees SET manager_id = (SELECT id FROM employees WHERE emp_code = 'E002') WHERE emp_code = 'E005'");
+
     const inbox = (await clients.manager!.get('/api/workflow/inbox')).body;
     const req = inbox.toApprove.find((x: { refId: number; type: string }) => x.type === 'leave' && x.refId === leaveId);
     expect(req).toBeTruthy();
@@ -324,14 +332,70 @@ describe('workflow approvals', () => {
     expect(en.some((n: { title: string; href: string }) => n.title === 'คำขอได้รับการอนุมัติ' && n.href === '/leave')).toBe(true);
   });
 
-  it('requesters cannot approve their own requests, even as Super Admin', async () => {
+  it('a requester cannot decide their own request; only a Super Admin can, with a comment, audited as requester = approver', async () => {
+    // every H.sql call starts wrangler (seconds each): the request id is read once and the final checks in one call
+    // a normal user: their own request is refused, with or without a comment
+    const own = await clients.manager!.post('/api/m/leave', { employee_id: 2, leave_type_id: 1, start_date: '2026-11-20', end_date: '2026-11-20', days: 1, reason: 'ลากิจ' });
+    expect(own.status, own.text).toBe(201);
+    expect((await clients.manager!.get('/api/workflow/inbox')).body.toApprove.some((x: { refId: number; type: string }) => x.type === 'leave' && x.refId === own.body.id)).toBe(false);
+    const ownRequest = Number(H.sql(`SELECT id FROM workflow_requests WHERE ref_table = 'leave_requests' AND ref_id = ${own.body.id}`)[0]!.id);
+    for (const body of [{ decision: 'approved' }, { decision: 'approved', comment: 'ขออนุมัติเอง' }, { decision: 'rejected', comment: 'ยกเลิกเอง' }]) {
+      const r = await clients.manager!.post(`/api/workflow/${ownRequest}/decide`, body);
+      expect(r.status).toBe(403);
+      expect(r.body.error.message).toContain('ของตนเอง');
+    }
+    // the Super Admin sees their own request and decides it only with a comment (the explicit exception)
     const ot = await admin().post('/api/m/overtime', { employee_id: 4, work_date: '2026-10-29', hours: 2, rate: '1.5', reason: 'ปิดงบ' });
     expect(ot.status).toBe(201);
     const inbox = (await admin().get('/api/workflow/inbox')).body;
-    expect(inbox.toApprove.some((x: { refId: number; type: string }) => x.type === 'overtime' && x.refId === ot.body.id)).toBe(false);
-    const mine = inbox.mine.find((x: { refId: number; type: string }) => x.type === 'overtime' && x.refId === ot.body.id);
-    expect((await admin().post(`/api/workflow/${mine.id}/decide`, { decision: 'approved' })).status).toBe(403);
-    expect((await clients.manager!.post(`/api/workflow/${mine.id}/decide`, { decision: 'rejected', comment: 'ไม่จำเป็น' })).body.status).toBe('rejected');
+    const mine = inbox.toApprove.find((x: { refId: number; type: string }) => x.type === 'overtime' && x.refId === ot.body.id);
+    expect(mine).toBeTruthy();
+    const noComment = await admin().post(`/api/workflow/${mine.id}/decide`, { decision: 'approved' });
+    expect(noComment.status).toBe(400);
+    expect(noComment.body.error.message).toContain('หมายเหตุ');
+    expect((await admin().post(`/api/workflow/${mine.id}/decide`, { decision: 'approved', comment: 'ok' })).status).toBe(400); // shorter than 3 characters
+    expect(H.sql(`SELECT status FROM workflow_requests WHERE id = ${mine.id}`)[0]!.status).toBe('pending');
+    const ok = await admin().post(`/api/workflow/${mine.id}/decide`, { decision: 'approved', comment: 'อนุมัติปิดงบ (Super Admin)' });
+    expect(ok.status, ok.text).toBe(200);
+    expect(ok.body.status).toBe('approved');
+    const [users, audits, actions] = H.sqlEach(`
+      SELECT id FROM users WHERE username = 'it_admin';
+      SELECT user_id, details FROM audit_logs WHERE action = 'workflow.approved' AND entity = 'overtime' AND entity_id = '${ot.body.id}';
+      SELECT actor_user_id, decision, comment FROM workflow_actions WHERE request_id = ${mine.id};`);
+    const adminId = Number(users![0]!.id);
+    const a = audits![0] as { user_id: number; details: string };
+    expect(a.user_id).toBe(adminId);
+    expect(JSON.parse(a.details)).toMatchObject({ requester: adminId, approver: adminId, self_approved: true, comment: 'อนุมัติปิดงบ (Super Admin)' });
+    expect(actions).toEqual([{ actor_user_id: adminId, decision: 'approved', comment: 'อนุมัติปิดงบ (Super Admin)' }]);
+  });
+
+  it('the manager approves or rejects requests of their team only (403 outside it)', async () => {
+    // E004 reports to E001: outside the manager's (E002) reporting line; E003 reports to E002: in the team
+    const outside = await admin().post('/api/m/overtime', { employee_id: 4, work_date: '2026-10-30', hours: 1, rate: '1.5', reason: 'นอกทีม' });
+    expect(outside.status).toBe(201);
+    const inside = await admin().post('/api/m/overtime', { employee_id: 3, work_date: '2026-10-29', hours: 2, rate: '1.5', reason: 'ปิดงบ' });
+    expect(inside.status).toBe(201);
+    // one wrangler call for both request ids (every H.sql call starts wrangler)
+    const [outsideReq, insideReq] = H.sqlEach(`
+      SELECT id FROM workflow_requests WHERE ref_table = 'overtime_requests' AND ref_id = ${outside.body.id};
+      SELECT id FROM workflow_requests WHERE ref_table = 'overtime_requests' AND ref_id = ${inside.body.id};`).map((rows) => Number(rows[0]!.id));
+    // outside the team: neither approve nor reject
+    for (const decision of ['approved', 'rejected']) expect((await clients.manager!.post(`/api/workflow/${outsideReq}/decide`, { decision, comment: 'ลองตัดสิน' })).status).toBe(403);
+    // in the team: the manager rejects it
+    const r = await clients.manager!.post(`/api/workflow/${insideReq}/decide`, { decision: 'rejected', comment: 'ไม่จำเป็น' });
+    expect(r.status, r.text).toBe(200);
+    expect(r.body.status).toBe('rejected');
+    const [outsideStatus, managers, admins, audits] = H.sqlEach(`
+      SELECT status FROM overtime_requests WHERE id = ${outside.body.id};
+      SELECT id FROM users WHERE username = 'it_manager';
+      SELECT id FROM users WHERE username = 'it_admin';
+      SELECT user_id, details FROM audit_logs WHERE action = 'workflow.rejected' AND entity = 'overtime' AND entity_id = '${inside.body.id}';`);
+    expect(outsideStatus![0]!.status).toBe('pending'); // the refused decisions changed nothing
+    const managerId = Number(managers![0]!.id);
+    const adminId = Number(admins![0]!.id);
+    const a = audits![0] as { user_id: number; details: string };
+    expect(a.user_id).toBe(managerId);
+    expect(JSON.parse(a.details)).toMatchObject({ requester: adminId, approver: managerId, self_approved: false });
   });
 
   it('approved time corrections update attendance; pending requests can be cancelled by the requester', async () => {
