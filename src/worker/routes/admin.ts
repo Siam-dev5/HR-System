@@ -12,6 +12,7 @@ import { bangkokNow } from '../lib/time';
 import { PROBATION_JOB, probationSettings, runProbationJob } from '../lib/probation-job';
 import { PROBATION_CRONS, nextScheduledRun } from '../../shared/probation';
 import { currentUser, requireAuth, requireSuperAdmin } from '../auth';
+import { type UserState, diffState, loadUserRow, stateOf } from '../lib/user-admin';
 
 const PERMISSION_PATTERN = /^(\*|\*\.[a-z_]+|[a-z_]+\.(\*|[a-z_]+))$/;
 
@@ -92,7 +93,8 @@ adminRoutes.post('/users', requireSuperAdmin, async (c) => {
     ...(await linkEmployee(db, userId, body.employeeId)),
   ];
   if (stmts.length) await db.batch(stmts);
-  await audit(c, 'user.created', 'user', userId, { username, roles: body.roles ?? [] });
+  const created = await loadUserRow(db, userId);
+  await audit(c, 'user.created', 'user', userId, { username, roles: body.roles ?? [], after: created ? stateOf(created) : null, must_change_password: true });
   // The temporary password is returned once to the administrator and never stored in plain text or logs.
   return c.json({ id: userId, username, temporaryPassword }, 201);
 });
@@ -123,10 +125,15 @@ adminRoutes.put('/users/:id', requireSuperAdmin, async (c) => {
     params.push(active ? 1 : 0);
     if (!active) stmts.push(db.prepare('DELETE FROM sessions WHERE user_id = ?').bind(id));
   }
+  const beforeRow = await loadUserRow(db, id);
+  if (!beforeRow) throw notFound('ไม่พบผู้ใช้');
   if ('roles' in body) {
     const ids = await roleIds(db, body.roles);
     const keepsSuper = (body.roles as string[]).includes(ROLE.superAdmin);
     if (!keepsSuper && (await activeSuperAdmins(db, id)) === 0) throw conflict('ต้องมี Super Admin ที่ใช้งานได้อย่างน้อย 1 บัญชี');
+    // nobody changes their own roles (no self-escalation, no accidental self-demotion); another Super Admin must do it
+    const wanted = [...new Set(body.roles as string[])].sort();
+    if (id === me.id && JSON.stringify(wanted) !== JSON.stringify([...beforeRow.roles].sort())) throw forbidden('ไม่สามารถเปลี่ยนบทบาทของตนเองได้ ต้องให้ Super Admin คนอื่นดำเนินการ');
     stmts.push(db.prepare('DELETE FROM user_roles WHERE user_id = ?').bind(id));
     for (const rid of ids) stmts.push(db.prepare('INSERT INTO user_roles (user_id, role_id) VALUES (?, ?)').bind(id, rid));
     // new roles need a fresh sign-in (and MFA enrolment when they are privileged); the acting admin keeps this session
@@ -136,9 +143,30 @@ adminRoutes.put('/users/:id', requireSuperAdmin, async (c) => {
   if (sets.length) stmts.unshift(db.prepare(`UPDATE users SET ${sets.join(', ')}, updated_at = datetime('now') WHERE id = ?`).bind(...params, id));
   if (!stmts.length) throw badRequest('ไม่มีข้อมูลที่จะแก้ไข');
   await db.batch(stmts);
-  await audit(c, 'user.updated', 'user', id, { fields: Object.keys(body) });
+  await auditUserChange(c, id, stateOf(beforeRow), Object.keys(body));
   return c.json({ ok: true });
 });
+
+/**
+ * Audits a change to an account with before / after values: one "user.updated" entry with every changed field, plus a
+ * dedicated entry per security-relevant change (roles, activation, employee link, company scope). No secrets.
+ */
+async function auditUserChange(c: Context<AppEnv>, id: number, before: UserState, fields: string[]): Promise<void> {
+  const afterRow = await loadUserRow(c.env.DB, id);
+  if (!afterRow) return;
+  const after = stateOf(afterRow);
+  const changes = diffState(before, after);
+  const target = { username: afterRow.username };
+  await audit(c, 'user.updated', 'user', id, { ...target, fields, changes });
+  if (changes.roles) {
+    const b = before.roles;
+    const a = after.roles;
+    await audit(c, 'user.roles_changed', 'user', id, { ...target, before: b, after: a, added: a.filter((x) => !b.includes(x)), removed: b.filter((x) => !a.includes(x)) });
+  }
+  if (changes.active) await audit(c, after.active ? 'user.activated' : 'user.deactivated', 'user', id, { ...target, before: before.active, after: after.active });
+  if (changes.employee_id) await audit(c, 'user.employee_link_changed', 'user', id, { ...target, before: before.employee_id, after: after.employee_id });
+  if (changes.scope) await audit(c, 'user.company_scope_changed', 'user', id, { ...target, before: before.scope, after: after.scope });
+}
 
 async function adminAction(c: Context<AppEnv>, action: 'reset-password' | 'unlock' | 'reset-mfa') {
   const id = intParam(c.req.param('id'));
@@ -226,6 +254,10 @@ function parsePermissions(raw: unknown): string[] {
   // user/role management stays with the super_admin role; no pattern may grant it to another role
   const reserved = (raw as string[]).filter((p) => RESERVED_PERMISSIONS.some((r) => permissionMatches(p, r)));
   if (reserved.length) throw badRequest(`สิทธิ์ ${reserved.join(', ')} สงวนไว้สำหรับ Super Admin เท่านั้น`);
+  // every pattern must grant at least one real permission of the catalogue: no invented or mistyped keys
+  const catalogue = permissionCatalogue();
+  const unknown = (raw as string[]).filter((p) => p !== '*' && !catalogue.some((c) => permissionMatches(p, c)));
+  if (unknown.length) throw badRequest(`ไม่รู้จักสิทธิ์ ${unknown.join(', ')} (ต้องเป็นสิทธิ์ที่มีอยู่ในระบบ)`, { unknown });
   return [...new Set(raw as string[])];
 }
 
@@ -242,7 +274,7 @@ adminRoutes.post('/roles', requireSuperAdmin, async (c) => {
       .bind(code, name, str(body, 'description', { max: 300 }), body.privileged ? 1 : 0)
       .first<{ id: number }>();
     if (perms.length) await db.batch(perms.map((p) => db.prepare('INSERT INTO role_permissions (role_id, permission) VALUES (?, ?)').bind(row?.id, p)));
-    await audit(c, 'role.created', 'role', row?.id ?? null, { code, permissions: perms });
+    await audit(c, 'role.created', 'role', row?.id ?? null, { code, name, privileged: !!body.privileged, permissions: perms });
     return c.json({ id: row?.id }, 201);
   } catch (e) {
     if (e instanceof Error && /UNIQUE/i.test(e.message)) throw conflict('รหัสบทบาทซ้ำ');
@@ -253,9 +285,11 @@ adminRoutes.post('/roles', requireSuperAdmin, async (c) => {
 adminRoutes.put('/roles/:id', requireSuperAdmin, async (c) => {
   const id = intParam(c.req.param('id'));
   const db = c.env.DB;
-  const role = await db.prepare('SELECT id, code FROM roles WHERE id = ?').bind(id).first<{ id: number; code: string }>();
+  const role = await db.prepare('SELECT id, code, name, description, privileged FROM roles WHERE id = ?').bind(id).first<{ id: number; code: string; name: string; description: string | null; privileged: number }>();
   if (!role) throw notFound('ไม่พบบทบาท');
   if (role.code === ROLE.superAdmin) throw forbidden('สิทธิ์ของ Super Admin แก้ไขไม่ได้');
+  const { results: oldPerms } = await db.prepare('SELECT permission FROM role_permissions WHERE role_id = ? ORDER BY permission').bind(id).all<{ permission: string }>();
+  const beforePerms = oldPerms.map((p) => p.permission);
   const body = await readJson(c);
   const perms = parsePermissions(body.permissions);
   if (perms.includes('*')) throw badRequest('สิทธิ์ * สงวนไว้สำหรับ Super Admin');
@@ -271,7 +305,35 @@ adminRoutes.put('/roles/:id', requireSuperAdmin, async (c) => {
     // holders of the changed role sign in again (the acting admin keeps this session)
     db.prepare('DELETE FROM sessions WHERE user_id IN (SELECT user_id FROM user_roles WHERE role_id = ?) AND id <> ?').bind(id, currentUser(c).sessionId),
   ]);
-  await audit(c, 'role.updated', 'role', id, { code: role.code, permissions: perms });
+  const after = await db.prepare('SELECT name, description, privileged FROM roles WHERE id = ?').bind(id).first<{ name: string; description: string | null; privileged: number }>();
+  const afterPerms = [...perms].sort();
+  await audit(c, 'role.updated', 'role', id, {
+    code: role.code,
+    permissions: afterPerms,
+    added: afterPerms.filter((p) => !beforePerms.includes(p)),
+    removed: beforePerms.filter((p) => !afterPerms.includes(p)),
+    before: { name: role.name, description: role.description, privileged: role.privileged === 1, permissions: beforePerms },
+    after: { name: after?.name, description: after?.description, privileged: after?.privileged === 1, permissions: afterPerms },
+  });
+  return c.json({ ok: true });
+});
+
+// Only custom roles (system = 0) that nobody holds may be deleted; built-in roles are protected.
+adminRoutes.delete('/roles/:id', requireSuperAdmin, async (c) => {
+  const id = intParam(c.req.param('id'));
+  const db = c.env.DB;
+  const role = await db.prepare('SELECT id, code, name, system, (SELECT COUNT(*) FROM user_roles ur WHERE ur.role_id = roles.id) AS users FROM roles WHERE id = ?')
+    .bind(id)
+    .first<{ id: number; code: string; name: string; system: number; users: number }>();
+  if (!role) throw notFound('ไม่พบบทบาท');
+  if (role.system === 1) throw forbidden('บทบาทของระบบลบไม่ได้');
+  if (role.users > 0) throw conflict(`ยังมีผู้ใช้ ${role.users} บัญชีในบทบาทนี้ ต้องย้ายผู้ใช้ออกก่อนลบ`);
+  const { results } = await db.prepare('SELECT permission FROM role_permissions WHERE role_id = ? ORDER BY permission').bind(id).all<{ permission: string }>();
+  await db.batch([
+    db.prepare('DELETE FROM role_permissions WHERE role_id = ?').bind(id),
+    db.prepare('DELETE FROM roles WHERE id = ? AND system = 0 AND NOT EXISTS (SELECT 1 FROM user_roles WHERE role_id = ?)').bind(id, id),
+  ]);
+  await audit(c, 'role.deleted', 'role', id, { code: role.code, name: role.name, before: { permissions: results.map((r) => r.permission) } });
   return c.json({ ok: true });
 });
 

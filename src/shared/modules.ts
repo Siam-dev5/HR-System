@@ -343,6 +343,7 @@ export const MODULES: readonly ModuleDef[] = [
   page('audit', '/audit', 'Audit Log', 'system', 'audit.view', '/api/audit'),
   { ...page('users', '/admin/users', 'ผู้ใช้ระบบ', 'system', 'users.manage', '/api/admin/users'), superAdminOnly: true },
   { ...page('roles', '/admin/roles', 'บทบาท & สิทธิ์', 'system', 'roles.manage', '/api/admin/roles'), superAdminOnly: true },
+  { ...page('app_management', '/admin/app-management', 'App Management · จัดการระบบ', 'system', 'app_management.manage', '/api/admin/app/overview'), superAdminOnly: true },
   { ...page('settings', '/admin/settings', 'ตั้งค่าระบบ', 'system', 'settings.manage', '/api/admin/settings'), superAdminOnly: true },
   page('security', '/security', 'ความปลอดภัย & MFA', 'system', 'security.self', '/api/security/status'),
   page('help', '/help', 'คู่มือการใช้งาน', 'system', 'help.view', '/api/help'),
@@ -365,7 +366,7 @@ export function viewPermission(m: ModuleDef): string {
  * never grantable through the role editor, and the API checks the role itself, not just the permission.
  */
 export const SUPER_ADMIN_ROLE = 'super_admin';
-export const RESERVED_PERMISSIONS: readonly string[] = ['users.manage', 'roles.manage', 'settings.manage', 'payroll_layout.manage', ...Object.values(PERIOD_ADMIN)];
+export const RESERVED_PERMISSIONS: readonly string[] = ['users.manage', 'roles.manage', 'settings.manage', 'payroll_layout.manage', 'app_management.manage', ...Object.values(PERIOD_ADMIN)];
 
 export function isSuperAdmin(roles: readonly string[]): boolean {
   return roles.includes(SUPER_ADMIN_ROLE);
