@@ -4,6 +4,7 @@ import { renderAnalytics, renderDashboard, renderEss, renderOrganization, render
 import { renderMyPayslips, renderPayroll, renderPayslips, renderPayslipView } from './payroll';
 import { renderAudit, renderHelp, renderReports, renderRoles, renderSettings, renderUsers } from './system';
 import { renderAttendanceImport, renderOtReview } from './attendance';
+import { renderAppManagement } from './app-management';
 import { renderPayrollPreview } from './payroll-preview';
 import { renderOrgChart } from './org';
 import { renderHolidays } from './holidays';
@@ -41,6 +42,7 @@ export const PAGES: Record<string, PageRenderer> = {
   users: renderUsers,
   roles: renderRoles,
   settings: renderSettings,
+  app_management: renderAppManagement,
   security: renderSecurity,
   help: renderHelp,
 };

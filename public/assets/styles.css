@@ -910,3 +910,20 @@ tr.is-future td { color: var(--primary); }
 @media (max-width: 600px) {
   .exemption-add .exemption-reason { grid-column: auto; }
 }
+
+/* App Management (Super Admin) */
+.am-tabs { flex-wrap: wrap; margin-bottom: 1rem; }
+.am-body > * + * { margin-top: 1rem; }
+.am-tags { display: inline-flex; flex-wrap: wrap; gap: 0.25rem; }
+.am-list { margin: 0.25rem 0 0; padding-left: 1.2rem; display: grid; gap: 0.3rem; }
+.am-dl { display: grid; grid-template-columns: minmax(9rem, max-content) 1fr; gap: 0.35rem 1rem; margin: 0 0 1rem; }
+.am-dl dt { color: var(--muted); }
+.am-dl dd { margin: 0; }
+.am-detail { min-width: min(46rem, 85vw); }
+.am-matrix th[scope="row"] { font-weight: 600; min-width: 11rem; }
+.am-matrix .am-c { text-align: center; width: 4.6rem; }
+.am-matrix td .check { margin-right: 0.5rem; }
+.am-matrix-card h2 { margin-bottom: 0.6rem; }
+.am-json { white-space: pre-wrap; word-break: break-word; max-width: 36rem; font-size: 0.8rem; background: var(--surface-2); padding: 0.5rem; border-radius: var(--radius-sm); }
+button.kpi { text-align: left; font: inherit; color: inherit; cursor: pointer; }
+@media (max-width: 640px) { .am-dl { grid-template-columns: 1fr; } .am-detail { min-width: 0; } }
