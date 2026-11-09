@@ -35,5 +35,7 @@ export const ROLE = {
   payrollOfficer: 'payroll_officer',
   hrLeader: 'hr_leader',
   hrPayroll: 'hr_payroll',
+  accStaff: 'acc_staff',
+  accManager: 'acc_manager',
   employee: 'employee',
 } as const;
