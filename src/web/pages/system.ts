@@ -92,7 +92,7 @@ interface UserRow {
   created_at: string;
 }
 
-function showTempPassword(username: string, password: string): void {
+export function showTempPassword(username: string, password: string): void {
   modal('รหัสผ่านชั่วคราว', [
     h('p', null, `รหัสผ่านชั่วคราวของ ${username} (แสดงครั้งเดียว — ระบบไม่เก็บรหัสนี้ไว้):`),
     h('p', null, h('code', { class: 'secret' }, password)),
