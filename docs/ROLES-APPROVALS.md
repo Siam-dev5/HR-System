@@ -26,6 +26,37 @@ Notes:
 - **Separation of duties is structural:** HR Payroll has no `payroll.approve` and HR Leader has no `payroll.calculate`,
   so through these roles the person who calculates a period can never approve it.
 
+## ACC Staff / ACC Manager (read-only review, migration 0016)
+
+Migration `0016_acc_readonly_roles.sql` (rollback `scripts/rollback/0016_acc_readonly_roles.down.sql`) adds two
+built-in, privileged roles (MFA required) for the Accounting & Finance department. Both review the employee and
+payroll data of every company in the group and change nothing. Tests: `tests/integration/acc-roles.test.ts`.
+
+| Capability | ACC Staff (`acc_staff`) | ACC Manager (`acc_manager`) |
+|---|---|---|
+| Company scope | every company (`employees.all`) | every company (`employees.all`) |
+| Dashboard, employee directory (personal data, masked bank / tax ID / base salary) | ✓ | ✓ |
+| Payroll periods, payslips, payslip detail with YTD, Payroll Preview | ✓ | ✓ |
+| Pay items and salary history, amounts included (`*.sensitive` of those two modules only) | ✓ | ✓ |
+| Attendance, leave, OT records; Feishu / leave / OT import history; OT review; exemptions; holidays | view | view |
+| Reports page | ✓ (lists what the role may view) | ✓ |
+| Export Payroll Preview (CSV / XLSX, no bank or ID columns) | – | ✓ `payroll_preview.export` |
+| Calculate / reopen / approve / publish payroll, `payroll.period.*`, `payroll.export` (CSV with bank accounts) | ✗ | ✗ |
+| Any create / update / delete / import / approve; users, roles, settings, audit log | ✗ | ✗ |
+
+Notes:
+- **Least privilege:** `employees.sensitive` is not granted. It unmasks bank account, bank name and tax ID together
+  with base salary, so it needs its own decision. Salary amounts are still available from salary history, pay items
+  and the payslips.
+- **No ACC review step yet:** the payroll workflow is still HR Payroll calculates → HR Leader approves → HR Payroll
+  publishes. ACC can review at any status, but there is no "reviewed by ACC" status or sign-off. Adding one is a
+  separate, additive workflow change.
+- **Self-service:** the ACC roles carry no ESS or own-payslip permissions. Give the `employee` role as well if an ACC
+  user should use ESS.
+- **App Management readiness:** these are ordinary rows in `roles` / `role_permissions`. The job function is the role,
+  company scope is a separate grant resolved from the `companies` table, and view / export / sensitive are separate
+  permissions. Nothing is hard-coded by username or company.
+
 ## Maker-checker
 
 `src/worker/lib/approval.ts` applies one rule everywhere a record is approved:
