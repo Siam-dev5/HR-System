@@ -67,6 +67,14 @@ If a title is not in the table, or a person has no position:
 - The **legend** above the chart lists the departments of the cards on screen, with counts. It is rebuilt on every company or department filter change. Out-of-department managers shown as context have a dashed swatch.
 - Search hits, the selected card, keyboard focus and loops are shown by a ring **outside** the card, so the border keeps its department colour.
 
+## Cross company relationships
+
+Assignments made on the **Cross Company Manager Assignment** screen are separate from `manager_id`. They are drawn as:
+- a reference card for the responsible person, in a violet dashed frame named after the target team. The frame sits at the left end of the target company, on that person's level band.
+- violet dashed lines from the reference card to the person's real card and to the named employee. The lines are routed around every card.
+
+The relationship legend sits next to the department legend. A reference card is never a node, so headcount, layout and levels are unchanged. See [CROSS-COMPANY-ASSIGNMENT.md](CROSS-COMPANY-ASSIGNMENT.md).
+
 ## Level labels
 - The live chart shows the labels in a **rail fixed to the left edge** of the chart. Each label follows its band through zoom and pan, so it never scrolls away. The rail sits above the chart; the toolbar is on the right, so nothing covers it. Phones show the short form (L1–L5).
 - Fit and centring keep the chart clear of the rail.

@@ -1,6 +1,7 @@
 // API contracts shared by the Worker and the SPA. Changing a field here breaks the type check
 // on both sides, which is how backend/frontend mapping drift is caught at build time.
 import type { FieldDef, MenuGroup, WorkflowType, ComputedDef } from './modules';
+import type { OrgCrossCompany } from './cross-company';
 
 export interface ApiError {
   error: { code: string; message: string; details?: unknown };
@@ -503,6 +504,8 @@ export interface OrgDesignResponse {
   canUpdate: boolean;
   canImport: boolean;
   canExport: boolean;
+  /** cross company assignments in effect today (functional relationships; never the primary reporting line) */
+  crossCompany: OrgCrossCompany;
 }
 
 export interface NineBoxResponse {

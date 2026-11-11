@@ -102,7 +102,7 @@ describe('migration 0016', () => {
     writeFileSync(join(dir, 'm.sql'), files.map((x) => readFileSync(join('migrations', x), 'utf8')).join('\n;\n'));
     const w = (args: string[]) => execFileSync(process.execPath, [WRANGLER, 'd1', 'execute', 'hr-system-db', '--local', '--persist-to', join(dir, 's'), ...args], { env: { ...process.env, CI: '1' }, encoding: 'utf8' });
     w(['--file', join(dir, 'm.sql')]);
-    const q = "SELECT r.code || ':' || r.privileged || ':' || rp.permission AS g FROM role_permissions rp JOIN roles r ON r.id = rp.role_id WHERE r.code NOT IN ('acc_staff', 'acc_manager') AND r.code NOT LIKE 'zz%' ORDER BY 1";
+    const q = "SELECT r.code || ':' || r.privileged || ':' || rp.permission AS g FROM role_permissions rp JOIN roles r ON r.id = rp.role_id WHERE r.code NOT IN ('acc_staff', 'acc_manager') AND r.code NOT LIKE 'zz%' AND rp.permission NOT LIKE 'org_assignment.%' ORDER BY 1"; // 0017 grants: tests/integration/cross-company.test.ts
     const out = w(['--json', '--command', q]);
     const before = (JSON.parse(out.slice(out.indexOf('['))) as Array<{ results: Array<{ g: string }> }>)[0]!.results.map((x) => x.g);
     expect(before.some((g) => g.startsWith('hr_leader:1:payroll.approve'))).toBe(true);

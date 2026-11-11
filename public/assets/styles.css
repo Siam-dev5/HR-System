@@ -741,6 +741,42 @@ input[aria-invalid='true'], select[aria-invalid='true'], textarea[aria-invalid='
 [data-theme='dark'] .org-canvas .org-orphans-title, [data-theme='dark'] .org-canvas .org-external-title { fill: #94a3b8; }
 [data-theme='dark'] .org-canvas .org-external-frame { stroke: #64748b; }
 [data-theme='dark'] .org-canvas .org-band.is-alt { fill: #172033; }
+/* cross company (functional) relationships: dashed violet lines, reference cards and frames, card badge, legend */
+.org-legend-sep { flex: none; width: 1px; height: 1.1rem; background: var(--border); }
+.org-legend-rel-item { display: inline-flex; align-items: center; gap: 0.4rem; }
+.org-legend-line { flex: none; width: 1.8rem; height: 0; border-top: 2px solid #94a3b8; }
+.org-legend-line.is-dashed { border-top: 2px dashed #7c3aed; }
+.org-legend-refcard { flex: none; width: 1.35rem; height: 0.95rem; border: 2px dashed #7c3aed; border-radius: 4px; background: #faf5ff; }
+.org-canvas .org-ref, .org-canvas .org-link { cursor: pointer; }
+.org-ref:focus { outline: none; }
+.org-ref:focus .org-ring { stroke: #f59e0b; }
+.org-cross-detail { margin: 0.6rem 0; padding: 0.5rem 0.65rem; border: 1px dashed #7c3aed; border-radius: var(--radius-sm); background: color-mix(in srgb, #7c3aed 6%, var(--surface)); }
+.org-cross-detail h4 { margin: 0.2rem 0 0.35rem; font-size: 0.85rem; color: #5b21b6; }
+.org-cross-detail li { padding: 0.3rem 0; border-top: 1px solid var(--border); }
+.org-cross-detail li:first-child { border-top: 0; }
+.org-context-note.is-cross { border-color: #7c3aed; background: color-mix(in srgb, #7c3aed 8%, var(--surface)); color: var(--text); }
+.org-cross-cell { font-size: 0.8rem; color: var(--text-2); }
+/* Cross Company Manager Assignment screen */
+.cca-table td { vertical-align: top; }
+.cca-sentence { margin: 0; padding: 0.55rem 0.7rem; border-left: 3px solid #7c3aed; border-radius: var(--radius-sm); background: color-mix(in srgb, #7c3aed 7%, var(--surface)); color: var(--text); }
+.cca-results { display: flex; flex-direction: column; gap: 2px; max-height: 13rem; overflow-y: auto; }
+.cca-results:empty { display: none; }
+.cca-result { display: block; width: 100%; padding: 0.4rem 0.55rem; border: 1px solid var(--border); border-radius: var(--radius-sm); background: var(--surface); color: var(--text); text-align: left; cursor: pointer; }
+.cca-result:hover, .cca-result:focus-visible { border-color: #7c3aed; background: color-mix(in srgb, #7c3aed 6%, var(--surface)); }
+.cca-picked { padding: 0.35rem 0; }
+.cca-history { margin: 0; padding-left: 1.2rem; }
+.cca-history > li { padding: 0.35rem 0; border-bottom: 1px solid var(--border); }
+[data-theme='dark'] .org-legend-line.is-dashed, [data-theme='dark'] .org-legend-refcard { border-color: #a78bfa; }
+[data-theme='dark'] .org-legend-refcard { background: #1e1533; }
+[data-theme='dark'] .org-cross-detail h4 { color: #c4b5fd; }
+[data-theme='dark'] .org-canvas .org-ref-card { fill: #1e1533; stroke: #a78bfa; }
+[data-theme='dark'] .org-canvas .org-ref .org-t1 { fill: #ede9fe; }
+[data-theme='dark'] .org-canvas .org-ref .org-t3, [data-theme='dark'] .org-canvas .org-ref-frame-title { fill: #c4b5fd; }
+[data-theme='dark'] .org-canvas .org-ref-frame-box { fill: #140d24; stroke: #8b5cf6; }
+[data-theme='dark'] .org-canvas .org-link-path { stroke: #a78bfa; }
+[data-theme='dark'] .org-canvas .org-link-end { fill: #a78bfa; }
+[data-theme='dark'] .org-canvas .org-cross-badge rect, [data-theme='dark'] .org-canvas .org-ref-tab rect { fill: #2e1065; stroke: #a78bfa; }
+[data-theme='dark'] .org-canvas .org-cross-badge text, [data-theme='dark'] .org-canvas .org-ref-tab text { fill: #ede9fe; }
 /* employee photo: round; the initials sit underneath and show when there is no photo or it cannot load */
 .emp-avatar { position: relative; display: inline-grid; place-items: center; flex: none; overflow: hidden; border-radius: 50%; background: var(--brand-navy); color: #fff; font-weight: 700; line-height: 1; }
 .emp-avatar-lg { width: 96px; height: 96px; font-size: 2rem; }

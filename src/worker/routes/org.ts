@@ -11,6 +11,8 @@ import { avatarVersion } from '../../shared/avatar';
 import { safeName, badRequest, conflict, csv, forbidden, intParam, notFound, readJson } from '../lib/http';
 import { audit } from '../lib/audit';
 import { companyScope, requireCompany } from '../lib/companies';
+import { orgCrossCompany, scopeCompanyIds } from '../lib/cross-company';
+import { bangkokNow } from '../lib/time';
 import { can, currentUser, requireAuth, requirePerm } from '../auth';
 
 export const orgRoutes = new Hono<AppEnv>();
@@ -29,7 +31,7 @@ async function orgCompany(c: Context<AppEnv>, raw: string | undefined): Promise<
   return { company: own, companies: scope.items };
 }
 
-async function loadOrg(db: D1Database, companyId: number | null): Promise<Omit<OrgDesignResponse, 'company' | 'companies' | 'canUpdate' | 'canImport' | 'canExport'>> {
+async function loadOrg(db: D1Database, companyId: number | null): Promise<Omit<OrgDesignResponse, 'company' | 'companies' | 'canUpdate' | 'canImport' | 'canExport' | 'crossCompany'>> {
   const { results: deps } = await db
     .prepare('SELECT id, code, name, company_id, parent_id FROM departments WHERE active = 1 AND (?1 IS NULL OR company_id = ?1) ORDER BY code')
     .bind(companyId)
@@ -106,7 +108,9 @@ orgRoutes.get('/', requirePerm('org_chart.view'), async (c) => {
   const user = currentUser(c);
   const { company, companies } = await orgCompany(c, c.req.query('company'));
   const data = await loadOrg(c.env.DB, company?.id ?? null);
-  return c.json<OrgDesignResponse>({ company, companies, ...data, canUpdate: can(user, 'org_chart.update'), canImport: can(user, 'org_chart.import'), canExport: can(user, 'org_chart.export') });
+  // functional cross-company relationships (separate from manager_id); people outside the user's scope are masked
+  const crossCompany = await orgCrossCompany(c.env.DB, await scopeCompanyIds(c.env.DB, user), company?.id ?? null, bangkokNow().date);
+  return c.json<OrgDesignResponse>({ company, companies, ...data, crossCompany, canUpdate: can(user, 'org_chart.update'), canImport: can(user, 'org_chart.import'), canExport: can(user, 'org_chart.export') });
 });
 
 function tableRows(d: Awaited<ReturnType<typeof loadOrg>>, companies: CompanyOption[]): Cell[][] {
