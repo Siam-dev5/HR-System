@@ -397,7 +397,7 @@ export function layoutOrg(o: LayoutOptions): OrgLayout {
   const minX = (xs.length ? Math.min(...xs) : 0) - MARGIN;
   const maxX = (xs.length ? Math.max(...xs) : CARD_W) + MARGIN;
   // External-manager reference cards are drawn above their team frames by the chart renderer.
-  const minY = Math.min(0, ...externals.map((f) => f.y - CARD_H - 24));
+  const minY = Math.min(0, ...externals.map((f) => f.y - CARD_H - 24 - 16));
   const maxY = Math.max(ys.length ? Math.max(...ys) : CARD_H, (bands[4] as { y: number }).y + CARD_H) + MARGIN;
   return { nodes: sink.nodes, edges: sink.edges, groups, orphans: orphanBlocks, externals, refs, refFrames, bands, bounds: { x: minX, y: minY, w: maxX - minX, h: maxY - minY } };
 }
