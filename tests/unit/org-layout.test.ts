@@ -1,7 +1,8 @@
 import { describe, expect, it } from 'vitest';
 import { buildOrgForest, mergeForests, type OrgForest } from '../../src/shared/org-tree';
 import { POSITION_LEVELS, positionLevel, type OrgLevel } from '../../src/shared/org-levels';
-import { CARD_H, CARD_W, GRID_COLS, layoutOrg, type OrgLayout } from '../../src/shared/org-layout';
+import { CARD_H, CARD_W, GRID_COLS, layoutOrg, staffCols, type OrgLayout } from '../../src/shared/org-layout';
+import { DEPT_COLORS, NO_DEPT_COLOR, contrast, departmentColors } from '../../src/shared/org-colors';
 
 // Synthetic people only (no production data): id, manager, company, position title.
 interface P { id: number; manager_id: number | null; department_id: number | null; company_id: number; title: string }
@@ -11,7 +12,7 @@ function person(title: string, manager: P | null, company = 1, dept: number | nu
   return { id: ++seq, manager_id: manager?.id ?? null, department_id: dept, company_id: company, title };
 }
 
-function layout(people: P[], opts: { collapsed?: number[]; companies?: number[]; labels?: boolean; include?: (p: P) => boolean; aspect?: number; maxRowWidth?: number } = {}) {
+function layout(people: P[], opts: { collapsed?: number[]; companies?: number[]; labels?: boolean; include?: (p: P) => boolean; byDept?: boolean } = {}) {
   const companies = opts.companies ?? [...new Set(people.map((p) => p.company_id))];
   const include = opts.include ?? (() => true);
   const forest = mergeForests(companies.map((c) => buildOrgForest(people.filter((p) => p.company_id === c), include)));
@@ -21,17 +22,19 @@ function layout(people: P[], opts: { collapsed?: number[]; companies?: number[];
     levelOf: (id) => positionLevel(byId.get(id)?.title).level,
     groupOf: (id) => byId.get(id)?.company_id ?? 0,
     groups: companies.map((c) => ({ key: c, label: opts.labels ? `Company ${c}` : null })),
-    hasManager: (id) => (byId.get(id)?.manager_id ?? null) !== null,
+    managerOf: (id) => byId.get(id)?.manager_id ?? null,
     collapsed: new Set(opts.collapsed ?? []),
-    aspect: opts.aspect,
-    maxRowWidth: opts.maxRowWidth,
+    orderOf: opts.byDept ? (id) => byId.get(id)?.department_id ?? 1e9 : undefined,
   });
   return { forest, lay };
 }
 
 type Rect = { l: number; t: number; r: number; b: number };
 const rect = (n: { x: number; y: number }): Rect => ({ l: n.x, t: n.y, r: n.x + CARD_W, b: n.y + CARD_H });
+const box = (f: { x: number; y: number; w: number; h: number }): Rect => ({ l: f.x, t: f.y, r: f.x + f.w, b: f.y + f.h });
 const overlap = (a: Rect, b: Rect) => a.l < b.r && b.l < a.r && a.t < b.b && b.t < a.b;
+const inside = (a: Rect, b: Rect) => a.l >= b.l && a.r <= b.r && a.t >= b.t && a.b <= b.b;
+const cx = (lay: OrgLayout, id: number) => (lay.nodes.get(id)?.x ?? NaN) + CARD_W / 2;
 
 /** Geometry invariants that every layout must keep. */
 function checkInvariants(forest: OrgForest, lay: OrgLayout, collapsed: number[] = []) {
@@ -82,15 +85,15 @@ function checkInvariants(forest: OrgForest, lay: OrgLayout, collapsed: number[] 
         if (id === e.from || id === e.to) continue;
         const c = rect(n);
         // a vertical / horizontal segment against the card's open interior
-        const inside = x1 === x2
+        const crosses = x1 === x2
           ? c.l < x1 && x1 < c.r && seg.t < c.b && seg.b > c.t
           : c.t < y1 && y1 < c.b && seg.l < c.r && seg.r > c.l;
-        expect(inside, `edge ${e.from}->${e.to} crosses card ${id}`).toBe(false);
+        expect(crosses, `edge ${e.from}->${e.to} crosses card ${id}`).toBe(false);
       }
     }
   }
 
-  // Staff / Admin grids: ≤ 3 per row, one manager per grid, last row centred under the block
+  // Staff / Admin blocks: ≤ 3 per row, one manager per block, last row centred under the block
   const grids = new Map<number, Map<number, number[]>>();
   for (const [id, n] of lay.nodes) {
     if (!n.grid) continue;
@@ -107,7 +110,40 @@ function checkInvariants(forest: OrgForest, lay: OrgLayout, collapsed: number[] 
       expect(Math.abs(centre(ids) - centre(first))).toBeLessThan(0.01);
     }
   }
+
+  // frames (external manager / no reporting line): hold exactly their people, never overlap another card or frame
+  const frames = [...lay.externals, ...lay.orphans];
+  for (const f of frames) {
+    for (const [id, n] of lay.nodes) {
+      const mine = f.ids.includes(id) || isUnder(forest, id, f.ids);
+      if (mine) expect(inside(rect(n), box(f)), `card ${id} inside its frame`).toBe(true);
+      else expect(overlap(rect(n), box(f)), `card ${id} overlaps a frame`).toBe(false);
+    }
+  }
+  for (let i = 0; i < frames.length; i++) for (let j = i + 1; j < frames.length; j++) expect(overlap(box(frames[i] as never), box(frames[j] as never))).toBe(false);
+  for (const id of lay.orphans.flatMap((f) => f.ids)) expect(lay.nodes.get(id)?.orphan).toBe(true);
+  for (const f of lay.externals) for (const id of f.ids) expect(lay.nodes.get(id)?.external).toBe(f.manager);
+
+  // the five level bands, top-down, and every card at its own band (or lower when its manager forces it)
+  expect(lay.bands.map((b) => b.level)).toEqual([1, 2, 3, 4, 5]);
+  const b0 = (lay.bands[0] as { y: number }).y;
+  const rowH = (lay.bands[1] as { y: number }).y - b0;
+  for (const [id, n] of lay.nodes) {
+    const bandY = b0 + n.row * rowH;
+    // first row of a block (or a tree card) sits exactly on its band; further block rows below it
+    const blockRow = (n.grid && n.grid.gridRow > 0) || ((n.orphan || n.external !== null) && !forest.nodes.get(id)?.children.length);
+    if (blockRow) expect(n.y).toBeGreaterThanOrEqual(bandY);
+    else expect(n.y, `card ${id} on its band`).toBe(bandY);
+  }
   return lay;
+}
+function isUnder(forest: OrgForest, id: number, roots: number[]): boolean {
+  let p = forest.nodes.get(id)?.parent ?? null;
+  while (p !== null) {
+    if (roots.includes(p)) return true;
+    p = forest.nodes.get(p)?.parent ?? null;
+  }
+  return false;
 }
 
 const gridRows = (lay: OrgLayout, parent: number) => {
@@ -115,7 +151,7 @@ const gridRows = (lay: OrgLayout, parent: number) => {
   for (const n of lay.nodes.values()) if (n.grid?.parent === parent) rows.set(n.grid.gridRow, (rows.get(n.grid.gridRow) ?? 0) + 1);
   return [...rows.entries()].sort((a, b) => a[0] - b[0]).map(([, n]) => n);
 };
-const staff = (n: number, mgr: P, title = 'Customer Service Officer', company = 1) => Array.from({ length: n }, () => person(title, mgr, company));
+const staff = (n: number, mgr: P, title = 'Customer Service Officer', company = 1, dept: number | null = 1) => Array.from({ length: n }, () => person(title, mgr, company, dept));
 
 describe('position title → level (exact production mapping)', () => {
   it('maps every approved production title, 26 in total', () => {
@@ -141,22 +177,55 @@ describe('position title → level (exact production mapping)', () => {
   });
 });
 
-describe('organization layout (inverted bell)', () => {
-  it('1. a small company: MD on top, two staff in one centred row', () => {
+describe('organization layout (master template)', () => {
+  it('1. a small company: MD on top, two staff stacked in one column centred under it', () => {
     const md = person('Manager Director', null);
     const s = staff(2, md);
     const { forest, lay } = layout([md, ...s]);
     checkInvariants(forest, lay);
     expect(lay.nodes.get(md.id)?.row).toBe(0);
-    expect(gridRows(lay, md.id)).toEqual([2]);
+    expect(gridRows(lay, md.id)).toEqual([1, 1]);
     // staff sit in the L5 band even though they report straight to the MD
     expect(lay.nodes.get(s[0]?.id as number)?.row).toBe(4);
-    const mdC = (lay.nodes.get(md.id)?.x ?? 0) + CARD_W / 2;
-    const rowC = s.reduce((a, p) => a + (lay.nodes.get(p.id)?.x ?? 0) + CARD_W / 2, 0) / s.length;
-    expect(Math.abs(mdC - rowC)).toBeLessThan(0.01);
+    expect(Math.abs(cx(lay, md.id) - cx(lay, s[0]?.id as number))).toBeLessThan(0.01);
   });
 
-  it('2, 6, 7. several departments, managers and leaders: one band per level, top narrower than the bottom', () => {
+  it('master template: the MD centred over the AMDs, every AMD centred over its managers, teams side by side', () => {
+    const md = person('Manager Director', null);
+    const people: P[] = [md];
+    const amds = [1, 2, 3].map((d) => person('Asst. Managing Director', md, 1, d));
+    const mgrs: P[][] = [];
+    amds.forEach((a, i) => {
+      people.push(a);
+      const ms = [0, 1, 2].map(() => person('Operations Manager', a, 1, i + 1));
+      mgrs.push(ms);
+      for (const m of ms) people.push(m, ...staff(3, m, 'Operations Officer', 1, i + 1));
+    });
+    const { forest, lay } = layout(people);
+    checkInvariants(forest, lay);
+    // spread, not stacked: all AMDs share one row, all nine managers share the next band
+    expect(new Set(amds.map((a) => lay.nodes.get(a.id)?.y)).size).toBe(1);
+    expect(new Set(mgrs.flat().map((m) => lay.nodes.get(m.id)?.y)).size).toBe(1);
+    // left / centre / right
+    const xs = amds.map((a) => cx(lay, a.id));
+    expect(xs[0]).toBeLessThan(xs[1] as number);
+    expect(xs[1]).toBeLessThan(xs[2] as number);
+    expect(Math.abs(cx(lay, md.id) - ((xs[0] as number) + (xs[2] as number)) / 2)).toBeLessThan(0.01);
+    amds.forEach((a, i) => {
+      const ms = mgrs[i] as P[];
+      expect(Math.abs(cx(lay, a.id) - (cx(lay, (ms[0] as P).id) + cx(lay, (ms[2] as P).id)) / 2)).toBeLessThan(0.01);
+    });
+    // each AMD's team keeps its own column range (no interleaving between divisions)
+    const range = (i: number) => {
+      const ids = [amds[i] as P, ...(mgrs[i] as P[])].flatMap((m) => [m.id, ...people.filter((p) => p.manager_id === m.id).map((p) => p.id)]);
+      const x = ids.map((id) => lay.nodes.get(id)?.x ?? 0);
+      return [Math.min(...x), Math.max(...x) + CARD_W];
+    };
+    expect((range(0)[1] as number)).toBeLessThan(range(1)[0] as number);
+    expect((range(1)[1] as number)).toBeLessThan(range(2)[0] as number);
+  });
+
+  it('2. several departments, managers and leaders: one band per level, top narrower than the bottom', () => {
     const md = person('Manager Director', null);
     const amd = person('Asst. Managing Director', md);
     const people: P[] = [md, amd];
@@ -172,8 +241,10 @@ describe('organization layout (inverted bell)', () => {
     checkInvariants(forest, lay);
     const ids = (lv: OrgLevel) => people.filter((p) => positionLevel(p.title).level === lv).map((p) => p.id);
     const bandY = (lv: OrgLevel) => new Set(ids(lv).map((id) => lay.nodes.get(id)?.y));
-    for (const lv of [1, 2, 3, 4] as OrgLevel[]) expect(bandY(lv).size).toBe(1);
-    expect(lay.bands.map((b) => b.level)).toEqual([1, 2, 3, 4, 5]);
+    for (const lv of [1, 2, 3, 4] as OrgLevel[]) {
+      expect(bandY(lv).size).toBe(1);
+      expect([...bandY(lv)][0]).toBe(lay.bands[lv - 1]?.y);
+    }
     const span = (lv: OrgLevel) => {
       const xs = ids(lv).map((id) => lay.nodes.get(id)?.x ?? 0);
       return Math.max(...xs) + CARD_W - Math.min(...xs);
@@ -183,26 +254,9 @@ describe('organization layout (inverted bell)', () => {
     expect(span(4)).toBeLessThanOrEqual(span(5));
   });
 
-  it('3. a leader with 1–3 staff: one row', () => {
-    for (const n of [1, 2, 3]) {
-      const l = person('Sales Leader', null);
-      const { forest, lay } = layout([l, ...staff(n, l)]);
-      checkInvariants(forest, lay);
-      expect(gridRows(lay, l.id)).toEqual([n]);
-    }
-  });
-
-  it('4. a leader with 4–6 staff: two rows, 3 + the rest centred', () => {
-    for (const [n, rows] of [[4, [3, 1]], [5, [3, 2]], [6, [3, 3]]] as const) {
-      const l = person('Customer Service Leader', null);
-      const { forest, lay } = layout([l, ...staff(n, l)]);
-      checkInvariants(forest, lay);
-      expect(gridRows(lay, l.id)).toEqual(rows);
-    }
-  });
-
-  it('5. a leader with 7–12 staff: 3 + 3 + … downwards, never wider than three cards', () => {
-    for (const [n, rows] of [[7, [3, 3, 1]], [8, [3, 3, 2]], [9, [3, 3, 3]], [10, [3, 3, 3, 1]], [12, [3, 3, 3, 3]]] as const) {
+  it('staff grouping: 1–3 in one column, 4–6 in two, 7+ in three columns', () => {
+    expect([1, 2, 3, 4, 5, 6, 7, 9, 10, 30].map(staffCols)).toEqual([1, 1, 1, 2, 2, 2, 3, 3, 3, 3]);
+    for (const [n, rows] of [[1, [1]], [3, [1, 1, 1]], [4, [2, 2]], [5, [2, 2, 1]], [6, [2, 2, 2]], [7, [3, 3, 1]], [8, [3, 3, 2]], [10, [3, 3, 3, 1]], [12, [3, 3, 3, 3]]] as const) {
       const l = person('Operations Leader', null);
       const s = staff(n, l);
       const { forest, lay } = layout([l, ...s]);
@@ -213,16 +267,33 @@ describe('organization layout (inverted bell)', () => {
     }
   });
 
-  it('staff of different managers never share a grid, even when one team is small', () => {
+  it('last row centring: a short last row sits in the middle of the block', () => {
+    for (const n of [5, 7, 10]) {
+      const l = person('Sales Leader', null);
+      const s = staff(n, l);
+      const { lay } = layout([l, ...s]);
+      const rowsOf = new Map<number, number[]>();
+      for (const p of s) {
+        const g = lay.nodes.get(p.id)?.grid as { gridRow: number };
+        rowsOf.set(g.gridRow, [...(rowsOf.get(g.gridRow) ?? []), cx(lay, p.id)]);
+      }
+      const mid = (xs: number[]) => (Math.min(...xs) + Math.max(...xs)) / 2;
+      const last = rowsOf.get(Math.max(...rowsOf.keys())) as number[];
+      expect(Math.abs(mid(last) - mid(rowsOf.get(0) as number[]))).toBeLessThan(0.01);
+      expect(Math.abs(mid(last) - cx(lay, l.id))).toBeLessThan(0.01);
+    }
+  });
+
+  it('multiple managers / teams: staff of different managers never share a block', () => {
     const m = person('Operations Manager', null);
     const a = person('Operations Leader', m);
     const b = person('Sales Leader', m);
     const sa = staff(2, a);
-    const sb = staff(2, b);
+    const sb = staff(4, b);
     const { forest, lay } = layout([m, a, b, ...sa, ...sb]);
     checkInvariants(forest, lay);
-    expect(gridRows(lay, a.id)).toEqual([2]);
-    expect(gridRows(lay, b.id)).toEqual([2]);
+    expect(gridRows(lay, a.id)).toEqual([1, 1]);
+    expect(gridRows(lay, b.id)).toEqual([2, 2]);
   });
 
   it('a manager with both leaders and direct staff: the staff block sits between the branches', () => {
@@ -232,10 +303,10 @@ describe('organization layout (inverted bell)', () => {
     const direct = staff(5, m);
     const { forest, lay } = layout([m, l1, ...staff(3, l1), l2, ...staff(2, l2), ...direct]);
     checkInvariants(forest, lay);
-    expect(gridRows(lay, m.id)).toEqual([3, 2]);
+    expect(gridRows(lay, m.id)).toEqual([2, 2, 1]);
     const x = (id: number) => lay.nodes.get(id)?.x ?? 0;
     expect(x(l1.id)).toBeLessThan(x(direct[0]?.id as number));
-    expect(x(direct[2]?.id as number)).toBeLessThan(x(l2.id));
+    expect(x(direct[1]?.id as number)).toBeLessThan(x(l2.id));
   });
 
   it('Business Development (L5) with reports stays L5; its reports hang below it by manager_id', () => {
@@ -246,9 +317,9 @@ describe('organization layout (inverted bell)', () => {
     const { forest, lay } = layout([l, bd, peer, ...reports]);
     checkInvariants(forest, lay);
     expect(lay.nodes.get(bd.id)?.row).toBe(4);
-    expect(lay.nodes.get(bd.id)?.grid).toBeNull(); // has reports: a branch, not a grid card
+    expect(lay.nodes.get(bd.id)?.grid).toBeNull(); // has reports: a branch, not a block card
     expect(lay.nodes.get(peer.id)?.grid?.parent).toBe(l.id);
-    expect(gridRows(lay, bd.id)).toEqual([3, 1]);
+    expect(gridRows(lay, bd.id)).toEqual([2, 2]);
     for (const r of reports) expect(lay.nodes.get(r.id)?.row).toBe(5);
   });
 
@@ -263,28 +334,51 @@ describe('organization layout (inverted bell)', () => {
     expect(lay.edges.find((e) => e.to === lead.id)?.from).toBe(amd.id);
   });
 
-  it('8. people without a manager and without reports go to the "no reporting line" block; nobody is lost', () => {
+  it('no MD / AMD in the data: nothing is invented, the L1 / L2 bands simply stay empty', () => {
+    const m = person('Operations Manager', null);
+    const people = [m, ...staff(3, m)];
+    const { forest, lay } = layout(people);
+    checkInvariants(forest, lay);
+    expect(lay.nodes.size).toBe(4);
+    expect(lay.nodes.get(m.id)?.y).toBe(lay.bands[2]?.y);
+  });
+
+  it('unassigned: people without a manager and without reports go to the "no reporting line" block beside the tree', () => {
     const amd = person('Asst. Managing Director', null); // top of the company: has reports, stays the tree root
     const m = person('Operations Manager', amd);
-    const loose = [person('LiveStreaming', null), person('LiveStreaming', null), person('Quality Control Officer', null)];
+    const loose = [person('LiveStreaming', null, 1, null), person('LiveStreaming', null), person('Quality Control Officer', null)];
     const { forest, lay } = layout([amd, m, ...staff(3, m), ...loose]);
     checkInvariants(forest, lay);
     expect(lay.orphans).toHaveLength(1);
     expect(lay.orphans[0]?.ids).toEqual(loose.map((p) => p.id));
-    for (const p of loose) expect(lay.nodes.get(p.id)?.orphan).toBe(true);
     expect(lay.nodes.get(amd.id)?.orphan).toBe(false);
-    const treeBottom = Math.max(...[amd, m].map((p) => (lay.nodes.get(p.id)?.y ?? 0) + CARD_H));
-    expect(lay.orphans[0]?.y).toBeGreaterThan(treeBottom);
+    // at the right end, on the L5 band
+    const treeRight = Math.max(...[amd, m].map((p) => (lay.nodes.get(p.id)?.x ?? 0) + CARD_W));
+    expect(lay.orphans[0]?.x).toBeGreaterThan(treeRight);
+    expect(lay.nodes.get(loose[0]?.id as number)?.y).toBe(lay.bands[4]?.y);
   });
 
-  it('a person whose manager is outside the chart is not counted as "no reporting line"', () => {
+  it('unmapped position: shown on the L5 band, never dropped, its reporting line kept', () => {
+    const l = person('Operations Leader', null);
+    const odd = person('Chief Happiness Officer', l);
+    const { forest, lay } = layout([l, odd, ...staff(2, l)]);
+    checkInvariants(forest, lay);
+    expect(positionLevel(odd.title).mapped).toBe(false);
+    expect(lay.nodes.get(odd.id)?.row).toBe(4);
+    expect(lay.edges.find((e) => e.to === odd.id)?.from).toBe(l.id);
+  });
+
+  it('a person whose manager is outside the chart sits in a frame named after that manager, not in "no reporting line"', () => {
     const p = { ...person('Operations Officer', null), manager_id: 9999 };
-    const { forest, lay } = layout([p]);
+    const q = { ...person('Operations Officer', null), manager_id: 9999 };
+    const { forest, lay } = layout([p, q]);
     checkInvariants(forest, lay);
     expect(lay.orphans).toHaveLength(0);
+    expect(lay.externals).toEqual([expect.objectContaining({ manager: 9999, ids: [p.id, q.id] })]);
+    expect(lay.edges).toHaveLength(0);
   });
 
-  it('9. a reports-to loop: everyone shown once, finite, the cut point is a tree root', () => {
+  it('reporting loop: everyone shown once, finite, the cut point is a tree root', () => {
     const a = person('Operations Leader', null);
     const b = person('Operations Leader', a);
     const c = person('Operations Officer', b);
@@ -296,9 +390,24 @@ describe('organization layout (inverted bell)', () => {
     expect(lay.nodes.size).toBe(4);
     expect([...forest.nodes.values()].filter((n) => n.cycle)).toHaveLength(1);
     expect(lay.orphans.flatMap((o) => o.ids)).not.toContain(a.id);
+    expect(lay.externals.flatMap((o) => o.ids)).not.toContain(a.id);
   });
 
-  it('10. several companies: separate groups side by side, no line across companies', () => {
+  it('cross-department reporting: the real line is drawn; teams of one manager are grouped by department', () => {
+    const m = person('Operations Manager', null, 1, 1);
+    const a = person('Sales Leader', m, 1, 3);
+    const b = person('Operations Leader', m, 1, 1);
+    const c = person('Customer Service Leader', m, 1, 3);
+    const people = [m, a, b, c, ...staff(2, a, 'Sales Executive', 1, 3), ...staff(2, b, 'Operations Officer', 1, 1), ...staff(2, c, 'Customer Service Officer', 1, 3)];
+    const { forest, lay } = layout(people, { byDept: true });
+    checkInvariants(forest, lay);
+    expect(lay.edges.find((e) => e.to === a.id)?.from).toBe(m.id);
+    // department order 1 → 3, input order inside a department
+    const order = [a, b, c].sort((x, y) => cx(lay, x.id) - cx(lay, y.id)).map((p) => p.id);
+    expect(order).toEqual([b.id, a.id, c.id]);
+  });
+
+  it('multi-company: own frame per company, no line across companies, same level bands, cross-company reports framed', () => {
     const md1 = person('Manager Director', null, 1);
     const amd2 = person('Asst. Managing Director', md1, 2); // manager in another company
     const people = [md1, ...staff(4, md1, 'LiveStreaming', 1), amd2, ...staff(2, amd2, 'LiveStreaming', 2), person('Quality Control Officer', null, 3)];
@@ -309,18 +418,18 @@ describe('organization layout (inverted bell)', () => {
       const prev = lay.groups[i - 1] as { x: number; w: number };
       expect((lay.groups[i]?.x ?? 0)).toBeGreaterThan(prev.x + prev.w);
     }
+    const comp = new Map(people.map((p) => [p.id, p.company_id]));
+    expect(lay.edges.every((e) => comp.get(e.from) === comp.get(e.to))).toBe(true);
     expect(lay.edges.some((e) => e.to === amd2.id)).toBe(false);
-    const inGroup = (id: number, k: number) => {
-      const g = lay.groups.find((x) => x.key === k) as { x: number; w: number };
-      const n = lay.nodes.get(id) as { x: number };
-      return n.x >= g.x && n.x + CARD_W <= g.x + g.w;
-    };
-    for (const p of people) expect(inGroup(p.id, p.company_id)).toBe(true);
-    // the same levels share a band across companies
-    expect(lay.nodes.get(amd2.id)?.row).toBe(1);
+    for (const p of people) expect(inside(rect(lay.nodes.get(p.id) as { x: number; y: number }), box(lay.groups.find((g) => g.key === p.company_id) as never))).toBe(true);
+    // AMD of company 2 shares the L2 band with nothing else in between, in a frame naming its real manager
+    expect(lay.nodes.get(amd2.id)?.y).toBe(lay.bands[1]?.y);
+    expect(lay.externals).toEqual([expect.objectContaining({ key: 2, manager: md1.id, ids: [amd2.id] })]);
+    // its own team still hangs below it
+    expect(lay.edges.filter((e) => e.from === amd2.id)).toHaveLength(2);
   });
 
-  it('10. switching company = the same layout as that company on its own', () => {
+  it('switching company = the same layout as that company on its own (no header)', () => {
     const md = person('Manager Director', null, 7);
     const people = [md, ...staff(5, md, 'Graphic Designer', 7)];
     const alone = layout(people).lay;
@@ -328,7 +437,29 @@ describe('organization layout (inverted bell)', () => {
     expect(alone.groups[0]?.label).toBeNull();
   });
 
-  it('department filter: context manager stays a dashed root above the members', () => {
+  it('balanced: the largest tree in the centre, other units split left / right, the no-line block at the right end', () => {
+    const big = person('Asst. Managing Director', null);
+    const people: P[] = [big];
+    for (let i = 0; i < 4; i++) {
+      const m = person('Operations Manager', big);
+      people.push(m, ...staff(3, m));
+    }
+    const small1 = person('Account Manager', null);
+    const small2 = person('Sales Leader', null);
+    const ext = { ...person('Operations Officer', null), manager_id: 5000 };
+    const loose = person('LiveStreaming', null);
+    people.push(small1, ...staff(2, small1, 'Accountant'), small2, ...staff(1, small2, 'Sales Executive'), ext, loose);
+    const { forest, lay } = layout(people);
+    checkInvariants(forest, lay);
+    const x = (id: number) => lay.nodes.get(id)?.x ?? 0;
+    const lefts = [small1.id, small2.id, ext.id].filter((id) => x(id) < x(big.id));
+    const rights = [small1.id, small2.id, ext.id].filter((id) => x(id) > x(big.id));
+    expect(lefts.length).toBeGreaterThan(0);
+    expect(rights.length).toBeGreaterThan(0);
+    expect(x(loose.id)).toBe(Math.max(...[...lay.nodes.values()].map((n) => n.x)));
+  });
+
+  it('department filter: the context manager stays a dashed root above the members', () => {
     const m = person('Operations Manager', null, 1, 1);
     const l = person('Operations Leader', m, 1, 2);
     const s = staff(4, l).map((p) => ({ ...p, department_id: 2 }));
@@ -336,6 +467,7 @@ describe('organization layout (inverted bell)', () => {
     checkInvariants(forest, lay);
     expect(forest.context.has(m.id)).toBe(true);
     expect(lay.edges.find((e) => e.to === l.id)?.context).toBe(true);
+    expect(lay.externals).toHaveLength(0);
   });
 
   it('collapse hides a team and re-layouts without gaps or overlaps', () => {
@@ -347,7 +479,7 @@ describe('organization layout (inverted bell)', () => {
     expect(lay.nodes.size).toBe(people.length - 8);
   });
 
-  it('large production-shaped company (45 people, 3 loose) keeps every invariant', () => {
+  it('production-shaped company (45 people, 3 loose) keeps every invariant', () => {
     const amd = person('Asst. Managing Director', null);
     const people: P[] = [amd];
     const teams: Array<[string, string, string, number]> = [
@@ -371,132 +503,69 @@ describe('organization layout (inverted bell)', () => {
     expect(lay.nodes.size).toBe(people.length);
     // a team of 8 is three cards wide, not eight
     expect(Math.max(...gridRows(lay, people.find((p) => p.title === 'Customer Service Leader')?.id as number))).toBe(3);
-  });
-});
-
-describe('balanced multi-row layout (stacked teams)', () => {
-  // a company shaped like production: many teams under one AMD
-  function wideCompany(company = 1) {
-    const amd = person('Asst. Managing Director', null, company);
-    const people: P[] = [amd];
-    const teams: Array<[string, string, string, number]> = [
-      ['Operations Manager', 'Operations Leader', 'Operations Officer', 6],
-      ['Operations Manager', 'Customer Service Leader', 'Customer Service Officer', 8],
-      ['Account Manager', 'Sales Leader', 'Accountant', 3],
-      ['Human Resources Manager', 'HR Leader (Payroll & Admin)', 'HR Officer (Recruit & Training)', 2],
-    ];
-    for (const [mt, lt, st, n] of teams) {
-      const mg = person(mt, amd, company);
-      const ld = person(lt, mg, company);
-      people.push(mg, ld, ...staff(n, ld, st, company));
-    }
-    const gd = person('Leader Graphic Designer', amd, company);
-    people.push(gd, ...staff(6, gd, 'Graphic Designer', company));
-    const bd = person('Business Development', amd, company);
-    people.push(bd, person('Business Development', amd, company), ...staff(1, bd, 'Sales Executive', company));
-    people.push(person('LiveStreaming', null, company), person('Quality Control Officer', null, company));
-    return { amd, people };
-  }
-
-  it('stacks the teams of a wide manager in tiers of two; every invariant still holds', () => {
-    const { amd, people } = wideCompany();
-    const natural = layout(people).lay;
-    const { forest, lay } = layout(people, { maxRowWidth: 1600 });
-    checkInvariants(forest, lay);
-    expect(lay.stacked).toContain(amd.id);
-    expect(lay.bounds.w).toBeLessThan(natural.bounds.w * 0.6);
-    expect(lay.nodes.size).toBe(people.length);
-  });
-
-  it('inside a tier the levels line up, and every tier sits below the manager', () => {
-    const { amd, people } = wideCompany();
-    const { lay } = layout(people, { maxRowWidth: 1600 });
-    const managers = people.filter((p) => positionLevel(p.title).level === 3 && p.manager_id === amd.id);
-    const amdY = lay.nodes.get(amd.id)?.y ?? 0;
-    for (const m of managers) expect(lay.nodes.get(m.id)?.y ?? 0).toBeGreaterThan(amdY + CARD_H);
-    // first tier: the two managers share a row
-    const ys = managers.map((m) => lay.nodes.get(m.id)?.y);
-    expect(ys[0]).toBe(ys[1]);
-    // every level band label still names one level per row
-    for (const b of lay.bands) {
-      const onRow = [...lay.nodes.entries()].filter(([, n]) => n.y === b.y && !n.orphan && !(n.grid && n.grid.gridRow > 0));
-      expect(onRow.every(([id]) => positionLevel(people.find((p) => p.id === id)?.title).level === b.level)).toBe(true);
+    // collapsed in every possible way: still valid
+    for (const c of people.filter((p) => people.some((q) => q.manager_id === p.id))) {
+      const { forest: f2, lay: l2 } = layout(people, { collapsed: [c.id] });
+      checkInvariants(f2, l2, [c.id]);
     }
   });
 
-  it('aspect-driven: a screen-shaped stage gets a better whole-chart fit than one wide row', () => {
-    const { people } = wideCompany();
-    const natural = layout(people).lay;
-    const fit = (l: OrgLayout, w: number, h: number) => Math.min(w / l.bounds.w, h / l.bounds.h);
-    for (const [w, h] of [[760, 600], [1250, 760], [1900, 1100]] as const) {
-      const { forest, lay } = layout(people, { aspect: w / h });
-      checkInvariants(forest, lay);
-      expect(fit(lay, w, h)).toBeGreaterThanOrEqual(fit(natural, w, h));
-    }
-    const { lay } = layout(people, { aspect: 760 / 600 });
-    expect(fit(lay, 760, 600)).toBeGreaterThan(fit(natural, 760, 600) * 1.5);
-  });
-
-  it('narrow stage: teams go into one column on a side trunk; still no overlap or crossing', () => {
-    const { amd, people } = wideCompany();
-    const { forest, lay } = layout(people, { maxRowWidth: 760 });
-    checkInvariants(forest, lay);
-    expect(lay.stacked).toContain(amd.id);
-    // nothing is wider than the widest team (3 staff cards + spines) plus the trunk gutters
-    expect(lay.bounds.w).toBeLessThan(1500);
-    expect(lay.nodes.size).toBe(people.length);
-  });
-
-  it('a chart that already fits is left side by side', () => {
-    const l = person('Sales Leader', null);
-    const { lay } = layout([l, ...staff(3, l)], { aspect: 1.6 });
-    expect(lay.stacked).toHaveLength(0);
-  });
-
-  it('every earlier scenario keeps its invariants under stacking', () => {
-    for (const w of [700, 1000, 1400]) {
-      const md = person('Manager Director', null);
-      const amd = person('Asst. Managing Director', md);
-      const people: P[] = [md, amd];
-      for (let t = 0; t < 5; t++) {
-        const m = person('Operations Manager', amd);
-        const l1 = person('Operations Leader', m);
-        const l2 = person('Sales Leader', m);
-        const bd = person('Business Development', l2);
-        people.push(m, l1, ...staff(3 + t * 2, l1), l2, ...staff(t + 1, l2), bd, ...staff(t, bd, 'Sales Executive'), ...staff(t % 3, m));
+  it('large organization: 3 companies, ~900 people, cross-company reports, loops — valid and fast', () => {
+    let rnd = 7;
+    const rand = (n: number) => {
+      rnd = (rnd * 1103515245 + 12345) % 2147483648;
+      return rnd % n;
+    };
+    const people: P[] = [];
+    for (const c of [11, 12, 13]) {
+      const md = person('Manager Director', null, c, c * 10);
+      const amds = [0, 1, 2].map((i) => person('Asst. Managing Director', md, c, c * 10 + i));
+      people.push(md, ...amds);
+      for (let m = 0; m < 12; m++) {
+        const amd = amds[m % 3] as P;
+        const mg = person('Operations Manager', amd, c, amd.department_id);
+        people.push(mg);
+        for (let l = 0; l < 3; l++) {
+          const ld = person('Operations Leader', mg, c, amd.department_id);
+          people.push(ld, ...staff(1 + rand(10), ld, 'Operations Officer', c, amd.department_id));
+        }
       }
-      const a = person('Operations Leader', null);
-      const b = person('Operations Leader', a);
-      a.manager_id = b.id;
-      people.push(a, b, person('LiveStreaming', null));
-      const { forest, lay } = layout(people, { maxRowWidth: w });
-      checkInvariants(forest, lay);
-      const { forest: f2, lay: l2c } = layout(people, { maxRowWidth: w, collapsed: [people[2]?.id as number] });
-      checkInvariants(f2, l2c, [people[2]?.id as number]);
+      people.push(person('LiveStreaming', null, c, null));
     }
-  });
-
-  it('several companies wrap into rows of groups; frames never overlap; no line across companies', () => {
-    const a = wideCompany(1);
-    const b = wideCompany(2);
-    const c = wideCompany(3);
-    const people = [...a.people, ...b.people, ...c.people];
-    const { forest, lay } = layout(people, { labels: true, aspect: 1.3 });
+    // a few reports to managers in another company, and a loop
+    for (let i = 0; i < 6; i++) (people[50 + i * 70] as P).manager_id = (people[(50 + i * 70 + 300) % people.length] as P).id;
+    const a = person('Sales Leader', null, 11);
+    const b = person('Sales Leader', a, 11);
+    a.manager_id = b.id;
+    people.push(a, b);
+    const t0 = performance.now();
+    const { forest, lay } = layout(people, { labels: true, byDept: true });
+    const ms = performance.now() - t0;
+    expect(lay.nodes.size).toBe(people.length);
+    expect(ms).toBeLessThan(2000);
     checkInvariants(forest, lay);
-    expect(lay.groups).toHaveLength(3);
-    for (let i = 0; i < lay.groups.length; i++) {
-      for (let j = i + 1; j < lay.groups.length; j++) {
-        const g = lay.groups[i] as { x: number; y: number; w: number; h: number };
-        const k = lay.groups[j] as { x: number; y: number; w: number; h: number };
-        expect(g.x < k.x + k.w && k.x < g.x + g.w && g.y < k.y + k.h && k.y < g.y + g.h).toBe(false);
-      }
-    }
     const comp = new Map(people.map((p) => [p.id, p.company_id]));
     expect(lay.edges.every((e) => comp.get(e.from) === comp.get(e.to))).toBe(true);
-    for (const p of people) {
-      const g = lay.groups.find((x) => x.key === p.company_id) as { x: number; y: number; w: number; h: number };
-      const n = lay.nodes.get(p.id) as { x: number; y: number };
-      expect(n.x >= g.x && n.x + CARD_W <= g.x + g.w && n.y >= g.y && n.y + CARD_H <= g.y + g.h).toBe(true);
+  }, 60_000);
+});
+
+describe('department colours', () => {
+  it('every colour reads on the light and the dark card (≥ 3:1) and the list has no repeats', () => {
+    expect(new Set(DEPT_COLORS).size).toBe(DEPT_COLORS.length);
+    expect(DEPT_COLORS.length).toBeGreaterThanOrEqual(16);
+    for (const c of [...DEPT_COLORS, NO_DEPT_COLOR]) {
+      expect(contrast(c, '#ffffff'), `${c} on light`).toBeGreaterThanOrEqual(3);
+      expect(contrast(c, '#111827'), `${c} on dark`).toBeGreaterThanOrEqual(3);
     }
+    expect(DEPT_COLORS).not.toContain(NO_DEPT_COLOR);
+  });
+
+  it('colours follow the department order of the scope, not the id: same department = same colour, neighbours differ', () => {
+    // ids that collided under the old "id % 10" rule
+    const m = departmentColors([3, 13, 23, 7]);
+    expect(m.get(3)).toBe(DEPT_COLORS[0]);
+    expect(m.get(13)).toBe(DEPT_COLORS[1]);
+    expect(new Set(m.values()).size).toBe(4);
+    expect(departmentColors([3, 13, 23, 7]).get(23)).toBe(m.get(23));
   });
 });

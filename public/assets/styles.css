@@ -692,7 +692,22 @@ input[aria-invalid='true'], select[aria-invalid='true'], textarea[aria-invalid='
 .org-zoom-sep { width: 1.4rem; height: 1px; margin: 0.15rem 0; background: var(--border); }
 .org-node { cursor: pointer; }
 .org-node:focus { outline: none; }
-.org-node:focus .org-card { stroke: var(--primary); stroke-width: 3; }
+.org-node:focus .org-ring { stroke: var(--primary); stroke-width: 3; }
+/* level labels: SVG text for exports only; the live chart shows the rail fixed to the left edge */
+.org-canvas .org-band-label { display: none; }
+.org-level-rail { position: absolute; z-index: 1; top: 0; left: 0; width: 8.4rem; overflow: hidden; pointer-events: none; border-radius: var(--radius-lg) 0 0 var(--radius-lg); background: linear-gradient(to right, color-mix(in srgb, var(--surface-2) 92%, transparent) 72%, transparent); }
+.org-level-rail[hidden] { display: none; }
+.org-level-pill { position: absolute; top: 0; left: 0.4rem; display: flex; align-items: baseline; gap: 0.3rem; max-width: 7.9rem; padding: 0.22rem 0.5rem; border: 1px solid var(--border); border-radius: var(--radius-pill); background: color-mix(in srgb, var(--surface) 94%, transparent); box-shadow: var(--shadow); color: var(--text-2); font-size: 0.72rem; line-height: 1.2; white-space: nowrap; will-change: transform; }
+.org-level-pill b { color: var(--heading); font-size: 0.78rem; }
+.org-level-name { overflow: hidden; text-overflow: ellipsis; }
+/* department legend (card border colour), rebuilt with every filter */
+.org-legend { display: flex; flex-wrap: wrap; align-items: center; gap: 0.35rem 0.9rem; margin: 0 0 0.6rem; padding: 0.5rem 0.75rem; border: 1px solid var(--border); border-radius: var(--radius); background: var(--surface); font-size: 0.8rem; color: var(--text-2); }
+.org-legend:empty { display: none; }
+.org-legend-title { font-weight: 700; color: var(--heading); }
+.org-legend-item { display: inline-flex; align-items: center; gap: 0.4rem; }
+.org-legend-swatch { flex: none; width: 1.35rem; height: 0.95rem; border: 2px solid; border-radius: 4px; background: var(--surface); }
+.org-legend-item.is-context .org-legend-swatch { border-style: dashed; }
+.org-legend-count { min-width: 1.4rem; padding: 0 0.35rem; border-radius: var(--radius-pill); background: var(--surface-3); font-size: 0.72rem; text-align: center; font-variant-numeric: tabular-nums; }
 .org-toggle { cursor: pointer; }
 /* employee detail drawer over the right edge of the chart; the toolbar moves left of it, the chart keeps its size */
 .org-side { position: absolute; z-index: 3; top: 0.75rem; right: 0.75rem; bottom: 0.75rem; width: min(340px, calc(100% - 7rem)); margin: 0; overflow: auto; display: none; box-shadow: var(--shadow-lg, var(--shadow)); }
@@ -711,9 +726,7 @@ input[aria-invalid='true'], select[aria-invalid='true'], textarea[aria-invalid='
 .org-unmapped-note[hidden] { display: none; }
 /* dark theme: the SVG keeps light colours as attributes (exports stay print-friendly); CSS restyles the live chart */
 [data-theme='dark'] .org-canvas .org-card { fill: #111827; }
-[data-theme='dark'] .org-canvas .org-node:not(.is-hit, .is-selected, .is-cycle) .org-card { stroke: #334155; }
 [data-theme='dark'] .org-canvas .org-node.is-context .org-card { fill: #0b1120; }
-[data-theme='dark'] .org-canvas .org-node.is-context:not(.is-hit, .is-selected) .org-card { stroke: #64748b; }
 [data-theme='dark'] .org-canvas .org-t1 { fill: #e5edf7; }
 [data-theme='dark'] .org-canvas .org-t2 { fill: #cbd5e1; }
 [data-theme='dark'] .org-canvas .org-t3 { fill: #94a3b8; }
@@ -725,7 +738,9 @@ input[aria-invalid='true'], select[aria-invalid='true'], textarea[aria-invalid='
 [data-theme='dark'] .org-canvas .org-group-frame { stroke: #334155; }
 [data-theme='dark'] .org-canvas .org-group-title { fill: #e5edf7; }
 [data-theme='dark'] .org-canvas .org-orphans-frame { fill: #0b1120; stroke: #64748b; }
-[data-theme='dark'] .org-canvas .org-orphans-title, [data-theme='dark'] .org-canvas .org-band-label { fill: #94a3b8; }
+[data-theme='dark'] .org-canvas .org-orphans-title, [data-theme='dark'] .org-canvas .org-external-title { fill: #94a3b8; }
+[data-theme='dark'] .org-canvas .org-external-frame { stroke: #64748b; }
+[data-theme='dark'] .org-canvas .org-band.is-alt { fill: #172033; }
 /* employee photo: round; the initials sit underneath and show when there is no photo or it cannot load */
 .emp-avatar { position: relative; display: inline-grid; place-items: center; flex: none; overflow: hidden; border-radius: 50%; background: var(--brand-navy); color: #fff; font-weight: 700; line-height: 1; }
 .emp-avatar-lg { width: 96px; height: 96px; font-size: 2rem; }
@@ -759,6 +774,9 @@ input[aria-invalid='true'], select[aria-invalid='true'], textarea[aria-invalid='
   .org-zoom-sep { width: 1px; height: 1.4rem; margin: 0 0.15rem; }
   .org-zoom-level { min-width: 2.4rem; text-align: center; }
   .org-canvas { height: 60vh; min-height: 320px; }
+  /* phones: short level labels (L1–L5; the name is in the tooltip and the drawer) */
+  .org-level-rail { width: 3rem; }
+  .org-level-name { display: none; }
   .org-chips { flex-wrap: nowrap; overflow-x: auto; padding-bottom: 0.25rem; scrollbar-width: thin; }
   .org-chip { flex: none; }
   .org-toolbar input[type='search'] { min-width: 0; width: 100%; }
@@ -769,7 +787,8 @@ input[aria-invalid='true'], select[aria-invalid='true'], textarea[aria-invalid='
 }
 @media print {
   body.print-org .org-toolbar, body.print-org .kpis, body.print-org .org-side, body.print-org #site-footer,
-  body.print-org .org-chips, body.print-org .org-filter-note, body.print-org .org-unmapped-note, body.print-org .org-zoombar { display: none !important; }
+  body.print-org .org-chips, body.print-org .org-filter-note, body.print-org .org-unmapped-note, body.print-org .org-zoombar, body.print-org .org-level-rail { display: none !important; }
+  body.print-org .org-canvas .org-band-label { display: inline; }
   body.print-org .org-layout { display: block; }
   body.print-org .org-canvas { height: auto; max-height: none; overflow: visible; border: 0; background: #fff; }
   body.print-org .org-canvas svg { width: 100% !important; height: auto !important; }

@@ -3,13 +3,17 @@
 // expand / collapse, employee detail, edit reports-to, validated import, Excel / CSV (server) and PNG / SVG / PDF
 // (client) export. The reporting forest comes from shared/org-tree: no duplicate nodes, loops are cut and flagged,
 // and a filtered department keeps its out-of-department managers as marked context nodes. No sample data.
-// Layout (shared/org-layout): 5 level bands from the exact Position Title → Level table (shared/org-levels), the
-// reporting line from manager_id only, Staff / Admin in grids of ≤ 3 per row under their own manager, one group per
-// company, people without a manager in a separate "ไม่มีสายบังคับบัญชา" block. Unmapped titles carry a marker.
+// Layout (shared/org-layout, master template): a tidy tree spread left / centre / right with each manager centred over
+// its teams, 5 level bands from the exact Position Title → Level table (shared/org-levels) with the labels in a rail
+// fixed to the left edge, the reporting line from manager_id only, Staff / Admin stacked in 1–3 columns under their
+// own manager, one group per company, people whose manager is in another company in a titled frame (no line across
+// companies), people without a manager in a "ไม่มีสายบังคับบัญชา" block. Card borders take the department colour
+// (legend above the chart). Unmapped titles carry a marker.
 import type { OrgDesignResponse, OrgEmployeeNode } from '../../shared/types';
 import { buildOrgForest, forestAncestors, mergeForests, type OrgForest } from '../../shared/org-tree';
 import { ORG_LEVEL_LABELS, positionLevel, type PositionLevel } from '../../shared/org-levels';
-import { CARD_H, CARD_W, ORPHAN_PAD, layoutOrg } from '../../shared/org-layout';
+import { BAND_LABEL_W, CARD_H, CARD_W, FRAME_PAD, GAP_Y, layoutOrg, type OrgLayout } from '../../shared/org-layout';
+import { NO_DEPT_COLOR, departmentColors } from '../../shared/org-colors';
 import { get, post, api, qs } from '../api';
 import { h, mount, loading, errorBox, fmtDate, modal, toast } from '../dom';
 import { optionLabel } from '../labels';
@@ -22,7 +26,6 @@ import { noCompanies, readGridFile } from './attendance';
 const SVG_NS = 'http://www.w3.org/2000/svg';
 const W = CARD_W;
 const H = CARD_H;
-const PALETTE = ['#2563eb', '#059669', '#d97706', '#7c3aed', '#db2777', '#0891b2', '#65a30d', '#dc2626', '#4f46e5', '#0d9488'];
 // photo circle on the card (card size unchanged; the text moves right of it)
 const AV = 40;
 const AX = 14;
@@ -75,7 +78,13 @@ export async function renderOrgChart(main: HTMLElement, params: URLSearchParams)
 
     const deptName = (id: number | null) => d.departments.find((x) => x.id === id)?.name ?? '-';
     const pos = (id: number | null) => d.positions.find((x) => x.id === id);
-    const colorOf = (deptId: number | null) => (deptId === null ? '#64748b' : PALETTE[deptId % PALETTE.length] as string);
+    // department colours: department master order of this scope, only departments that have people (plus a department
+    // of another scope that someone still points at); the same department keeps its colour across filters
+    const deptIds = [...d.departments.map((x) => x.id), ...new Set(d.employees.map((e) => e.department_id).filter((x): x is number => x !== null && !d.departments.some((y) => y.id === x)))]
+      .filter((id) => d.employees.some((e) => e.department_id === id));
+    const deptColor = departmentColors(deptIds);
+    const deptRank = new Map(deptIds.map((id, i) => [id, i]));
+    const colorOf = (deptId: number | null) => (deptId === null ? NO_DEPT_COLOR : deptColor.get(deptId) ?? NO_DEPT_COLOR);
     const byId = new Map(d.employees.map((e) => [e.id, e]));
     // circular photo through the authenticated API (same origin) over the initials; a failed photo leaves the initials
     const avatarNode = (e: OrgEmployeeNode, context: boolean) => {
@@ -122,6 +131,38 @@ export async function renderOrgChart(main: HTMLElement, params: URLSearchParams)
       unassigned ? chip('none', 'ไม่ระบุหน่วยงาน', unassigned, 'พนักงานที่ยังไม่ระบุหน่วยงาน') : null);
     const filterNote = h('p', { class: 'org-filter-note muted', 'aria-live': 'polite' });
     const unmappedNote = h('p', { class: 'org-unmapped-note', 'aria-live': 'polite' });
+    // legend: the departments of the cards on screen (rebuilt on every draw, so filters keep it true)
+    const legend = h('div', { class: 'org-legend', role: 'list', 'aria-label': 'สีกรอบตามหน่วยงาน' });
+    const drawLegend = (lay: OrgLayout) => {
+      const counts = new Map<number | null, { n: number; context: boolean }>();
+      for (const id of lay.nodes.keys()) {
+        const e = byId.get(id);
+        if (!e) continue;
+        const c = counts.get(e.department_id) ?? { n: 0, context: true };
+        c.n++;
+        c.context &&= forest.context.has(id);
+        counts.set(e.department_id, c);
+      }
+      const keys = [...counts.keys()].sort((a, b) => (a === null ? 1e9 : deptRank.get(a) ?? 1e8) - (b === null ? 1e9 : deptRank.get(b) ?? 1e8));
+      const label = (id: number | null) => {
+        if (id === null) return 'ไม่ระบุหน่วยงาน';
+        const x = d.departments.find((y) => y.id === id);
+        if (!x) return `หน่วยงานนอกขอบเขต (#${id})`;
+        const co = multiCompany ? d.companies.find((c) => c.id === x.company_id)?.code : null;
+        return co ? `${x.name} · ${co}` : x.name;
+      };
+      mount(legend, keys.length ? [
+        h('span', { class: 'org-legend-title' }, 'หน่วยงาน'),
+        keys.map((id) => {
+          const c = counts.get(id) as { n: number; context: boolean };
+          return h('span', { class: `org-legend-item${c.context ? ' is-context' : ''}`, role: 'listitem', 'data-dept': id === null ? 'none' : String(id), 'data-color': colorOf(id), title: c.context ? 'หัวหน้าจากหน่วยงานอื่น (แสดงเพื่อให้เห็นสายบังคับบัญชา)' : `${c.n} คนในผัง` },
+            h('span', { class: 'org-legend-swatch', style: `border-color:${colorOf(id)}`, 'aria-hidden': 'true' }), h('span', null, label(id)), h('span', { class: 'org-legend-count' }, String(c.n)));
+        }),
+      ] : null);
+    };
+    // level labels: a rail fixed to the left edge of the chart, each label on the line of its band (follows zoom / pan)
+    const levelRail = h('div', { class: 'org-level-rail', 'aria-hidden': 'true' });
+    let bands: OrgLayout['bands'] = [];
 
     const companySel = h('select', { 'aria-label': 'บริษัท', onchange: () => go({ company: companySel.value }) },
       state.meta?.companies.scope === 'all' ? h('option', { value: '', selected: !d.company }, 'ทุกบริษัท') : null,
@@ -139,6 +180,8 @@ export async function renderOrgChart(main: HTMLElement, params: URLSearchParams)
     let selected: number | null = null;
     const nodeAt = new Map<number, { x: number; y: number; orphan: boolean }>();
     let content = { x: -10, y: 0, w: W + 20, h: H + 20 };
+    // exports and print: the chart plus the level labels on its left
+    let exportBox = { ...content };
 
     const matches = (e: OrgEmployeeNode, q: string) => !!q && `${e.emp_code} ${e.name} ${pos(e.position_id)?.title ?? ''}`.toLowerCase().includes(q);
 
@@ -199,19 +242,27 @@ export async function renderOrgChart(main: HTMLElement, params: URLSearchParams)
     const level = h('span', { class: 'org-zoom-level', 'aria-hidden': 'true' }, '100%');
     const vp = { x: 0, y: 0, s: 1 };
     const boxSize = () => ({ w: Math.max(1, chartBox.clientWidth), h: Math.max(1, chartBox.clientHeight) });
-    // width covered by the floating toolbar (desktop / tablet); on phones the toolbar sits above the chart
-    const toolbarReserve = () => (getComputedStyle(zoomBar).position === 'absolute' ? zoomBar.offsetWidth + 20 : 0);
-    // what fits / centring avoid: the toolbar, and the drawer while it is open (it moves the toolbar left)
+    // what fits / centring avoid on the right: the toolbar, and the drawer while it is open (it moves the toolbar left)
     const reserve = () => {
       if (getComputedStyle(zoomBar).position !== 'absolute') return 0;
       return Math.max(0, chartBox.getBoundingClientRect().right - zoomBar.getBoundingClientRect().left) + 8;
     };
+    // … and on the left: the level label rail
+    const leftReserve = () => (levelRail.hidden ? 0 : levelRail.offsetWidth + 6);
     const apply = () => {
       if (!current) return;
       const { w, h: bh } = boxSize();
       current.setAttribute('viewBox', `${vp.x.toFixed(2)} ${vp.y.toFixed(2)} ${(w / vp.s).toFixed(2)} ${(bh / vp.s).toFixed(2)}`);
       current.dataset.scale = vp.s.toFixed(3);
       level.textContent = `${Math.round(vp.s * 100)}%`;
+      // the rail sits over the canvas (also when the toolbar is above it on phones); labels follow their band
+      levelRail.style.top = `${chartBox.offsetTop}px`;
+      levelRail.style.left = `${chartBox.offsetLeft}px`;
+      levelRail.style.height = `${chartBox.clientHeight}px`;
+      for (const el of levelRail.querySelectorAll<HTMLElement>('[data-level]')) {
+        const b = bands.find((x) => x.level === Number(el.dataset.level));
+        if (b) el.style.transform = `translateY(${((b.y + H / 2 - vp.y) * vp.s - el.offsetHeight / 2).toFixed(1)}px)`;
+      }
     };
     const zoomAt = (factor: number, px: number, py: number) => {
       const s = clampScale(vp.s * factor);
@@ -222,16 +273,22 @@ export async function renderOrgChart(main: HTMLElement, params: URLSearchParams)
       vp.y = cy - py / s;
       apply();
     };
-    const zoomCentre = (factor: number) => zoomAt(factor, (boxSize().w - reserve()) / 2, boxSize().h / 2);
+    // the free part of the stage, between the level rail and the toolbar / drawer (screen px)
+    const area = () => {
+      const l = leftReserve();
+      return { l, w: Math.max(80, boxSize().w - reserve() - l) };
+    };
+    const zoomCentre = (factor: number) => zoomAt(factor, area().l + area().w / 2, boxSize().h / 2);
     const wholeScale = () => {
-      const { w, h: bh } = boxSize();
-      return clampScale(Math.min(Math.max(80, w - reserve() - 24) / content.w, Math.max(80, bh - 24) / content.h, 1.25));
+      const { h: bh } = boxSize();
+      return clampScale(Math.min(Math.max(80, area().w - 24) / content.w, Math.max(80, bh - 24) / content.h, 1.25));
     };
     // Whole Chart Fit: the entire chart in view, whatever the scale
     const fit = () => {
-      const { w, h: bh } = boxSize();
+      const { h: bh } = boxSize();
+      const a = area();
       vp.s = wholeScale();
-      vp.x = content.x + content.w / 2 - (w - reserve()) / 2 / vp.s;
+      vp.x = content.x + content.w / 2 - (a.l + a.w / 2) / vp.s;
       // org charts read top-down: a chart shorter than the stage starts at the top instead of floating mid-way
       vp.y = content.h * vp.s < bh - 24 ? content.y - 12 / vp.s : content.y + content.h / 2 - bh / 2 / vp.s;
       apply();
@@ -242,26 +299,27 @@ export async function renderOrgChart(main: HTMLElement, params: URLSearchParams)
       const whole = wholeScale();
       if (whole >= READABLE) return fit();
       vp.s = READABLE;
-      const { w } = boxSize();
-      const aw = Math.max(80, w - reserve());
+      const { l: al, w: aw } = area();
       const placed = [...nodeAt.entries()].filter(([, n]) => !n.orphan);
       const topLevel = placed.filter(([id]) => levelInfo(id).level <= 2);
       const minY = Math.min(...placed.map(([, n]) => n.y));
       const anchor = topLevel.length ? topLevel : placed.filter(([, n]) => n.y === minY);
       const ax0 = Math.min(...anchor.map(([, n]) => n.x));
       const ax1 = Math.max(...anchor.map(([, n]) => n.x + W));
-      if (content.w * vp.s <= aw) vp.x = content.x + content.w / 2 - aw / 2 / vp.s;
+      if (content.w * vp.s <= aw) vp.x = content.x + content.w / 2 - (al + aw / 2) / vp.s;
       else {
         // centre on MD / AMD when they fit side by side, else start at the left-most of them; stay inside the chart
-        const want = ax1 - ax0 <= aw / vp.s - 48 / vp.s ? (ax0 + ax1) / 2 - aw / 2 / vp.s : ax0 - 24 / vp.s;
-        vp.x = Math.min(Math.max(want, content.x), content.x + content.w - aw / vp.s);
+        // (when the left-most of them is close to the chart's left edge, start at that edge: the first company reads from its start)
+        const left = Math.min(...placed.map(([, n]) => n.x));
+        const want = ax1 - ax0 <= aw / vp.s - 48 / vp.s ? (ax0 + ax1) / 2 - aw / 2 / vp.s : ax0 + W - left <= aw / vp.s - 48 / vp.s ? content.x : ax0 - 24 / vp.s;
+        vp.x = Math.min(Math.max(want, content.x), content.x + content.w - aw / vp.s) - al / vp.s;
       }
       vp.y = content.y - 12 / vp.s; // the top of the chart: company headers and MD / AMD
       apply();
     };
     const resetView = () => {
       vp.s = 1;
-      vp.x = content.x + content.w / 2 - (boxSize().w - reserve()) / 2;
+      vp.x = content.x + content.w / 2 - (area().l + area().w / 2);
       vp.y = content.y - 16;
       apply();
     };
@@ -269,8 +327,8 @@ export async function renderOrgChart(main: HTMLElement, params: URLSearchParams)
       const at = nodeAt.get(id);
       if (!at) return;
       if (vp.s < 0.6) vp.s = 0.9;
-      const { w, h: bh } = boxSize();
-      vp.x = at.x + W / 2 - (w - reserve()) / 2 / vp.s;
+      const { h: bh } = boxSize();
+      vp.x = at.x + W / 2 - (area().l + area().w / 2) / vp.s;
       vp.y = at.y + H / 2 - bh / 2 / vp.s;
       apply();
     };
@@ -296,7 +354,7 @@ export async function renderOrgChart(main: HTMLElement, params: URLSearchParams)
       h('span', { class: 'org-zoom-sep', 'aria-hidden': 'true' }),
       zbtn('expand-all', 'ขยายทั้งหมด', 'expandAll', expandAll),
       zbtn('collapse-all', 'ย่อทั้งหมด', 'collapseAll', collapseAll));
-    const stage = h('div', { class: 'org-stage' }, chartBox, zoomBar, side);
+    const stage = h('div', { class: 'org-stage' }, chartBox, levelRail, zoomBar, side);
     function openDrawer(): void {
       stage.classList.add('has-drawer');
     }
@@ -332,19 +390,34 @@ export async function renderOrgChart(main: HTMLElement, params: URLSearchParams)
         levelOf: (id) => levelInfo(id).level,
         groupOf: (id) => byId.get(id)?.company_id ?? 0,
         groups: companyOrder.map((cid) => ({ key: cid, label: multi ? `${companyName(cid)} · ${d.employees.filter((e) => e.company_id === cid && forest.members.has(e.id)).length} คน` : null })),
-        hasManager: (id) => (byId.get(id)?.manager_id ?? null) !== null,
+        managerOf: (id) => byId.get(id)?.manager_id ?? null,
         collapsed,
-        // the stage's shape (minus the floating toolbar): wide teams are stacked in tiers to fit it
-        // (the drawer is ignored here so opening it never re-arranges the chart)
-        aspect: Math.max(80, boxSize().w - toolbarReserve()) / boxSize().h,
+        // teams of one manager stay grouped by department (master order), then by the API order
+        orderOf: (id) => {
+          const dep = byId.get(id)?.department_id ?? null;
+          return dep === null ? 1e9 : deptRank.get(dep) ?? 1e8;
+        },
       });
+      bands = lay.bands;
       const edges = lay.edges.map((ed) => svg('path', {
         class: `org-edge${ed.context ? ' is-context' : ''}`, 'data-from': ed.from, 'data-to': ed.to,
         d: ed.points.map(([px, py], i) => `${i ? 'L' : 'M'}${px},${py}`).join(' '),
         fill: 'none', stroke: '#94a3b8', 'stroke-width': 1.5, ...(ed.context ? { 'stroke-dasharray': '5 4' } : {}),
       }));
-      // company frames, "no reporting line" blocks and level labels (behind the cards and the lines)
+      // level bands, company frames, external-manager frames, "no reporting line" blocks (behind the cards and lines)
       const frames: SVGElement[] = [];
+      const bx = lay.bounds.x - BAND_LABEL_W;
+      const bw = lay.bounds.w + BAND_LABEL_W;
+      lay.bands.forEach((b, i) => {
+        const top = b.y - GAP_Y / 2;
+        const next = lay.bands[i + 1];
+        const hgt = next ? next.y - b.y : Math.max(lay.bounds.y + lay.bounds.h - top, CARD_H + GAP_Y);
+        frames.push(svg('rect', { class: `org-band${i % 2 ? ' is-alt' : ''}`, 'data-level': b.level, x: bx, y: top, width: bw, height: hgt, fill: i % 2 ? '#f1f5f9' : 'transparent' }));
+      });
+      // in exports (the live chart shows the rail instead)
+      for (const b of lay.bands) {
+        frames.push(svg('text', { class: 'org-band-label', 'data-level': b.level, 'data-y': b.y, x: bx + 10, y: b.y + H / 2 + 4, 'font-size': 12, 'font-weight': 700, fill: '#64748b' }, `L${b.level} · ${ORG_LEVEL_LABELS[b.level]}`));
+      }
       for (const g of lay.groups) {
         if (!g.label) continue;
         frames.push(svg('g', { class: 'org-group', 'data-company': g.key },
@@ -354,10 +427,15 @@ export async function renderOrgChart(main: HTMLElement, params: URLSearchParams)
       for (const b of lay.orphans) {
         frames.push(svg('g', { class: 'org-orphans', 'data-company': b.key },
           svg('rect', { class: 'org-orphans-frame', x: b.x, y: b.y, width: b.w, height: b.h, rx: 10, fill: '#f8fafc', stroke: '#94a3b8', 'stroke-width': 1.2, 'stroke-dasharray': '6 4' }),
-          svg('text', { class: 'org-orphans-title', x: b.x + ORPHAN_PAD, y: b.y + ORPHAN_PAD + 12, 'font-size': 12.5, 'font-weight': 700, fill: '#475569' }, `ไม่มีสายบังคับบัญชา · ${b.ids.length} คน`)));
+          svg('text', { class: 'org-orphans-title', x: b.x + FRAME_PAD, y: b.y + FRAME_PAD + 4, 'font-size': 12.5, 'font-weight': 700, fill: '#475569' }, `ไม่มีสายบังคับบัญชา · ${b.ids.length} คน`)));
       }
-      for (const b of lay.bands) {
-        frames.push(svg('text', { class: 'org-band-label', 'data-level': b.level, 'data-y': b.y, x: lay.bounds.x + 10, y: b.y + H / 2 + 4, 'font-size': 12, 'font-weight': 700, fill: '#64748b' }, `L${b.level} · ${ORG_LEVEL_LABELS[b.level]}`));
+      // people whose manager is outside this company / chart: the real manager is named, no line is drawn to it
+      for (const b of lay.externals) {
+        const m = byId.get(b.manager);
+        const title = m ? `รายงานต่อ ${m.name} · ${d.companies.find((c) => c.id === m.company_id)?.code ?? companyName(m.company_id)}` : 'หัวหน้าอยู่ต่างบริษัท / นอกผังนี้';
+        frames.push(svg('g', { class: 'org-external', 'data-company': b.key, 'data-manager': b.manager },
+          svg('rect', { class: 'org-external-frame', x: b.x, y: b.y, width: b.w, height: b.h, rx: 10, fill: 'none', stroke: '#94a3b8', 'stroke-width': 1.2, 'stroke-dasharray': '3 4' }),
+          svg('text', { class: 'org-external-title', x: b.x + FRAME_PAD, y: b.y + FRAME_PAD + 4, 'font-size': 12, 'font-weight': 700, fill: '#475569' }, clip(title, Math.max(18, Math.floor((b.w - 2 * FRAME_PAD) / 6.6))), svg('title', {}, title))));
       }
       const nodes: SVGElement[] = [];
       nodeAt.clear();
@@ -371,19 +449,23 @@ export async function renderOrgChart(main: HTMLElement, params: URLSearchParams)
         const hit = hitSet.has(id);
         const mark = hit || selected === id;
         nodeAt.set(id, { x, y, orphan: at.orphan });
-        const third = node.context ? `หัวหน้าจากหน่วยงานอื่น · ${deptName(e.department_id)}` : `${e.emp_code} · ${deptName(e.department_id)}`;
-        const label = `${e.name} ${p?.title ?? ''} · ${levelText(lv)}${node.context ? ' (หัวหน้าจากหน่วยงานอื่น)' : ''}${node.cycle ? ' (สายบังคับบัญชาวนลูป)' : ''}${at.orphan ? ' (ไม่มีสายบังคับบัญชา)' : ''}`;
+        const dname = e.department_id === null ? 'ไม่ระบุหน่วยงาน' : d.departments.some((x) => x.id === e.department_id) ? deptName(e.department_id) : 'หน่วยงานนอกขอบเขต';
+        const third = node.context ? `หัวหน้าจากหน่วยงานอื่น · ${dname}` : dname;
+        const color = colorOf(e.department_id);
+        const label = `${e.name} ${p?.title ?? ''} · ${dname} · ${levelText(lv)}${node.context ? ' (หัวหน้าจากหน่วยงานอื่น)' : ''}${node.cycle ? ' (สายบังคับบัญชาวนลูป)' : ''}${at.orphan ? ' (ไม่มีสายบังคับบัญชา)' : ''}${at.external !== null ? ' (หัวหน้าอยู่ต่างบริษัท)' : ''}`;
         const g = svg('g', {
           class: `org-node${node.context ? ' is-context' : ''}${node.cycle ? ' is-cycle' : ''}${hit ? ' is-hit' : ''}${selected === id ? ' is-selected' : ''}${lv.mapped ? '' : ' is-unmapped'}`,
-          'data-id': id, 'data-level': lv.level, ...(at.orphan ? { 'data-orphan': 1 } : {}), ...(at.grid ? { 'data-grid-row': at.grid.gridRow } : {}), transform: `translate(${x},${y})`, tabindex: 0, role: 'button', 'aria-label': label,
+          'data-id': id, 'data-level': lv.level, 'data-dept': e.department_id ?? 'none', 'data-color': color, ...(at.orphan ? { 'data-orphan': 1 } : {}), ...(at.external !== null ? { 'data-external': at.external } : {}), ...(at.grid ? { 'data-grid-row': at.grid.gridRow } : {}), transform: `translate(${x},${y})`, tabindex: 0, role: 'button', 'aria-label': label,
           ...(node.children.length ? { 'aria-expanded': String(!collapsed.has(id)) } : {}),
         },
-          svg('rect', { class: 'org-card', width: W, height: H, rx: 8, fill: node.context ? '#f8fafc' : '#ffffff', stroke: mark ? '#f59e0b' : node.cycle ? '#dc2626' : node.context ? '#94a3b8' : '#cbd5e1', 'stroke-width': mark ? 3 : node.cycle ? 2 : 1, ...(node.context && !mark ? { 'stroke-dasharray': '5 4' } : {}) }),
-          svg('rect', { class: 'org-stripe', width: 6, height: H, rx: 3, fill: node.context ? '#cbd5e1' : colorOf(e.department_id) }),
+          // highlight ring (search hit / selected / keyboard focus / loop) outside the card, so the border keeps its colour
+          svg('rect', { class: 'org-ring', x: -5, y: -5, width: W + 10, height: H + 10, rx: 12, fill: 'none', stroke: mark ? '#f59e0b' : node.cycle ? '#dc2626' : 'transparent', 'stroke-width': mark ? 3 : 2, ...(node.cycle && !mark ? { 'stroke-dasharray': '4 3' } : {}) }),
+          svg('rect', { class: 'org-card', width: W, height: H, rx: 8, fill: node.context ? '#f8fafc' : '#ffffff', stroke: color, 'stroke-width': 2, ...(node.context ? { 'stroke-dasharray': '5 4' } : {}) }),
           avatarNode(e, node.context),
           svg('text', { class: 'org-t1', x: TX, y: 20, 'font-size': 13, 'font-weight': 700, fill: node.context ? '#475569' : '#0f172a' }, clip(e.name, node.cycle ? 13 : 19)),
           svg('text', { class: 'org-t2', x: TX, y: 38, 'font-size': 11.5, fill: '#334155' }, clip(p?.title ?? 'ไม่ระบุตำแหน่ง', 22)),
-          svg('text', { class: 'org-t3', x: TX, y: 55, 'font-size': 10.5, fill: node.context ? '#475569' : '#64748b' }, clip(third, 25)));
+          svg('text', { class: 'org-t3', x: TX, y: 55, 'font-size': 10.5, 'font-weight': 600, fill: '#475569' }, clip(third, 25)),
+          svg('title', {}, `${e.name}\n${p?.title ?? 'ไม่ระบุตำแหน่ง'}\n${third}`));
         if (node.cycle) g.append(svg('g', { class: 'org-cycle-badge', transform: `translate(${W - 58},6)` }, svg('rect', { width: 52, height: 17, rx: 8.5, fill: '#fee2e2', stroke: '#dc2626' }), svg('text', { x: 26, y: 12.5, 'font-size': 10, 'text-anchor': 'middle', fill: '#b91c1c' }, 'วนลูป')));
         // unmapped title: a tab on the card's top edge (clear of the name and of the connector at the top centre)
         if (!lv.mapped) g.append(svg('g', { class: 'org-unmapped-badge', transform: `translate(${W - 96},-9)` }, svg('rect', { width: 90, height: 17, rx: 8.5, fill: '#fef3c7', stroke: '#d97706' }), svg('text', { x: 45, y: 12.5, 'font-size': 10, 'font-weight': 700, 'text-anchor': 'middle', fill: '#92400e' }, 'Unmapped Level')));
@@ -397,6 +479,11 @@ export async function renderOrgChart(main: HTMLElement, params: URLSearchParams)
         nodes.push(g);
       }
       content = { ...lay.bounds };
+      exportBox = { x: lay.bounds.x - BAND_LABEL_W, y: lay.bounds.y, w: lay.bounds.w + BAND_LABEL_W, h: lay.bounds.h };
+      drawLegend(lay);
+      mount(levelRail, lay.nodes.size ? lay.bands.map((b) => h('span', { class: 'org-level-pill', 'data-level': String(b.level), title: `L${b.level} · ${ORG_LEVEL_LABELS[b.level]}` },
+        h('b', null, `L${b.level}`), h('span', { class: 'org-level-name' }, ORG_LEVEL_LABELS[b.level]))) : null);
+      levelRail.hidden = !lay.nodes.size;
       const font = getComputedStyle(document.body).fontFamily || 'sans-serif';
       current = svg('svg', { xmlns: SVG_NS, width: '100%', height: '100%', preserveAspectRatio: 'xMinYMin meet', 'font-family': font, role: 'img', 'aria-label': 'ผังสายบังคับบัญชา' },
         svg('defs', {}, svg('clipPath', { id: 'org-avatar-clip', clipPathUnits: 'objectBoundingBox' }, svg('circle', { cx: 0.5, cy: 0.5, r: 0.5 }))),
@@ -558,11 +645,11 @@ export async function renderOrgChart(main: HTMLElement, params: URLSearchParams)
     const exportSvgText = async (): Promise<string | null> => {
       if (!current) return null;
       const clone = current.cloneNode(true) as SVGSVGElement;
-      clone.setAttribute('viewBox', `${content.x} ${content.y} ${content.w} ${content.h}`);
-      clone.setAttribute('width', String(content.w));
-      clone.setAttribute('height', String(content.h));
+      clone.setAttribute('viewBox', `${exportBox.x} ${exportBox.y} ${exportBox.w} ${exportBox.h}`);
+      clone.setAttribute('width', String(exportBox.w));
+      clone.setAttribute('height', String(exportBox.h));
       clone.removeAttribute('data-scale');
-      clone.insertBefore(svg('rect', { x: content.x, y: content.y, width: content.w, height: content.h, fill: '#ffffff' }), clone.firstChild);
+      clone.insertBefore(svg('rect', { x: exportBox.x, y: exportBox.y, width: exportBox.w, height: exportBox.h, fill: '#ffffff' }), clone.firstChild);
       // photos come from the authenticated API: inline them so the exported file stands alone (initials if one fails)
       for (const img of [...clone.querySelectorAll('image')]) {
         try {
@@ -582,9 +669,9 @@ export async function renderOrgChart(main: HTMLElement, params: URLSearchParams)
       const img = new Image();
       img.onload = () => {
         const canvas = document.createElement('canvas');
-        const k = Math.min(2, 16000 / Math.max(content.w, content.h));
-        canvas.width = Math.round(content.w * k);
-        canvas.height = Math.round(content.h * k);
+        const k = Math.min(2, 16000 / Math.max(exportBox.w, exportBox.h));
+        canvas.width = Math.round(exportBox.w * k);
+        canvas.height = Math.round(exportBox.h * k);
         const ctx = canvas.getContext('2d');
         if (!ctx) return toast('เบราว์เซอร์ไม่รองรับการสร้างรูปภาพ', 'error');
         ctx.scale(k, k);
@@ -596,7 +683,7 @@ export async function renderOrgChart(main: HTMLElement, params: URLSearchParams)
     };
     const exportPdf = () => {
       if (view !== 'chart') return go({ view: 'chart' });
-      if (current) current.setAttribute('viewBox', `${content.x} ${content.y} ${content.w} ${content.h}`);
+      if (current) current.setAttribute('viewBox', `${exportBox.x} ${exportBox.y} ${exportBox.w} ${exportBox.h}`);
       document.body.classList.add('print-org');
       const done = () => {
         document.body.classList.remove('print-org');
@@ -680,6 +767,7 @@ export async function renderOrgChart(main: HTMLElement, params: URLSearchParams)
       chips, filterNote, unmappedNote,
       h('div', { class: 'kpis' }, kpi('พนักงาน', s.employees), kpi('หน่วยงาน', s.departments), kpi('ระดับชั้นการบังคับบัญชา', s.levels), kpi('ตำแหน่งที่มีคนครอง', `${s.occupiedPositions} / ${s.positions}`),
         kpi('อัตราอนุมัติ (Approved)', s.approved), kpi('มีคนครอง (Occupied)', s.occupied), kpi('ว่าง (Vacant)', s.vacant, s.vacant ? 'kpi-warn' : ''), kpi('เกินอัตรา (Over)', s.over, s.over ? 'kpi-bad' : '')),
+      view === 'chart' ? legend : null,
       view === 'chart' ? h('div', { class: 'org-layout' }, stage) : tableBox);
     if (view === 'chart') {
       draw();

@@ -159,8 +159,9 @@ try {
   const s2 = await scale(page);
   check('zoom in / out change the scale', s1 > s0 && s2 < s1, `${s0} → ${s1} → ${s2}`);
   check('zoom readout follows the scale', (await page.textContent('.org-zoom-level')) === `${Math.round(s2 * 100)}%`);
-  const c = g.cv;
-  await page.mouse.move(c.l + c.w / 3, c.t + c.h / 2);
+  // re-measure: the toolbar clicks may have scrolled the page
+  const c = (await geometry(page)).cv;
+  await page.mouse.move(c.l + c.w / 3, Math.min(Math.max(c.t, 0) + 80, c.b - 20));
   await page.mouse.wheel(0, -400);
   await page.waitForTimeout(150);
   const s3 = await scale(page);
@@ -290,6 +291,19 @@ try {
     const fill = await s.page.$eval('.org-canvas .org-node:not(.is-context) .org-card', (r) => getComputedStyle(r).fill);
     const t1 = await s.page.$eval('.org-canvas .org-t1', (t) => getComputedStyle(t).fill);
     check(`${tag}: node colours follow the theme`, theme === 'dark' ? fill === 'rgb(17, 24, 39)' && t1 === 'rgb(229, 237, 247)' : fill === 'rgb(255, 255, 255)' && t1 === 'rgb(15, 23, 42)', `${fill} / ${t1}`);
+    const look = await s.page.evaluate(() => {
+      const rgb = (hex) => `rgb(${[1, 3, 5].map((i) => parseInt(hex.slice(i, i + 2), 16)).join(', ')})`;
+      const r = (e) => { const b = e.getBoundingClientRect(); return { l: b.left, t: b.top, r: b.right, b: b.bottom }; };
+      const cv = r(document.querySelector('.org-canvas')); const zb = r(document.querySelector('.org-zoombar'));
+      const pills = [...document.querySelectorAll('.org-level-rail .org-level-pill')].map(r);
+      const nodes = [...document.querySelectorAll('.org-canvas .org-node')];
+      return {
+        pills: pills.length, inLeft: pills.every((p) => p.l >= cv.l - 1 && p.r <= cv.l + (cv.r - cv.l) / 2), clearOfBar: pills.every((p) => !(p.l < zb.r && zb.l < p.r && p.t < zb.b && zb.t < p.b)),
+        borders: nodes.every((n) => getComputedStyle(n.querySelector('.org-card')).stroke === rgb(n.dataset.color)),
+        legend: document.querySelectorAll('.org-legend .org-legend-item').length,
+      };
+    });
+    check(`${tag}: level rail L1–L5 on the left of the chart, clear of the toolbar; borders keep the department colour; legend shown`, look.pills === 5 && look.inLeft && look.clearOfBar && look.borders && look.legend > 0, JSON.stringify(look));
     if (touch) {
       const tg = await s.page.$eval('.org-canvas [data-toggle]', (t) => Number(t.getAttribute('data-toggle')));
       const n0 = (await nodeIds(s.page)).length;

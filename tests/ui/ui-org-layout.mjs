@@ -1,6 +1,8 @@
-// Organization chart 5-level layout in the browser (local only; fresh local D1 + seeds/demo.sql + a synthetic company
+// Organization chart master-template layout in the browser (local only; fresh local D1 + seeds/demo.sql + a synthetic company
 // "ZZL" written by SQL with the approved production position titles — no production data). Checks: every employee
-// once, level bands L1–L5 top-down, Staff / Admin ≤ 3 per row under their own manager with the last row centred, no
+// once, level bands L1–L5 top-down with the label rail aligned (also after zoom / pan), tidy tree (manager centred over
+// its teams), department border colours + legend (follows the filter), Staff / Admin in 1–3 columns under their own
+// manager with the last row centred, no
 // card overlap, every line drawn from the real manager_id, L5 with reports stays L5, "ไม่มีสายบังคับบัญชา" block,
 // "Unmapped Level" marker, company groups without cross-company lines, search, fit / zoom, detail, table view,
 // desktop 1440 / 1920 and laptop 1366 / 1280, no write request, no console errors.
@@ -111,16 +113,29 @@ const api = (page, query) => page.evaluate(async (q) => (await fetch(`/api/org-d
 const chart = (page) => page.evaluate(() => {
   const nodes = [...document.querySelectorAll('.org-canvas .org-node')].map((g) => {
     const m = /translate\(([-\d.]+),([-\d.]+)\)/.exec(g.getAttribute('transform'));
-    return { id: Number(g.dataset.id), level: Number(g.dataset.level), x: Number(m[1]), y: Number(m[2]), unmapped: g.classList.contains('is-unmapped'), badge: !!g.querySelector('.org-unmapped-badge'), orphan: g.dataset.orphan === '1', gridLower: Number(g.dataset.gridRow || 0) > 0 };
+    return { id: Number(g.dataset.id), level: Number(g.dataset.level), x: Number(m[1]), y: Number(m[2]), unmapped: g.classList.contains('is-unmapped'), badge: !!g.querySelector('.org-unmapped-badge'), orphan: g.dataset.orphan === '1', gridLower: Number(g.dataset.gridRow || 0) > 0, dept: g.dataset.dept, color: g.dataset.color, stroke: g.querySelector('.org-card').getAttribute('stroke') };
   });
   const edges = [...document.querySelectorAll('.org-canvas .org-edge')].map((p) => ({ from: Number(p.dataset.from), to: Number(p.dataset.to) }));
   const bands = [...document.querySelectorAll('.org-canvas .org-band-label')].map((t) => t.textContent);
   const bandRows = [...document.querySelectorAll('.org-canvas .org-band-label')].map((t) => ({ level: Number(t.dataset.level), y: Number(t.dataset.y) }));
   const orphans = [...document.querySelectorAll('.org-canvas .org-orphans-title')].map((t) => t.textContent);
   const groups = [...document.querySelectorAll('.org-canvas .org-group')].map((g) => { const r = g.querySelector('rect'); return { company: Number(g.dataset.company), x: Number(r.getAttribute('x')), w: Number(r.getAttribute('width')), title: g.querySelector('text').textContent }; });
-  return { nodes, edges, bands, bandRows, orphans, groups };
+  const legend = [...document.querySelectorAll('.org-legend .org-legend-item')].map((x) => ({ dept: x.dataset.dept, color: x.dataset.color, text: x.textContent }));
+  return { nodes, edges, bands, bandRows, orphans, groups, legend };
 });
 const CW = 210; const CH = 66;
+// level rail (screen px): each pill against the first-row cards of its level; nothing covers it
+const rail = (page) => page.evaluate(() => {
+  const r = (e) => { const b = e.getBoundingClientRect(); return { l: b.left, t: b.top, r: b.right, b: b.bottom }; };
+  const cv = r(document.querySelector('.org-canvas')); const zb = r(document.querySelector('.org-zoombar'));
+  const railEl = document.querySelector('.org-level-rail');
+  const pills = [...railEl.querySelectorAll('.org-level-pill')].map((p) => ({ level: Number(p.dataset.level), text: p.textContent, ...r(p), visible: !railEl.hidden && getComputedStyle(railEl).display !== 'none' && r(p).r > r(p).l }));
+  const cards = [...document.querySelectorAll('.org-canvas .org-node:not([data-grid-row]):not([data-orphan]):not([data-external])')].map((n) => ({ level: Number(n.dataset.level), ...r(n.querySelector('.org-card')) }));
+  // a band's first-row cards share one line; the pill of that level sits on it
+  const aligned = pills.every((p) => { const c = cards.filter((x) => x.level === p.level); const mid = (p.t + p.b) / 2; return !c.length || c.some((x) => Math.abs((x.t + x.b) / 2 - mid) < 2); });
+  const z = Number(getComputedStyle(railEl).zIndex);
+  return { pills, aligned, above: z >= 1 && getComputedStyle(railEl).position === 'absolute', leftOfToolbar: pills.every((p) => p.r < zb.l), insideLeft: pills.every((p) => p.l >= cv.l - 1 && p.r <= cv.l + 120) };
+});
 const overlapping = (ns) => { const out = []; for (let i = 0; i < ns.length; i++) for (let j = i + 1; j < ns.length; j++) { const a = ns[i]; const b = ns[j]; if (a.x < b.x + CW && b.x < a.x + CW && a.y < b.y + CH && b.y < a.y + CH) out.push(`${a.id}/${b.id}`); } return out; };
 
 try {
@@ -138,8 +153,19 @@ try {
   const at = (code) => c.nodes.find((n) => n.id === id(code));
   check('levels run top-down: MD → AMD → Manager → Leader → Staff', at('L01').y < at('L02').y && at('L02').y < at('L03').y && at('L03').y < at('L05').y && at('L05').y < at('S10').y);
   check('both department managers sit at L3 below the AMD, their leaders below them', [at('L03'), at('L04')].every((m) => m.level === 3 && m.y > at('L02').y) && at('L05').y > at('L03').y && at('L07').y > at('L04').y);
-  check('level labels start L1 → L5 on the left (L3–L5 repeat per stacked tier)', JSON.stringify(c.bands.slice(0, 5)) === JSON.stringify(['L1 · MD', 'L2 · AMD', 'L3 · Manager', 'L4 · Head / Leader', 'L5 · Staff / Admin']), JSON.stringify(c.bands));
-  check('every labelled row holds only cards of that level', c.bandRows.every((b) => c.nodes.filter((n) => n.y === b.y && !n.orphan && !n.gridLower).every((n) => n.level === b.level)), JSON.stringify(c.bandRows));
+  check('export level labels: L1 → L5 exactly once each', JSON.stringify(c.bands) === JSON.stringify(['L1 · MD', 'L2 · AMD', 'L3 · Manager', 'L4 · Head / Leader', 'L5 · Staff / Admin']), JSON.stringify(c.bands));
+  check('every band holds only cards of that level (first rows)', c.bandRows.every((b) => c.nodes.filter((n) => n.y === b.y && !n.orphan && !n.gridLower).every((n) => n.level === b.level)), JSON.stringify(c.bandRows));
+  let rl = await rail(page);
+  check('level rail: L1–L5 pills on the left edge, each on the line of its cards, above the chart, never under the toolbar', rl.pills.map((p) => p.level).join() === '1,2,3,4,5' && rl.pills.every((p) => p.visible) && rl.aligned && rl.above && rl.leftOfToolbar && rl.insideLeft, JSON.stringify(rl.pills.map((p) => [p.level, Math.round(p.t)])));
+  // master template: tidy tree — MD centred over the AMD, the AMD between its managers, each manager over its leaders
+  const ctr = (code) => at(code).x + CW / 2;
+  check('master template: MD centred above the AMD', Math.abs(ctr('L01') - ctr('L02')) < 0.5);
+  check('master template: managers spread left / right of the AMD, each centred over its leaders', Math.min(ctr('L03'), ctr('L04')) < ctr('L02') && Math.max(ctr('L03'), ctr('L04')) > ctr('L02') && Math.abs(ctr('L03') - (ctr('L05') + ctr('L06')) / 2) < 0.5);
+  // department colours: card border = department colour, one colour per department, legend = departments on screen
+  const deptColor = new Map();
+  const colourOk = c.nodes.every((n) => { if (n.stroke !== n.color) return false; if (deptColor.has(n.dept) && deptColor.get(n.dept) !== n.color) return false; deptColor.set(n.dept, n.color); return true; });
+  check('department colours: border = department colour, same department = same colour, departments differ', colourOk && new Set(deptColor.values()).size === deptColor.size, JSON.stringify([...deptColor]));
+  check('legend: exactly the departments on screen, with their colours and names', c.legend.length === deptColor.size && c.legend.every((l) => deptColor.get(l.dept) === l.color) && ['Management', 'Operations', 'Human Resources'].every((n) => c.legend.some((l) => l.text.includes(n))), JSON.stringify(c.legend));
   // staff grids: per manager, rows of ≤ 3, last row centred
   const grid = (mgr, prefix) => {
     const cards = c.nodes.filter((n) => d.employees.find((e) => e.id === n.id).emp_code.startsWith(`ZL${prefix}`));
@@ -152,15 +178,15 @@ try {
   const g8 = grid('L05', 'S1');
   check('8 staff under one leader: 3 + 3 + 2, last row centred', JSON.stringify(g8.sizes) === '[3,3,2]' && g8.centred, JSON.stringify(g8));
   const g5 = grid('L07', 'S3');
-  check('5 staff under one leader: 3 + 2, centred', JSON.stringify(g5.sizes) === '[3,2]' && g5.centred, JSON.stringify(g5));
+  check('5 staff under one leader: 2 + 2 + 1, centred', JSON.stringify(g5.sizes) === '[2,2,1]' && g5.centred, JSON.stringify(g5));
   const g2 = grid('L06', 'S2');
-  check('2 staff: one row', JSON.stringify(g2.sizes) === '[2]', JSON.stringify(g2));
+  check('2 staff: stacked in one column (as in the template)', JSON.stringify(g2.sizes) === '[1,1]' && g2.centred, JSON.stringify(g2));
   check('no staff row anywhere is wider than 3 cards', (() => { const rows = new Map(); for (const n of c.nodes.filter((x) => x.level === 5)) { const e = d.employees.find((x) => x.id === n.id); const k = `${e.manager_id}|${n.y}`; rows.set(k, (rows.get(k) ?? 0) + 1); } return [...rows.values()].every((v) => v <= 3); })());
   const mgrOf = new Map(d.employees.map((e) => [e.id, e.manager_id]));
   const linked = c.nodes.filter((n) => mgrOf.get(n.id) && ids.includes(mgrOf.get(n.id)));
   check('every line is drawn from the real manager_id (one per report, none invented)', c.edges.length === linked.length && c.edges.every((e) => mgrOf.get(e.to) === e.from), `${c.edges.length} edges / ${linked.length} reports`);
   check('Business Development with reports stays L5; its reports sit below it', at('L08').level === 5 && at('L08').y > at('L02').y && at('S50').y > at('L08').y && c.edges.filter((e) => e.from === id('L08')).length === 4);
-  check('"ไม่มีสายบังคับบัญชา" block holds the 3 people without a manager', c.orphans.length === 1 && c.orphans[0] === 'ไม่มีสายบังคับบัญชา · 3 คน' && ['N01', 'N02', 'N03'].every((k) => at(k).y > at('S12').y));
+  check('"ไม่มีสายบังคับบัญชา" block holds the 3 people without a manager, right of the tree on the L5 band', c.orphans.length === 1 && c.orphans[0] === 'ไม่มีสายบังคับบัญชา · 3 คน' && ['N01', 'N02', 'N03'].every((k) => at(k).orphan && at(k).x > Math.max(...c.nodes.filter((n) => !n.orphan).map((n) => n.x))) && at('N01').y === c.bandRows.find((b) => b.level === 5).y);
   check('unmapped title: marker on that card only, note above the chart', at('S60').unmapped && at('S60').badge && c.nodes.filter((n) => n.badge).length === 1
     && (await page.textContent('.org-unmapped-note')).includes('Chief Happiness Officer'));
   await page.click('.org-zoombar [data-act="fit"]');
@@ -181,6 +207,18 @@ try {
   const s0 = await page.$eval('.org-canvas svg', (s) => Number(s.dataset.scale));
   await page.click('.org-zoombar [data-act="zoom-in"]');
   check('zoom in still works', (await page.$eval('.org-canvas svg', (s) => Number(s.dataset.scale))) > s0);
+  let railOk = true;
+  for (const act of ['zoom-in', 'zoom-in', 'zoom-out', 'zoom-out', 'zoom-out', 'zoom-out']) {
+    await page.click(`.org-zoombar [data-act="${act}"]`);
+    rl = await rail(page);
+    railOk &&= rl.pills.length === 5 && rl.pills.every((p) => p.visible) && rl.aligned && rl.leftOfToolbar;
+  }
+  check('level rail stays visible and aligned through zoom in / out', railOk, JSON.stringify(rl.pills.map((p) => [p.level, Math.round(p.t)])));
+  const box0 = await page.locator('.org-canvas').boundingBox();
+  const vb0 = await page.$eval('.org-canvas svg', (x) => x.getAttribute('viewBox'));
+  await page.mouse.move(box0.x + box0.width / 2, box0.y + box0.height / 2); await page.mouse.down(); await page.mouse.move(box0.x + box0.width / 2 + 140, box0.y + box0.height / 2 + 60, { steps: 6 }); await page.mouse.up();
+  rl = await rail(page);
+  check('pan moves the chart; the rail follows the bands', (await page.$eval('.org-canvas svg', (x) => x.getAttribute('viewBox'))) !== vb0 && rl.aligned && rl.pills.length === 5);
   await page.click(`.org-canvas [data-id="${id('L03')}"] .org-card`);
   check('card detail shows the level', (await page.innerText('.org-side')).includes('L3 · Manager'));
   await page.click('.org-side [data-act="close-detail"]');
@@ -305,6 +343,8 @@ try {
     const opsMembers = d.employees.filter((e) => e.department_id === ops.id).length;
     const shown = await pg.$$eval('.org-canvas .org-node:not(.is-context)', (x) => x.length);
     check(`${tag}: department filter shows that department (${opsMembers} members)`, shown === opsMembers, `${shown}`);
+    const lg = await pg.$$eval('.org-legend .org-legend-item', (x) => x.map((i) => ({ dept: i.dataset.dept, ctx: i.classList.contains('is-context') })));
+    check(`${tag}: legend follows the department filter (that department + context managers only)`, lg.some((l) => l.dept === String(ops.id) && !l.ctx) && lg.every((l) => l.dept === String(ops.id) || l.ctx), JSON.stringify(lg));
     await pg.click('.org-chip[data-dept=""]');
     await pg.waitForTimeout(250);
     const cc = await chart(pg);
