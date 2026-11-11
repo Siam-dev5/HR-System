@@ -372,7 +372,9 @@ export function layoutOrg(o: LayoutOptions): OrgLayout {
       x += u.w + UNIT_GAP;
     }
     const gy = MARGIN;
-    groups.push({ key: g.key, label: g.label, x: cursorX - 16, y: gy, w: innerW + 32, h: bottom + 16 - gy });
+    // Keep the company outline around the external-manager reference card as well as its team frame.
+    const groupTop = Math.min(gy, ...externals.filter((f) => f.key === g.key).map((f) => f.y - CARD_H - 24 - 16));
+    groups.push({ key: g.key, label: g.label, x: cursorX - 16, y: groupTop, w: innerW + 32, h: bottom + 16 - groupTop });
     maxBottom = Math.max(maxBottom, bottom + 16);
     cursorX += innerW + GROUP_GAP;
   }
