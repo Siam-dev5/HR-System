@@ -118,7 +118,7 @@ try {
   const d1 = await api(page, '?company=1');
   let g = await geometry(page);
   const labels = g.buttons.map((b) => b.label);
-  check('toolbar: six controls with labels and tooltips', ['ซูมเข้า', 'ซูมออก', 'พอดีจอ', 'รีเซ็ตมุมมอง (กึ่งกลางผัง 100%)', 'ขยายทั้งหมด', 'ย่อทั้งหมด'].every((l) => labels.includes(l)) && g.buttons.every((b) => b.title === b.label), labels.join(' | '));
+  check('toolbar: seven controls with labels and tooltips (Readable Fit + Whole Chart Fit)', ['ซูมเข้า', 'ซูมออก', 'Readable Fit · พอดีจอแบบอ่านได้ (≥ 70%)', 'Whole Chart Fit · พอดีจอทั้งผัง', 'รีเซ็ตมุมมอง (กึ่งกลางผัง 100%)', 'ขยายทั้งหมด', 'ย่อทั้งหมด'].every((l) => labels.includes(l)) && g.buttons.every((b) => b.title === b.label), labels.join(' | '));
   check('toolbar: floating, vertical, on the right inside the chart', g.zbPos === 'absolute' && g.zb.r <= g.cv.r && g.zb.l > g.cv.l + g.cv.w / 2 && g.zb.h > g.zb.w, JSON.stringify({ zb: g.zb, cv: g.cv }));
   check('fit on open: no node under the toolbar, every node inside the chart', g.nodes.length > 0 && g.nodes.every((n) => !overlaps(n, g.zb) && n.l >= g.cv.l - 1 && n.r <= g.cv.r + 1 && n.t >= g.cv.t - 1 && n.b <= g.cv.b + 1));
   let ids = await nodeIds(page);
@@ -283,7 +283,7 @@ try {
     await open(s.page, '?company=1');
     const gg = await geometry(s.page);
     const tag = `${label} ${theme}`;
-    check(`${tag}: no page overflow, toolbar visible with ${gg.buttons.length} controls`, gg.overflow <= 0 && gg.buttons.length === 6 && gg.zb.w > 0 && gg.zb.h > 0);
+    check(`${tag}: no page overflow, toolbar visible with ${gg.buttons.length} controls`, gg.overflow <= 0 && gg.buttons.length === 7 && gg.zb.w > 0 && gg.zb.h > 0);
     if (vp.width <= 600) check(`${tag}: toolbar above the chart (never over a node), one row`, gg.zbPos === 'static' && gg.zb.b <= gg.cv.t + 1 && gg.zb.w > gg.zb.h);
     else check(`${tag}: floating toolbar on the right, no node under it after fit`, gg.zbPos === 'absolute' && gg.zb.l > gg.cv.l + gg.cv.w / 2 && gg.nodes.every((n) => !overlaps(n, gg.zb)));
     if (vp.width <= 1024) check(`${tag}: toolbar buttons are ≥ 40px touch targets`, gg.buttons.every((b) => b.w >= 40 && b.h >= 40), JSON.stringify(gg.buttons.map((b) => `${b.w}x${b.h}`)));

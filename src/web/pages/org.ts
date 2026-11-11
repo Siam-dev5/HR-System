@@ -3,8 +3,13 @@
 // expand / collapse, employee detail, edit reports-to, validated import, Excel / CSV (server) and PNG / SVG / PDF
 // (client) export. The reporting forest comes from shared/org-tree: no duplicate nodes, loops are cut and flagged,
 // and a filtered department keeps its out-of-department managers as marked context nodes. No sample data.
+// Layout (shared/org-layout): 5 level bands from the exact Position Title → Level table (shared/org-levels), the
+// reporting line from manager_id only, Staff / Admin in grids of ≤ 3 per row under their own manager, one group per
+// company, people without a manager in a separate "ไม่มีสายบังคับบัญชา" block. Unmapped titles carry a marker.
 import type { OrgDesignResponse, OrgEmployeeNode } from '../../shared/types';
-import { buildOrgForest, forestAncestors, type OrgForest } from '../../shared/org-tree';
+import { buildOrgForest, forestAncestors, mergeForests, type OrgForest } from '../../shared/org-tree';
+import { ORG_LEVEL_LABELS, positionLevel, type PositionLevel } from '../../shared/org-levels';
+import { CARD_H, CARD_W, ORPHAN_PAD, layoutOrg } from '../../shared/org-layout';
 import { get, post, api, qs } from '../api';
 import { h, mount, loading, errorBox, fmtDate, modal, toast } from '../dom';
 import { optionLabel } from '../labels';
@@ -15,10 +20,8 @@ import { initialsOf } from '../../shared/avatar';
 import { noCompanies, readGridFile } from './attendance';
 
 const SVG_NS = 'http://www.w3.org/2000/svg';
-const W = 210;
-const H = 66;
-const GX = 18;
-const GY = 46;
+const W = CARD_W;
+const H = CARD_H;
 const PALETTE = ['#2563eb', '#059669', '#d97706', '#7c3aed', '#db2777', '#0891b2', '#65a30d', '#dc2626', '#4f46e5', '#0d9488'];
 // photo circle on the card (card size unchanged; the text moves right of it)
 const AV = 40;
@@ -99,6 +102,13 @@ export async function renderOrgChart(main: HTMLElement, params: URLSearchParams)
     if (dept && dept !== 'none' && !d.departments.some((x) => String(x.id) === dept)) dept = '';
     const multiCompany = new Set(d.departments.map((x) => x.company_id)).size > 1;
     const include = (e: OrgEmployeeNode) => (dept === '' ? true : dept === 'none' ? e.department_id === null : e.department_id === Number(dept));
+    // one forest per company (company order of the API): no reporting line is drawn across companies
+    const companyOrder = [...new Set([...d.companies.map((c) => c.id), ...d.employees.map((e) => e.company_id)])].filter((id) => d.employees.some((e) => e.company_id === id));
+    const buildForest = () => mergeForests(companyOrder.map((cid) => buildOrgForest(d.employees.filter((e) => e.company_id === cid), include)));
+    const levels = new Map<number, PositionLevel>(d.employees.map((e) => [e.id, positionLevel(pos(e.position_id)?.title)]));
+    const levelInfo = (id: number): PositionLevel => levels.get(id) ?? { level: 5, mapped: false };
+    const levelText = (l: PositionLevel) => `L${l.level} · ${ORG_LEVEL_LABELS[l.level]}${l.mapped ? '' : ' (Unmapped Level)'}`;
+    const companyName = (id: number) => d.companies.find((c) => c.id === id)?.name ?? '-';
     const chip = (value: string, label: string, count: number, title: string) => h('button', {
       type: 'button', class: `org-chip${count ? '' : ' is-empty'}`, 'data-dept': value, 'aria-pressed': String(dept === value), title,
       onclick: () => setDept(value),
@@ -111,6 +121,7 @@ export async function renderOrgChart(main: HTMLElement, params: URLSearchParams)
       }),
       unassigned ? chip('none', 'ไม่ระบุหน่วยงาน', unassigned, 'พนักงานที่ยังไม่ระบุหน่วยงาน') : null);
     const filterNote = h('p', { class: 'org-filter-note muted', 'aria-live': 'polite' });
+    const unmappedNote = h('p', { class: 'org-unmapped-note', 'aria-live': 'polite' });
 
     const companySel = h('select', { 'aria-label': 'บริษัท', onchange: () => go({ company: companySel.value }) },
       state.meta?.companies.scope === 'all' ? h('option', { value: '', selected: !d.company }, 'ทุกบริษัท') : null,
@@ -118,28 +129,38 @@ export async function renderOrgChart(main: HTMLElement, params: URLSearchParams)
     const search = h('input', { type: 'search', placeholder: 'ค้นหาชื่อ / รหัส / ตำแหน่ง', 'aria-label': 'ค้นหาพนักงาน', oninput: () => (view === 'chart' ? draw(true) : redrawTable()) });
     const searchCount = h('span', { class: 'org-search-count muted', 'aria-live': 'polite' });
     const chartBox = h('div', { class: 'org-canvas', tabindex: '0', 'aria-label': 'ผังองค์กร: ลากเพื่อเลื่อน ล้อเมาส์หรือปุ่ม + / − เพื่อซูม', title: 'ลากเพื่อเลื่อน · ล้อเมาส์เพื่อซูม' });
-    const side = h('aside', { class: 'card org-side', 'aria-live': 'polite' }, h('p', { class: 'muted' }, 'เลือกพนักงานในผังเพื่อดูรายละเอียด'));
+    // employee detail: a drawer over the right edge of the chart (desktop / laptop); the chart keeps its full size and
+    // its zoom / pan when the drawer opens or closes. Below 900px it is the static panel under the chart, as before.
+    const side = h('aside', { class: 'card org-side', 'aria-live': 'polite', 'aria-label': 'รายละเอียดพนักงาน' }, h('p', { class: 'muted' }, 'เลือกพนักงานในผังเพื่อดูรายละเอียด'));
+    const READABLE = 0.7;
     const collapsed = new Set<number>();
-    let forest: OrgForest = buildOrgForest(d.employees, include);
+    let forest: OrgForest = buildForest();
     let current: SVGSVGElement | null = null;
     let selected: number | null = null;
-    const nodeAt = new Map<number, { x: number; y: number }>();
+    const nodeAt = new Map<number, { x: number; y: number; orphan: boolean }>();
     let content = { x: -10, y: 0, w: W + 20, h: H + 20 };
 
     const matches = (e: OrgEmployeeNode, q: string) => !!q && `${e.emp_code} ${e.name} ${pos(e.position_id)?.title ?? ''}`.toLowerCase().includes(q);
 
     const showDetail = (e: OrgEmployeeNode) => {
       selected = e.id;
+      openDrawer();
       const p = pos(e.position_id);
       const mgr = e.manager_id ? byId.get(e.manager_id) : undefined;
       const reports = d.employees.filter((x) => x.manager_id === e.id);
+      const lv = levelInfo(e.id);
       const pick = (x: OrgEmployeeNode) => h('button', { class: 'as-link', onclick: () => { showDetail(x); draw(); focusNode(x.id); } }, `${x.emp_code} ${x.name}`);
       mount(side,
-        h('h3', null, e.name), h('div', { class: 'muted' }, e.emp_code),
+        h('div', { class: 'org-drawer-head' },
+          h('div', null, h('h3', null, e.name), h('div', { class: 'muted' }, e.emp_code)),
+          h('button', { type: 'button', class: 'org-drawer-close', 'data-act': 'close-detail', 'aria-label': 'ปิดรายละเอียด', title: 'ปิดรายละเอียด (Esc)', onclick: () => closeDrawer() }, '×')),
         forest.context.has(e.id) ? h('p', { class: 'org-context-note' }, 'หัวหน้าจากหน่วยงานอื่น (แสดงเพื่อให้เห็นสายบังคับบัญชา ไม่นับรวมในหน่วยงานที่เลือก)') : null,
+        mgr && mgr.company_id !== e.company_id ? h('p', { class: 'org-context-note' }, `หัวหน้าอยู่ต่างบริษัท (${companyName(mgr.company_id)}) — ผังแสดงแยกตามบริษัท`) : null,
+        lv.mapped ? null : h('p', { class: 'org-context-note is-unmapped' }, `Unmapped Level: ตำแหน่ง "${p?.title ?? 'ไม่ระบุตำแหน่ง'}" ยังไม่อยู่ใน Mapping ระดับ — แสดงเป็น L5 ชั่วคราว`),
         forest.nodes.get(e.id)?.cycle ? h('p', { class: 'org-context-note is-warn' }, 'สายบังคับบัญชาของพนักงานคนนี้วนกลับมาที่ตัวเอง ผังตัดวงไว้ที่จุดนี้ — ควรแก้ "หัวหน้า (Reports To)"') : null,
         h('dl', { class: 'dl' },
           h('dt', null, 'ตำแหน่ง'), h('dd', null, p ? `${p.title}${p.job_grade ? ` (${p.job_grade})` : ''}` : '-'),
+          h('dt', null, 'ระดับในผัง'), h('dd', null, levelText(lv)),
           h('dt', null, 'หน่วยงาน'), h('dd', null, deptName(e.department_id)),
           h('dt', null, 'บริษัท'), h('dd', null, d.companies.find((c) => c.id === e.company_id)?.name ?? '-'),
           h('dt', null, 'หัวหน้า (Reports To)'), h('dd', null, mgr ? pick(mgr) : '-'),
@@ -179,7 +200,12 @@ export async function renderOrgChart(main: HTMLElement, params: URLSearchParams)
     const vp = { x: 0, y: 0, s: 1 };
     const boxSize = () => ({ w: Math.max(1, chartBox.clientWidth), h: Math.max(1, chartBox.clientHeight) });
     // width covered by the floating toolbar (desktop / tablet); on phones the toolbar sits above the chart
-    const reserve = () => (getComputedStyle(zoomBar).position === 'absolute' ? zoomBar.offsetWidth + 20 : 0);
+    const toolbarReserve = () => (getComputedStyle(zoomBar).position === 'absolute' ? zoomBar.offsetWidth + 20 : 0);
+    // what fits / centring avoid: the toolbar, and the drawer while it is open (it moves the toolbar left)
+    const reserve = () => {
+      if (getComputedStyle(zoomBar).position !== 'absolute') return 0;
+      return Math.max(0, chartBox.getBoundingClientRect().right - zoomBar.getBoundingClientRect().left) + 8;
+    };
     const apply = () => {
       if (!current) return;
       const { w, h: bh } = boxSize();
@@ -197,13 +223,40 @@ export async function renderOrgChart(main: HTMLElement, params: URLSearchParams)
       apply();
     };
     const zoomCentre = (factor: number) => zoomAt(factor, (boxSize().w - reserve()) / 2, boxSize().h / 2);
+    const wholeScale = () => {
+      const { w, h: bh } = boxSize();
+      return clampScale(Math.min(Math.max(80, w - reserve() - 24) / content.w, Math.max(80, bh - 24) / content.h, 1.25));
+    };
+    // Whole Chart Fit: the entire chart in view, whatever the scale
     const fit = () => {
       const { w, h: bh } = boxSize();
-      const aw = Math.max(80, w - reserve() - 24);
-      vp.s = clampScale(Math.min(aw / content.w, Math.max(80, bh - 24) / content.h, 1.25));
+      vp.s = wholeScale();
       vp.x = content.x + content.w / 2 - (w - reserve()) / 2 / vp.s;
       // org charts read top-down: a chart shorter than the stage starts at the top instead of floating mid-way
       vp.y = content.h * vp.s < bh - 24 ? content.y - 12 / vp.s : content.y + content.h / 2 - bh / 2 / vp.s;
+      apply();
+    };
+    // Readable Fit: the whole-chart scale when that is already readable, otherwise 70 % from the top (MD / AMD in view);
+    // nothing is cropped — the rest of the chart is a pan / zoom away
+    const readableFit = () => {
+      const whole = wholeScale();
+      if (whole >= READABLE) return fit();
+      vp.s = READABLE;
+      const { w } = boxSize();
+      const aw = Math.max(80, w - reserve());
+      const placed = [...nodeAt.entries()].filter(([, n]) => !n.orphan);
+      const topLevel = placed.filter(([id]) => levelInfo(id).level <= 2);
+      const minY = Math.min(...placed.map(([, n]) => n.y));
+      const anchor = topLevel.length ? topLevel : placed.filter(([, n]) => n.y === minY);
+      const ax0 = Math.min(...anchor.map(([, n]) => n.x));
+      const ax1 = Math.max(...anchor.map(([, n]) => n.x + W));
+      if (content.w * vp.s <= aw) vp.x = content.x + content.w / 2 - aw / 2 / vp.s;
+      else {
+        // centre on MD / AMD when they fit side by side, else start at the left-most of them; stay inside the chart
+        const want = ax1 - ax0 <= aw / vp.s - 48 / vp.s ? (ax0 + ax1) / 2 - aw / 2 / vp.s : ax0 - 24 / vp.s;
+        vp.x = Math.min(Math.max(want, content.x), content.x + content.w - aw / vp.s);
+      }
+      vp.y = content.y - 12 / vp.s; // the top of the chart: company headers and MD / AMD
       apply();
     };
     const resetView = () => {
@@ -237,12 +290,33 @@ export async function renderOrgChart(main: HTMLElement, params: URLSearchParams)
       level,
       zbtn('zoom-out', 'ซูมออก', 'minus', () => zoomCentre(1 / 1.25)),
       h('span', { class: 'org-zoom-sep', 'aria-hidden': 'true' }),
-      zbtn('fit', 'พอดีจอ', 'fitScreen', fit),
+      h('button', { type: 'button', class: 'org-zoom-btn org-zoom-text', 'data-act': 'readable-fit', 'aria-label': 'Readable Fit · พอดีจอแบบอ่านได้ (≥ 70%)', title: 'Readable Fit · พอดีจอแบบอ่านได้ (≥ 70%)', onclick: readableFit }, 'Aa'),
+      zbtn('fit', 'Whole Chart Fit · พอดีจอทั้งผัง', 'fitScreen', fit),
       zbtn('reset', 'รีเซ็ตมุมมอง (กึ่งกลางผัง 100%)', 'locate', resetView),
       h('span', { class: 'org-zoom-sep', 'aria-hidden': 'true' }),
       zbtn('expand-all', 'ขยายทั้งหมด', 'expandAll', expandAll),
       zbtn('collapse-all', 'ย่อทั้งหมด', 'collapseAll', collapseAll));
-    const stage = h('div', { class: 'org-stage' }, chartBox, zoomBar);
+    const stage = h('div', { class: 'org-stage' }, chartBox, zoomBar, side);
+    function openDrawer(): void {
+      stage.classList.add('has-drawer');
+    }
+    function closeDrawer(): void {
+      stage.classList.remove('has-drawer');
+      selected = null;
+      mount(side, h('p', { class: 'muted' }, 'เลือกพนักงานในผังเพื่อดูรายละเอียด'));
+      draw(); // only the highlight goes; the viewBox (zoom / pan) is kept
+      chartBox.focus({ preventScroll: true });
+    }
+    // Escape closes the drawer wherever the focus is (a click redraws the SVG, so focus may be on the page);
+    // not while a dialog is open, and the listener removes itself once this page is gone
+    const onEscape = (ev: KeyboardEvent) => {
+      if (!stage.isConnected) return document.removeEventListener('keydown', onEscape);
+      if (ev.key !== 'Escape' || !stage.classList.contains('has-drawer') || ev.defaultPrevented) return;
+      if ((ev.target as Element | null)?.closest?.('dialog, .modal, details[open]') || document.querySelector('dialog[open], .modal')) return;
+      ev.preventDefault();
+      closeDrawer();
+    };
+    document.addEventListener('keydown', onEscape);
 
     const draw = (fromSearch = false) => {
       const q = search.value.trim().toLowerCase();
@@ -252,47 +326,56 @@ export async function renderOrgChart(main: HTMLElement, params: URLSearchParams)
       const hitSet = new Set(hits);
       searchCount.textContent = q ? (hits.length ? `พบ ${hits.length} คน` : 'ไม่พบ') : '';
 
-      const widthOf = new Map<number, number>();
-      const kidsShown = (id: number) => (collapsed.has(id) ? [] : forest.nodes.get(id)?.children ?? []);
-      const measure = (id: number): number => {
-        const kids = kidsShown(id);
-        const w = kids.length ? Math.max(W, kids.reduce((a, k) => a + measure(k), 0) + GX * (kids.length - 1)) : W;
-        widthOf.set(id, w);
-        return w;
-      };
-      const totalW = Math.max(W, forest.roots.reduce((a, r) => a + measure(r), 0) + GX * Math.max(0, forest.roots.length - 1));
+      const multi = !d.company && companyOrder.length > 1;
+      const lay = layoutOrg({
+        forest,
+        levelOf: (id) => levelInfo(id).level,
+        groupOf: (id) => byId.get(id)?.company_id ?? 0,
+        groups: companyOrder.map((cid) => ({ key: cid, label: multi ? `${companyName(cid)} · ${d.employees.filter((e) => e.company_id === cid && forest.members.has(e.id)).length} คน` : null })),
+        hasManager: (id) => (byId.get(id)?.manager_id ?? null) !== null,
+        collapsed,
+        // the stage's shape (minus the floating toolbar): wide teams are stacked in tiers to fit it
+        // (the drawer is ignored here so opening it never re-arranges the chart)
+        aspect: Math.max(80, boxSize().w - toolbarReserve()) / boxSize().h,
+      });
+      const edges = lay.edges.map((ed) => svg('path', {
+        class: `org-edge${ed.context ? ' is-context' : ''}`, 'data-from': ed.from, 'data-to': ed.to,
+        d: ed.points.map(([px, py], i) => `${i ? 'L' : 'M'}${px},${py}`).join(' '),
+        fill: 'none', stroke: '#94a3b8', 'stroke-width': 1.5, ...(ed.context ? { 'stroke-dasharray': '5 4' } : {}),
+      }));
+      // company frames, "no reporting line" blocks and level labels (behind the cards and the lines)
+      const frames: SVGElement[] = [];
+      for (const g of lay.groups) {
+        if (!g.label) continue;
+        frames.push(svg('g', { class: 'org-group', 'data-company': g.key },
+          svg('rect', { class: 'org-group-frame', x: g.x, y: g.y, width: g.w, height: g.h, rx: 14, fill: 'none', stroke: '#cbd5e1', 'stroke-width': 1.5 }),
+          svg('text', { class: 'org-group-title', x: g.x + 16, y: g.y + 27, 'font-size': 16, 'font-weight': 700, fill: '#0f172a' }, g.label)));
+      }
+      for (const b of lay.orphans) {
+        frames.push(svg('g', { class: 'org-orphans', 'data-company': b.key },
+          svg('rect', { class: 'org-orphans-frame', x: b.x, y: b.y, width: b.w, height: b.h, rx: 10, fill: '#f8fafc', stroke: '#94a3b8', 'stroke-width': 1.2, 'stroke-dasharray': '6 4' }),
+          svg('text', { class: 'org-orphans-title', x: b.x + ORPHAN_PAD, y: b.y + ORPHAN_PAD + 12, 'font-size': 12.5, 'font-weight': 700, fill: '#475569' }, `ไม่มีสายบังคับบัญชา · ${b.ids.length} คน`)));
+      }
+      for (const b of lay.bands) {
+        frames.push(svg('text', { class: 'org-band-label', 'data-level': b.level, 'data-y': b.y, x: lay.bounds.x + 10, y: b.y + H / 2 + 4, 'font-size': 12, 'font-weight': 700, fill: '#64748b' }, `L${b.level} · ${ORG_LEVEL_LABELS[b.level]}`));
+      }
       const nodes: SVGElement[] = [];
-      const edges: SVGElement[] = [];
-      let maxDepth = 0;
       nodeAt.clear();
-      const place = (id: number, x0: number, depth: number) => {
+      for (const [id, at] of lay.nodes) {
         const e = byId.get(id);
         const node = forest.nodes.get(id);
-        if (!e || !node) return;
-        maxDepth = Math.max(maxDepth, depth);
-        const w = widthOf.get(id) ?? W;
-        const cx = x0 + w / 2;
-        const y = depth * (H + GY) + 10;
-        const kids = kidsShown(id);
-        let kx = x0 + (w - (kids.reduce((a, k) => a + (widthOf.get(k) ?? W), 0) + GX * Math.max(0, kids.length - 1))) / 2;
-        for (const k of kids) {
-          const kw = widthOf.get(k) ?? W;
-          const kcx = kx + kw / 2;
-          const ky = (depth + 1) * (H + GY) + 10;
-          edges.push(svg('path', { class: `org-edge${node.context ? ' is-context' : ''}`, d: `M${cx},${y + H} V${y + H + GY / 2} H${kcx} V${ky}`, fill: 'none', stroke: '#94a3b8', 'stroke-width': 1.5, ...(node.context ? { 'stroke-dasharray': '5 4' } : {}) }));
-          place(k, kx, depth + 1);
-          kx += kw + GX;
-        }
+        if (!e || !node) continue;
+        const { x, y } = at;
+        const lv = levelInfo(id);
         const p = pos(e.position_id);
         const hit = hitSet.has(id);
         const mark = hit || selected === id;
-        const x = cx - W / 2;
-        nodeAt.set(id, { x, y });
+        nodeAt.set(id, { x, y, orphan: at.orphan });
         const third = node.context ? `หัวหน้าจากหน่วยงานอื่น · ${deptName(e.department_id)}` : `${e.emp_code} · ${deptName(e.department_id)}`;
-        const label = `${e.name} ${p?.title ?? ''}${node.context ? ' (หัวหน้าจากหน่วยงานอื่น)' : ''}${node.cycle ? ' (สายบังคับบัญชาวนลูป)' : ''}`;
+        const label = `${e.name} ${p?.title ?? ''} · ${levelText(lv)}${node.context ? ' (หัวหน้าจากหน่วยงานอื่น)' : ''}${node.cycle ? ' (สายบังคับบัญชาวนลูป)' : ''}${at.orphan ? ' (ไม่มีสายบังคับบัญชา)' : ''}`;
         const g = svg('g', {
-          class: `org-node${node.context ? ' is-context' : ''}${node.cycle ? ' is-cycle' : ''}${hit ? ' is-hit' : ''}${selected === id ? ' is-selected' : ''}`,
-          'data-id': id, transform: `translate(${x},${y})`, tabindex: 0, role: 'button', 'aria-label': label,
+          class: `org-node${node.context ? ' is-context' : ''}${node.cycle ? ' is-cycle' : ''}${hit ? ' is-hit' : ''}${selected === id ? ' is-selected' : ''}${lv.mapped ? '' : ' is-unmapped'}`,
+          'data-id': id, 'data-level': lv.level, ...(at.orphan ? { 'data-orphan': 1 } : {}), ...(at.grid ? { 'data-grid-row': at.grid.gridRow } : {}), transform: `translate(${x},${y})`, tabindex: 0, role: 'button', 'aria-label': label,
           ...(node.children.length ? { 'aria-expanded': String(!collapsed.has(id)) } : {}),
         },
           svg('rect', { class: 'org-card', width: W, height: H, rx: 8, fill: node.context ? '#f8fafc' : '#ffffff', stroke: mark ? '#f59e0b' : node.cycle ? '#dc2626' : node.context ? '#94a3b8' : '#cbd5e1', 'stroke-width': mark ? 3 : node.cycle ? 2 : 1, ...(node.context && !mark ? { 'stroke-dasharray': '5 4' } : {}) }),
@@ -302,6 +385,8 @@ export async function renderOrgChart(main: HTMLElement, params: URLSearchParams)
           svg('text', { class: 'org-t2', x: TX, y: 38, 'font-size': 11.5, fill: '#334155' }, clip(p?.title ?? 'ไม่ระบุตำแหน่ง', 22)),
           svg('text', { class: 'org-t3', x: TX, y: 55, 'font-size': 10.5, fill: node.context ? '#475569' : '#64748b' }, clip(third, 25)));
         if (node.cycle) g.append(svg('g', { class: 'org-cycle-badge', transform: `translate(${W - 58},6)` }, svg('rect', { width: 52, height: 17, rx: 8.5, fill: '#fee2e2', stroke: '#dc2626' }), svg('text', { x: 26, y: 12.5, 'font-size': 10, 'text-anchor': 'middle', fill: '#b91c1c' }, 'วนลูป')));
+        // unmapped title: a tab on the card's top edge (clear of the name and of the connector at the top centre)
+        if (!lv.mapped) g.append(svg('g', { class: 'org-unmapped-badge', transform: `translate(${W - 96},-9)` }, svg('rect', { width: 90, height: 17, rx: 8.5, fill: '#fef3c7', stroke: '#d97706' }), svg('text', { x: 45, y: 12.5, 'font-size': 10, 'font-weight': 700, 'text-anchor': 'middle', fill: '#92400e' }, 'Unmapped Level')));
         if (node.children.length) {
           const closed = collapsed.has(id);
           g.append(svg('g', { class: 'org-toggle', transform: `translate(${W / 2 - 13},${H - 13})`, 'data-toggle': id },
@@ -310,19 +395,20 @@ export async function renderOrgChart(main: HTMLElement, params: URLSearchParams)
             svg('text', { class: 'org-toggle-text', x: 13, y: 17, 'font-size': 11, 'font-weight': 700, 'text-anchor': 'middle', fill: closed ? '#ffffff' : '#0f172a' }, closed ? `+${node.children.length}` : '−')));
         }
         nodes.push(g);
-      };
-      let x = 0;
-      for (const r of forest.roots) {
-        place(r, x, 0);
-        x += (widthOf.get(r) ?? W) + GX;
       }
-      content = { x: -10, y: 0, w: totalW + 20, h: (maxDepth + 1) * (H + GY) + 10 };
+      content = { ...lay.bounds };
       const font = getComputedStyle(document.body).fontFamily || 'sans-serif';
       current = svg('svg', { xmlns: SVG_NS, width: '100%', height: '100%', preserveAspectRatio: 'xMinYMin meet', 'font-family': font, role: 'img', 'aria-label': 'ผังสายบังคับบัญชา' },
         svg('defs', {}, svg('clipPath', { id: 'org-avatar-clip', clipPathUnits: 'objectBoundingBox' }, svg('circle', { cx: 0.5, cy: 0.5, r: 0.5 }))),
-        svg('g', {}, ...edges), svg('g', {}, ...nodes));
+        svg('g', { class: 'org-frames' }, ...frames), svg('g', {}, ...edges), svg('g', {}, ...nodes));
       mount(chartBox, forest.roots.length ? current : h('div', { class: 'empty' }, dept ? 'ไม่มีพนักงานในหน่วยงานนี้' : 'ไม่มีพนักงานในขอบเขตนี้'));
       apply();
+      const unmapped = d.employees.filter((e) => forest.members.has(e.id) && !levelInfo(e.id).mapped);
+      const titles = [...new Set(unmapped.map((e) => pos(e.position_id)?.title ?? 'ไม่ระบุตำแหน่ง'))];
+      unmappedNote.textContent = unmapped.length
+        ? `Unmapped Level: ${unmapped.length} คน ตำแหน่งยังไม่อยู่ใน Mapping ระดับ (${titles.slice(0, 6).join(', ')}${titles.length > 6 ? ` และอีก ${titles.length - 6} ตำแหน่ง` : ''}) — แสดงเป็น L5 ชั่วคราว ให้ HR ตรวจสอบ`
+        : '';
+      unmappedNote.hidden = !unmapped.length;
       const ctx = forest.context.size;
       filterNote.textContent = dept
         ? `แสดง ${forest.members.size} คนในหน่วยงานที่เลือก${ctx ? ` · หัวหน้าจากหน่วยงานอื่น ${ctx} คน (กรอบเส้นประ ไม่นับรวม)` : ''}`
@@ -337,7 +423,7 @@ export async function renderOrgChart(main: HTMLElement, params: URLSearchParams)
       else p.delete('dept');
       history.replaceState(null, '', `?${p}`);
       for (const b of chips.querySelectorAll<HTMLElement>('.org-chip')) b.setAttribute('aria-pressed', String(b.dataset.dept === value));
-      forest = buildOrgForest(d.employees, include);
+      forest = buildForest();
       collapsed.clear();
       // the detail panel reflects the new filter (e.g. "manager from another department" only applies inside it)
       const still = selected !== null && forest.nodes.has(selected) ? byId.get(selected) : undefined;
@@ -345,10 +431,11 @@ export async function renderOrgChart(main: HTMLElement, params: URLSearchParams)
       else {
         selected = null;
         mount(side, h('p', { class: 'muted' }, 'เลือกพนักงานในผังเพื่อดูรายละเอียด'));
+        stage.classList.remove('has-drawer');
       }
       if (view === 'table') return redrawTable();
       draw(true);
-      if (!search.value.trim()) fit();
+      if (!search.value.trim()) readableFit();
     };
 
     // ---- pointer: drag to pan (also on nodes, after a small threshold), two fingers to pinch-zoom; wheel zooms ----
@@ -437,6 +524,11 @@ export async function renderOrgChart(main: HTMLElement, params: URLSearchParams)
     chartBox.addEventListener('keydown', (ev) => {
       const n = (ev.target as Element).closest?.('[data-id]');
       const id = n ? Number(n.getAttribute('data-id')) : null;
+      if (ev.key === 'Escape' && stage.classList.contains('has-drawer')) {
+        ev.preventDefault();
+        closeDrawer();
+        return;
+      }
       if (id !== null && (ev.key === 'Enter' || ev.key === ' ')) {
         ev.preventDefault();
         const e = byId.get(id);
@@ -451,7 +543,7 @@ export async function renderOrgChart(main: HTMLElement, params: URLSearchParams)
       }
       const step = 60 / vp.s;
       const keys: Record<string, () => void> = {
-        '+': () => zoomCentre(1.25), '=': () => zoomCentre(1.25), '-': () => zoomCentre(1 / 1.25), '0': resetView, f: fit,
+        '+': () => zoomCentre(1.25), '=': () => zoomCentre(1.25), '-': () => zoomCentre(1 / 1.25), '0': resetView, f: fit, r: readableFit,
         ArrowUp: () => { vp.y -= step; apply(); }, ArrowDown: () => { vp.y += step; apply(); },
         ArrowLeft: () => { vp.x -= step; apply(); }, ArrowRight: () => { vp.x += step; apply(); },
       };
@@ -555,10 +647,11 @@ export async function renderOrgChart(main: HTMLElement, params: URLSearchParams)
     const kpi = (label: string, value: string | number, cls = '') => h('div', { class: `card kpi ${cls}` }, h('div', { class: 'kpi-label' }, label), h('div', { class: 'kpi-value' }, String(value)));
     const tableView = () => h('div', { class: 'stack' },
       h('div', { class: 'table-wrap' }, h('table', { class: 'table' },
-        h('thead', null, h('tr', null, ['รหัส', 'ชื่อ-นามสกุล', 'หน่วยงาน', 'ตำแหน่ง', 'Grade', 'หัวหน้า', 'ผู้ใต้บังคับบัญชา'].map((t) => h('th', null, t)))),
+        h('thead', null, h('tr', null, ['รหัส', 'ชื่อ-นามสกุล', 'หน่วยงาน', 'ตำแหน่ง', 'Grade', 'ระดับในผัง', 'หัวหน้า', 'ผู้ใต้บังคับบัญชา'].map((t) => h('th', null, t)))),
         h('tbody', null, d.employees.filter((e) => include(e) && (!search.value.trim() || matches(e, search.value.trim().toLowerCase()))).map((e) => {
           const m = e.manager_id ? byId.get(e.manager_id) : undefined;
           return h('tr', null, h('td', null, e.emp_code), h('td', null, e.name), h('td', null, deptName(e.department_id)), h('td', null, pos(e.position_id)?.title ?? '-'), h('td', null, pos(e.position_id)?.job_grade ?? '-'),
+            h('td', null, levelInfo(e.id).mapped ? levelText(levelInfo(e.id)) : h('span', { class: 'badge-status s-pending' }, levelText(levelInfo(e.id)))),
             h('td', null, m ? `${m.emp_code} ${m.name}` : '-'), h('td', { class: 'num' }, String(d.employees.filter((x) => x.manager_id === e.id).length)));
         })))),
       h('h3', null, 'อัตรากำลังตามตำแหน่ง (Approved / Occupied / Vacant)'),
@@ -584,13 +677,14 @@ export async function renderOrgChart(main: HTMLElement, params: URLSearchParams)
         d.canExport ? exportMenu : null,
         d.canImport ? h('button', { class: 'btn small', onclick: () => importDialog(d, () => void renderOrgChart(main, params)) }, 'Import') : null,
         can('employees.create') ? link('/employees', '+ เพิ่มพนักงาน', { class: 'btn small' }) : null),
-      chips, filterNote,
+      chips, filterNote, unmappedNote,
       h('div', { class: 'kpis' }, kpi('พนักงาน', s.employees), kpi('หน่วยงาน', s.departments), kpi('ระดับชั้นการบังคับบัญชา', s.levels), kpi('ตำแหน่งที่มีคนครอง', `${s.occupiedPositions} / ${s.positions}`),
         kpi('อัตราอนุมัติ (Approved)', s.approved), kpi('มีคนครอง (Occupied)', s.occupied), kpi('ว่าง (Vacant)', s.vacant, s.vacant ? 'kpi-warn' : ''), kpi('เกินอัตรา (Over)', s.over, s.over ? 'kpi-bad' : '')),
-      view === 'chart' ? h('div', { class: 'org-layout' }, stage, side) : tableBox);
+      view === 'chart' ? h('div', { class: 'org-layout' }, stage) : tableBox);
     if (view === 'chart') {
       draw();
-      requestAnimationFrame(() => fit());
+      // the chart opens readable (Readable Fit); Whole Chart Fit stays one click away
+      requestAnimationFrame(() => readableFit());
     } else redrawTable();
   } catch (e) {
     mount(main, errorBox(e));
