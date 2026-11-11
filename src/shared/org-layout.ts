@@ -11,6 +11,9 @@
 // - Per company: the largest tree is centred; other trees, people whose manager is outside the company (one titled
 //   frame per such manager, no line across companies) and the "no reporting line" block are balanced left / right.
 // - Companies (all-companies view) sit side by side, each in its own frame, on the same level bands.
+// - Cross company references (optional): a reference card of a person responsible for a department / team of this
+//   company (shared/cross-company) sits in a titled frame per target department at the left end of the company, on
+//   the band of that person's level. A reference is not a node: it is never counted and never gets a reporting line.
 import type { OrgForest } from './org-tree';
 import type { OrgLevel } from './org-levels';
 
@@ -51,6 +54,25 @@ export interface LayoutOptions {
   collapsed: ReadonlySet<number>;
   /** sort key that keeps the teams of one manager grouped (e.g. department order); ties keep the input order */
   orderOf?: (id: number) => number;
+  /** cross company reference cards: one per key, grouped in a frame per (group, frame), in the order given */
+  refs?: ReadonlyArray<{ key: string; group: number; frame: string; level: OrgLevel }>;
+}
+
+export interface LayoutRef {
+  x: number;
+  y: number;
+  row: number;
+  group: number;
+  frame: string;
+}
+export interface LayoutRefFrame {
+  key: number;
+  frame: string;
+  refs: string[];
+  x: number;
+  y: number;
+  w: number;
+  h: number;
 }
 
 export interface LayoutNode {
@@ -103,6 +125,9 @@ export interface OrgLayout {
   groups: LayoutGroup[];
   orphans: LayoutOrphans[];
   externals: LayoutExternal[];
+  /** cross company reference cards (not nodes) and their frames */
+  refs: Map<string, LayoutRef>;
+  refFrames: LayoutRefFrame[];
   /** the five level bands (top of the cards of that level), always L1–L5 */
   bands: Array<{ level: OrgLevel; y: number }>;
   /** cards and frames */
@@ -263,6 +288,39 @@ export function layoutOrg(o: LayoutOptions): OrgLayout {
   const groups: LayoutGroup[] = [];
   const orphanBlocks: LayoutOrphans[] = [];
   const externals: LayoutExternal[] = [];
+  const refs = new Map<string, LayoutRef>();
+  const refFrames: LayoutRefFrame[] = [];
+  /** a frame of reference cards: by band, at most GRID_COLS per row, a row never above its band nor over the row above */
+  const refUnit = (group: number, frame: string, list: ReadonlyArray<{ key: string; level: OrgLevel }>): Unit => {
+    const byRow = new Map<number, string[]>();
+    for (const r of list) byRow.set(r.level - 1, [...(byRow.get(r.level - 1) ?? []), r.key]);
+    const placed: Array<{ key: string; dx: number; y: number; row: number }> = [];
+    let free = -Infinity;
+    let maxW = 0;
+    for (const r of [...byRow.keys()].sort((a, b) => a - b)) {
+      const keys = byRow.get(r) as string[];
+      let row = r;
+      while (row * ROW_H < free) row++;
+      const lines = Math.ceil(keys.length / GRID_COLS);
+      keys.forEach((key, i) => {
+        const line = Math.floor(i / GRID_COLS);
+        const col = i % GRID_COLS;
+        const inLine = Math.min(GRID_COLS, keys.length - line * GRID_COLS);
+        placed.push({ key, dx: ((Math.min(GRID_COLS, keys.length) - inLine) * (CARD_W + GRID_GAP_X)) / 2 + col * (CARD_W + GRID_GAP_X), y: row * ROW_H + line * (CARD_H + GRID_GAP_Y), row });
+      });
+      maxW = Math.max(maxW, Math.min(GRID_COLS, keys.length) * (CARD_W + GRID_GAP_X) - GRID_GAP_X);
+      free = row * ROW_H + lines * (CARD_H + GRID_GAP_Y) - GRID_GAP_Y + GAP_Y;
+    }
+    const top = Math.min(...placed.map((p) => p.y)) - FRAME_TITLE - FRAME_PAD;
+    const bottom = Math.max(...placed.map((p) => p.y + CARD_H)) + FRAME_PAD;
+    return {
+      w: maxW + 2 * FRAME_PAD, top, bottom, size: 0,
+      put: (_s, x, ct) => {
+        for (const p of placed) refs.set(p.key, { x: x + FRAME_PAD + p.dx, y: ct + p.y, row: p.row, group, frame });
+        refFrames.push({ key: group, frame, refs: placed.map((p) => p.key), x, y: ct + top, w: maxW + 2 * FRAME_PAD, h: bottom - top });
+      },
+    };
+  };
   const anyHeader = o.groups.some((g) => g.label !== null);
   const cardsTop = MARGIN + (anyHeader ? HEADER_H : 0) + TOP_PAD;
   let cursorX = 0;
@@ -300,7 +358,11 @@ export function layoutOrg(o: LayoutOptions): OrgLayout {
     const right: Unit[] = [];
     const width = (us: Unit[]) => us.reduce((a, u) => a + u.w + UNIT_GAP, 0);
     for (const u of rest) (width(left) <= width(right) ? left : right).push(u);
-    const line = [...left.reverse(), ...(centre ? [centre] : []), ...right, ...(orphanUnit ? [orphanUnit] : [])];
+    // cross company references of this company: one frame per target department / team, at the left end
+    const frameKeys: string[] = [];
+    for (const r of o.refs ?? []) if (r.group === g.key && !frameKeys.includes(r.frame)) frameKeys.push(r.frame);
+    const refUnits = frameKeys.map((f) => refUnit(g.key, f, [...new Map((o.refs ?? []).filter((r) => r.group === g.key && r.frame === f).map((r) => [r.key, r])).values()]));
+    const line = [...refUnits, ...left.reverse(), ...(centre ? [centre] : []), ...right, ...(orphanUnit ? [orphanUnit] : [])];
     const innerW = line.reduce((a, u) => a + u.w, 0) + UNIT_GAP * Math.max(0, line.length - 1);
     let x = cursorX;
     let bottom = cardsTop;
@@ -322,12 +384,16 @@ export function layoutOrg(o: LayoutOptions): OrgLayout {
     xs.push(n.x, n.x + CARD_W);
     ys.push(n.y, n.y + CARD_H);
   }
-  for (const f of [...orphanBlocks, ...externals, ...groups.filter((g) => g.label !== null)]) {
+  for (const r of refs.values()) {
+    xs.push(r.x, r.x + CARD_W);
+    ys.push(r.y, r.y + CARD_H);
+  }
+  for (const f of [...orphanBlocks, ...externals, ...refFrames, ...groups.filter((g) => g.label !== null)]) {
     xs.push(f.x, f.x + f.w);
     ys.push(f.y, f.y + f.h);
   }
   const minX = (xs.length ? Math.min(...xs) : 0) - MARGIN;
   const maxX = (xs.length ? Math.max(...xs) : CARD_W) + MARGIN;
   const maxY = Math.max(ys.length ? Math.max(...ys) : CARD_H, (bands[4] as { y: number }).y + CARD_H) + MARGIN;
-  return { nodes: sink.nodes, edges: sink.edges, groups, orphans: orphanBlocks, externals, bands, bounds: { x: minX, y: 0, w: maxX - minX, h: maxY } };
+  return { nodes: sink.nodes, edges: sink.edges, groups, orphans: orphanBlocks, externals, refs, refFrames, bands, bounds: { x: minX, y: 0, w: maxX - minX, h: maxY } };
 }
