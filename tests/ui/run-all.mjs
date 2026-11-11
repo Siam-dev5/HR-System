@@ -7,7 +7,7 @@ import { writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { ROOT, EXE, arg, outDir } from './lib/env.mjs';
 
-const SUITES = ['ui-smoke', 'ui-auth', 'ui-header', 'ui-footer', 'ui-workstreams', 'ui-period-admin', 'ui-org', 'ui-avatar', 'ui-holidays', 'ui-sidebar', 'ui-responsive', 'ui-employees', 'ui-jobs', 'ui-attendance-shifts', 'ui-feishu-imports', 'ui-feishu-multicompany', 'ui-approvals', 'ui-app-management', 'ui-c3', 'ui-d'];
+const SUITES = ['ui-smoke', 'ui-auth', 'ui-header', 'ui-footer', 'ui-workstreams', 'ui-period-admin', 'ui-org', 'ui-org-layout', 'ui-avatar', 'ui-holidays', 'ui-sidebar', 'ui-responsive', 'ui-employees', 'ui-jobs', 'ui-attendance-shifts', 'ui-feishu-imports', 'ui-feishu-multicompany', 'ui-approvals', 'ui-app-management', 'ui-c3', 'ui-d'];
 const only = arg('only');
 const baseline = arg('baseline');
 const selected = typeof only === 'string' ? only.split(',').map((s) => s.trim()) : SUITES;

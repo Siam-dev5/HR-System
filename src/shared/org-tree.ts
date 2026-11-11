@@ -72,6 +72,18 @@ export function buildOrgForest<T extends OrgPerson>(people: readonly T[], includ
   return { roots, nodes, members, context };
 }
 
+/** One forest out of several (e.g. one per company, so no reporting line is drawn across companies). Ids must not repeat. */
+export function mergeForests(list: readonly OrgForest[]): OrgForest {
+  const out: OrgForest = { roots: [], nodes: new Map(), members: new Set(), context: new Set() };
+  for (const f of list) {
+    out.roots.push(...f.roots);
+    for (const [id, n] of f.nodes) out.nodes.set(id, n);
+    for (const id of f.members) out.members.add(id);
+    for (const id of f.context) out.context.add(id);
+  }
+  return out;
+}
+
 /** Tree ancestors of `id` (nearest first) — finite, because the forest has no cycles. */
 export function forestAncestors(forest: OrgForest, id: number): number[] {
   const out: number[] = [];

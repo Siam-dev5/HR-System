@@ -673,10 +673,11 @@ input[aria-invalid='true'], select[aria-invalid='true'], textarea[aria-invalid='
 .org-chip.is-empty:not([aria-pressed='true']) { color: var(--muted); border-style: dashed; }
 .org-filter-note { margin: 0 0 0.6rem; font-size: 0.82rem; }
 .org-filter-note:empty { display: none; }
-.org-layout { display: grid; grid-template-columns: minmax(0, 1fr) 300px; gap: 1rem; align-items: start; }
+.org-layout { display: grid; grid-template-columns: minmax(0, 1fr); gap: 1rem; align-items: start; }
 /* chart stage: the SVG fills a fixed-height viewport and zoom / pan move its viewBox — sharp at any zoom, no nested scrollbars */
 .org-stage { position: relative; min-width: 0; }
-.org-canvas { position: relative; height: clamp(360px, 70vh, 820px); overflow: hidden; background: var(--surface-2); border: 1px solid var(--border); border-radius: var(--radius-lg); touch-action: none; cursor: grab; user-select: none; -webkit-user-select: none; }
+/* the chart uses the viewport height below the sticky header (desktop / laptop) */
+.org-canvas { position: relative; height: clamp(420px, calc(100vh - 6.5rem), 1600px); overflow: hidden; background: var(--surface-2); border: 1px solid var(--border); border-radius: var(--radius-lg); touch-action: none; cursor: grab; user-select: none; -webkit-user-select: none; }
 .org-canvas.is-panning { cursor: grabbing; }
 .org-canvas:focus-visible { outline: none; box-shadow: var(--focus-ring); }
 .org-canvas svg { display: block; width: 100%; height: 100%; }
@@ -693,9 +694,21 @@ input[aria-invalid='true'], select[aria-invalid='true'], textarea[aria-invalid='
 .org-node:focus { outline: none; }
 .org-node:focus .org-card { stroke: var(--primary); stroke-width: 3; }
 .org-toggle { cursor: pointer; }
-.org-side { position: sticky; top: 4.5rem; }
+/* employee detail drawer over the right edge of the chart; the toolbar moves left of it, the chart keeps its size */
+.org-side { position: absolute; z-index: 3; top: 0.75rem; right: 0.75rem; bottom: 0.75rem; width: min(340px, calc(100% - 7rem)); margin: 0; overflow: auto; display: none; box-shadow: var(--shadow-lg, var(--shadow)); }
+.org-stage.has-drawer .org-side { display: block; }
+.org-stage.has-drawer .org-zoombar { right: calc(min(340px, 100% - 7rem) + 1.5rem); }
+.org-drawer-head { display: flex; align-items: flex-start; justify-content: space-between; gap: 0.5rem; }
+.org-drawer-head h3 { margin: 0; }
+.org-drawer-close { flex: none; width: 2.2rem; height: 2.2rem; border: 1px solid var(--border); border-radius: var(--radius-sm); background: var(--surface); color: var(--text-2); font-size: 1.3rem; line-height: 1; cursor: pointer; }
+.org-drawer-close:hover { background: var(--surface-2); color: var(--heading); }
+.org-drawer-close:focus-visible { outline: none; box-shadow: var(--focus-ring); }
+.org-zoom-text { font-size: 0.85rem; font-weight: 800; letter-spacing: -0.02em; }
 .org-context-note { margin: 0.4rem 0; padding: 0.45rem 0.6rem; border: 1px dashed var(--border-strong); border-radius: var(--radius-sm); background: var(--surface-2); color: var(--text-2); font-size: 0.82rem; }
 .org-context-note.is-warn { border-color: var(--danger); background: color-mix(in srgb, var(--danger) 8%, var(--surface)); color: var(--danger); }
+.org-context-note.is-unmapped { border-color: var(--warning, #d97706); background: color-mix(in srgb, #d97706 8%, var(--surface)); color: var(--text); }
+.org-unmapped-note { margin: 0 0 0.6rem; padding: 0.4rem 0.6rem; border-left: 3px solid #d97706; border-radius: var(--radius-sm); background: color-mix(in srgb, #d97706 8%, var(--surface)); color: var(--text); font-size: 0.82rem; }
+.org-unmapped-note[hidden] { display: none; }
 /* dark theme: the SVG keeps light colours as attributes (exports stay print-friendly); CSS restyles the live chart */
 [data-theme='dark'] .org-canvas .org-card { fill: #111827; }
 [data-theme='dark'] .org-canvas .org-node:not(.is-hit, .is-selected, .is-cycle) .org-card { stroke: #334155; }
@@ -709,6 +722,10 @@ input[aria-invalid='true'], select[aria-invalid='true'], textarea[aria-invalid='
 [data-theme='dark'] .org-canvas .org-toggle-text[fill='#0f172a'] { fill: #e5e7eb; }
 [data-theme='dark'] .org-canvas .org-avatar-ring { stroke: #111827; }
 [data-theme='dark'] .org-canvas .org-node.is-context .org-avatar-ring { stroke: #0b1120; }
+[data-theme='dark'] .org-canvas .org-group-frame { stroke: #334155; }
+[data-theme='dark'] .org-canvas .org-group-title { fill: #e5edf7; }
+[data-theme='dark'] .org-canvas .org-orphans-frame { fill: #0b1120; stroke: #64748b; }
+[data-theme='dark'] .org-canvas .org-orphans-title, [data-theme='dark'] .org-canvas .org-band-label { fill: #94a3b8; }
 /* employee photo: round; the initials sit underneath and show when there is no photo or it cannot load */
 .emp-avatar { position: relative; display: inline-grid; place-items: center; flex: none; overflow: hidden; border-radius: 50%; background: var(--brand-navy); color: #fff; font-weight: 700; line-height: 1; }
 .emp-avatar-lg { width: 96px; height: 96px; font-size: 2rem; }
@@ -728,7 +745,10 @@ input[aria-invalid='true'], select[aria-invalid='true'], textarea[aria-invalid='
 }
 @media (max-width: 900px) {
   .org-layout { grid-template-columns: 1fr; }
-  .org-side { position: static; }
+  /* tablets / phones: the detail is the static panel under the chart, as before */
+  .org-side { position: static; display: block; width: auto; margin-top: 1rem; overflow: visible; box-shadow: none; }
+  .org-stage.has-drawer .org-zoombar { right: 0.75rem; }
+  .org-drawer-close { display: none; }
 }
 @media (max-width: 600px) {
   .avatar-panel { flex-direction: column; align-items: flex-start; }
@@ -749,7 +769,7 @@ input[aria-invalid='true'], select[aria-invalid='true'], textarea[aria-invalid='
 }
 @media print {
   body.print-org .org-toolbar, body.print-org .kpis, body.print-org .org-side, body.print-org #site-footer,
-  body.print-org .org-chips, body.print-org .org-filter-note, body.print-org .org-zoombar { display: none !important; }
+  body.print-org .org-chips, body.print-org .org-filter-note, body.print-org .org-unmapped-note, body.print-org .org-zoombar { display: none !important; }
   body.print-org .org-layout { display: block; }
   body.print-org .org-canvas { height: auto; max-height: none; overflow: visible; border: 0; background: #fff; }
   body.print-org .org-canvas svg { width: 100% !important; height: auto !important; }
