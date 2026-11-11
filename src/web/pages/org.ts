@@ -503,13 +503,27 @@ export async function renderOrgChart(main: HTMLElement, params: URLSearchParams)
           svg('rect', { class: 'org-orphans-frame', x: b.x, y: b.y, width: b.w, height: b.h, rx: 10, fill: '#f8fafc', stroke: '#94a3b8', 'stroke-width': 1.2, 'stroke-dasharray': '6 4' }),
           svg('text', { class: 'org-orphans-title', x: b.x + FRAME_PAD, y: b.y + FRAME_PAD + 4, 'font-size': 12.5, 'font-weight': 700, fill: '#475569' }, `ไม่มีสายบังคับบัญชา · ${b.ids.length} คน`)));
       }
-      // people whose manager is outside this company / chart: the real manager is named, no line is drawn to it
+      // people whose manager is outside this company / chart: show a manager card above the team
+      // with a dashed connector. This is a visual reference only; manager_id and the reporting forest stay unchanged.
       for (const b of lay.externals) {
         const m = byId.get(b.manager);
-        const title = m ? `รายงานต่อ ${m.name} · ${d.companies.find((c) => c.id === m.company_id)?.code ?? companyName(m.company_id)}` : 'หัวหน้าอยู่ต่างบริษัท / นอกผังนี้';
+        const managerTitle = m ? m.name : 'หัวหน้าอยู่ต่างบริษัท';
+        const managerSub = m
+          ? `${pos(m.position_id)?.title ?? 'หัวหน้า'} · ${d.companies.find((c) => c.id === m.company_id)?.code ?? companyName(m.company_id)}`
+          : 'นอกผังบริษัทนี้';
+        const cardX = b.x + (b.w - W) / 2;
+        const cardY = b.y - H - 24;
+        const cx = b.x + b.w / 2;
+        const cardBottom = cardY + H;
+        const connectorY = b.y;
+        const teamTitle = 'ทีมที่รายงานต่อหัวหน้าต่างบริษัท';
         frames.push(svg('g', { class: 'org-external', 'data-company': b.key, 'data-manager': b.manager },
+          svg('path', { class: 'org-external-connector', d: `M${cx},${cardBottom} L${cx},${connectorY}`, fill: 'none', stroke: '#64748b', 'stroke-width': 1.8, 'stroke-dasharray': '5 4' }),
+          svg('rect', { class: 'org-external-manager-card', x: cardX, y: cardY, width: W, height: H, rx: 10, fill: '#ffffff', stroke: '#64748b', 'stroke-width': 1.5, 'stroke-dasharray': '5 3' }),
+          svg('text', { class: 'org-external-manager-name', x: cardX + 12, y: cardY + 26, 'font-size': 13, 'font-weight': 700, fill: '#334155' }, clip(managerTitle, 25), svg('title', {}, managerTitle)),
+          svg('text', { class: 'org-external-manager-sub', x: cardX + 12, y: cardY + 46, 'font-size': 10.5, fill: '#64748b' }, clip(managerSub, 31), svg('title', {}, managerSub)),
           svg('rect', { class: 'org-external-frame', x: b.x, y: b.y, width: b.w, height: b.h, rx: 10, fill: 'none', stroke: '#94a3b8', 'stroke-width': 1.2, 'stroke-dasharray': '3 4' }),
-          svg('text', { class: 'org-external-title', x: b.x + FRAME_PAD, y: b.y + FRAME_PAD + 4, 'font-size': 12, 'font-weight': 700, fill: '#475569' }, clip(title, Math.max(18, Math.floor((b.w - 2 * FRAME_PAD) / 6.6))), svg('title', {}, title))));
+          svg('text', { class: 'org-external-title', x: b.x + FRAME_PAD, y: b.y + FRAME_PAD + 4, 'font-size': 12, 'font-weight': 700, fill: '#475569' }, clip(teamTitle, Math.max(18, Math.floor((b.w - 2 * FRAME_PAD) / 6.6))), svg('title', {}, teamTitle))));
       }
       // cross company reference frames: one per target department / team (the swatch = that department's colour)
       for (const f of lay.refFrames) {
