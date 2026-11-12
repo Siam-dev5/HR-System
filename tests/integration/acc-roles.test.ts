@@ -99,7 +99,7 @@ describe('migration 0016', () => {
     expect(perms('acc_manager')).not.toContain('payroll.accounting.review.submit');
     expect(perms('acc_manager')).toContain('payroll.accounting.signoff');
     expect(perms('acc_manager').filter((x) => !staff.includes(x))).toEqual(['payroll.accounting.signoff', 'payroll_preview.export']);
-    expect(staff.filter((x) => !perms('acc_manager').includes(x))).toEqual([]);
+    expect(staff.filter((x) => !perms('acc_manager').includes(x))).toEqual(['payroll.accounting.review.submit']);
   });
   it('the permissions of every other role are exactly those of a database built from migrations 0001–0015', () => {
     const dir = join('.tmp', `roles-0015-${Date.now()}`);
@@ -218,6 +218,7 @@ describe('Accounting review and sign-off', () => {
     expect((await adm().post(`/api/payroll/periods/${periodId}/approve`, { note: 'zz HR approval' })).status).toBe(200);
     expect((await c.accStaff!.get('/api/payroll/accounting/periods')).status).toBe(200);
     expect((await c.accStaff!.post(`/api/payroll/periods/${periodId}/accounting-signoff`, { decision: 'signed_off' })).status).toBe(403);
+    expect((await c.accMgr!.post(`/api/payroll/periods/${periodId}/accounting-review`, { note: 'manager must not review' })).status).toBe(403);
     const reviewed = await c.accStaff!.post(`/api/payroll/periods/${periodId}/accounting-review`, { note: 'zz ตรวจสอบยอดแล้ว' });
     expect(reviewed.status, reviewed.text).toBe(201);
     expect((await c.payroll!.post(`/api/payroll/periods/${periodId}/publish`)).status).toBe(409);
@@ -241,7 +242,7 @@ describe('ACC reads every company', () => {
       const codes = m.companies.items.map((x: { code: string }) => x.code);
       expect(codes).toEqual(expect.arrayContaining(['ZAA', 'ZAB']));
       const menu = m.menu.map((x: { key: string }) => x.key);
-      expect(menu).toEqual(expect.arrayContaining(['dashboard', 'employees', 'payroll', 'payroll_preview', 'payslips', 'reports', 'attendance_import', 'ot_review']));
+      expect(menu).toEqual(expect.arrayContaining(['dashboard', 'employees', 'payroll', 'payroll_preview', 'accounting_review', 'payslips', 'reports', 'attendance_import', 'ot_review']));
       for (const k of ['users', 'roles', 'settings', 'audit']) expect(menu).not.toContain(k);
     }
   });
