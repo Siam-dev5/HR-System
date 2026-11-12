@@ -146,7 +146,7 @@ function tableRows(d: Awaited<ReturnType<typeof loadOrg>>, companies: CompanyOpt
 
 const exportOrg = (ext: 'csv' | 'xlsx') => async (c: Context<AppEnv>) => {
   const { company, companies } = await orgCompany(c, c.req.query('company'));
-  const data = await loadOrg(c.env.DB, company?.id ?? null);
+  const data = await loadOrg(c.env.DB, company?.id ?? null, companies.map((x) => x.id));
   const rows = tableRows(data, companies);
   const name = safeName(`organization${company ? `-${company.code}` : ''}`);
   await audit(c, 'org.exported', 'employees', null, { company: company?.id ?? null, format: ext, rows: data.employees.length });
