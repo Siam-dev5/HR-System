@@ -198,6 +198,8 @@ export interface PayrollPeriod {
   published_at?: string | null;
   /** set while a Super Admin has reopened a closed (approved / published) period; cleared when approved again */
   reopened_from?: 'approved' | 'published' | null;
+  /** ACC review of the current calc_version (migration 0018); null = not reviewed yet */
+  accounting_status?: 'reviewed' | 'returned' | 'signed_off' | 'superseded' | null;
 }
 
 /** What a Super Admin period action would touch (shown before confirmation; blockers refuse the action). */

@@ -4,7 +4,7 @@ import { can, link } from '../app';
 
 interface AccountingPeriod {
   id: number; code: string; name: string; company_id: number | null; period_status: string;
-  calc_version: number; approved_at: string | null; accounting_status: 'reviewed' | 'returned' | 'signed_off' | null;
+  calc_version: number; approved_at: string | null; accounting_status: 'reviewed' | 'returned' | 'signed_off' | 'superseded' | null;
   staff_reviewed_by: number | null; staff_reviewed_at: string | null; staff_note: string | null;
   manager_signed_by: number | null; manager_signed_at: string | null; manager_note: string | null;
   employees: number; total_net: number;
@@ -14,6 +14,7 @@ const statusText: Record<string, string> = {
   reviewed: 'ACC Staff ตรวจแล้ว · รอ ACC Manager',
   returned: 'ส่งกลับ HR · ต้องคำนวณใหม่',
   signed_off: 'ACC Manager ลงนามแล้ว',
+  superseded: 'ผลตรวจเดิมถูกยกเลิก (เปิดงวดใหม่) · รอ ACC Staff ตรวจสอบอีกครั้ง',
 };
 
 export async function renderAccountingReview(main: HTMLElement): Promise<void> {
@@ -53,7 +54,7 @@ export async function renderAccountingReview(main: HTMLElement): Promise<void> {
           h('td', null, statusText[p.accounting_status ?? ''] ?? 'รอ ACC Staff ตรวจสอบ'),
           h('td', { class: 'actions' },
             link(`/payroll/preview?period_id=${p.id}`, 'เปิด Preview', { class: 'btn small' }),
-            p.period_status === 'approved' && !p.accounting_status && can('payroll.accounting.review.submit') ? h('button', { class: 'btn small primary', onclick: () => void review(p) }, 'บันทึกผลตรวจ') : null,
+            p.period_status === 'approved' && (!p.accounting_status || p.accounting_status === 'superseded') && can('payroll.accounting.review.submit') ? h('button', { class: 'btn small primary', onclick: () => void review(p) }, 'บันทึกผลตรวจ') : null,
             p.accounting_status === 'reviewed' && can('payroll.accounting.signoff') ? h('button', { class: 'btn small primary', onclick: () => void signoff(p) }, 'ลงนามรับรอง') : null,
             p.accounting_status === 'reviewed' && can('payroll.accounting.signoff') ? h('button', { class: 'btn small danger', onclick: () => void returnToHr(p) }, 'ส่งกลับ HR') : null,
           ),
