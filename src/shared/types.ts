@@ -494,12 +494,23 @@ export interface OrgDepartmentRow {
   employees: number;
 }
 
+export interface OrgManagerReference {
+  id: number;
+  emp_code: string;
+  name: string;
+  company_id: number;
+  company_code: string;
+  position_title: string | null;
+}
+
 export interface OrgDesignResponse {
   company: CompanyOption | null;
   companies: CompanyOption[];
   departments: OrgDepartmentRow[];
   positions: OrgPositionRow[];
   employees: OrgEmployeeNode[];
+  /** Actual managers referenced by manager_id outside the selected company; context only, never headcount. */
+  managerReferences: OrgManagerReference[];
   stats: { employees: number; departments: number; levels: number; positions: number; occupiedPositions: number; approved: number; occupied: number; vacant: number; over: number };
   canUpdate: boolean;
   canImport: boolean;
