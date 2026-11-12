@@ -28,6 +28,8 @@ interface PayrollScope {
   ids: number[];
 }
 
+const ALL_SCOPE: PayrollScope = { all: true, ids: [] };
+
 async function payrollScope(c: Context<AppEnv>): Promise<PayrollScope> {
   const s = await companyScope(c.env.DB, currentUser(c));
   if (s.scope === 'all') return { all: true, ids: [] };
@@ -328,17 +330,24 @@ async function requireForce(c: Context<AppEnv>, p: PeriodRow, action: string): P
   return reason;
 }
 
-async function periodImpact(db: D1Database, p: PeriodRow): Promise<PeriodImpact> {
+/** Company of an archived payslip (the full row is kept in row_json). */
+const ARCHIVE_COMPANY = "json_extract(row_json, '$.company_id')";
+
+/**
+ * What a period change would affect. `scope` limits every figure to the companies in scope; the blockers of the
+ * change endpoints are always computed organisation-wide (ALL_SCOPE) so a rule is never weakened by filtering.
+ */
+async function periodImpact(db: D1Database, p: PeriodRow, scope: PayrollScope = ALL_SCOPE): Promise<PeriodImpact> {
   const slips = await db
-    .prepare('SELECT COUNT(*) AS count, ROUND(COALESCE(SUM(gross), 0), 2) AS gross, ROUND(COALESCE(SUM(net), 0), 2) AS net, COALESCE(SUM(published), 0) AS published, COALESCE(SUM(advance > 0), 0) AS withAdvance, ROUND(COALESCE(SUM(advance), 0), 2) AS advance FROM payslips WHERE period_id = ?')
+    .prepare(`SELECT COUNT(*) AS count, ROUND(COALESCE(SUM(gross), 0), 2) AS gross, ROUND(COALESCE(SUM(net), 0), 2) AS net, COALESCE(SUM(published), 0) AS published, COALESCE(SUM(advance > 0), 0) AS withAdvance, ROUND(COALESCE(SUM(advance), 0), 2) AS advance FROM payslips WHERE period_id = ? AND ${scopeSql('company_id', scope)}`)
     .bind(p.id)
     .first<PeriodImpact['payslips']>();
   const arch = await db
-    .prepare('SELECT COUNT(*) AS count, COUNT(DISTINCT calc_version) AS versions, MAX(archived_at) AS lastArchivedAt, COALESCE(SUM(json_extract(row_json, \'$.published\') = 1), 0) AS published FROM payslip_archive WHERE period_id = ?')
+    .prepare(`SELECT COUNT(*) AS count, COUNT(DISTINCT calc_version) AS versions, MAX(archived_at) AS lastArchivedAt, COALESCE(SUM(json_extract(row_json, '$.published') = 1), 0) AS published FROM payslip_archive WHERE period_id = ? AND ${scopeSql(ARCHIVE_COMPANY, scope)}`)
     .bind(p.id)
     .first<PeriodImpact['archive'] & { published: number }>();
   const att = await db
-    .prepare("SELECT COALESCE(SUM(status = 'active'), 0) AS active, COALESCE(SUM(status = 'active' AND locked = 1), 0) AS locked, COUNT(*) AS total FROM attendance_imports WHERE payroll_period_id = ?")
+    .prepare(`SELECT COALESCE(SUM(status = 'active'), 0) AS active, COALESCE(SUM(status = 'active' AND locked = 1), 0) AS locked, COUNT(*) AS total FROM attendance_imports WHERE payroll_period_id = ? AND ${scopeSql('company_id', scope)}`)
     .bind(p.id)
     .first<PeriodImpact['attendance']>();
   const publishedEver = await db.prepare("SELECT COUNT(*) AS n FROM audit_logs WHERE entity = 'payroll_periods' AND entity_id = ? AND action = 'payroll.published'").bind(String(p.id)).first<{ n: number }>();
@@ -347,14 +356,14 @@ async function periodImpact(db: D1Database, p: PeriodRow): Promise<PeriodImpact>
   const dependencies: PeriodImpact['dependencies'] = [];
   if (p.kind === 'monthly') {
     for (const m of await advancePeriods(db, p)) {
-      const paid = await db.prepare('SELECT ROUND(COALESCE(SUM(net), 0), 2) AS n FROM payslips WHERE period_id = ?').bind(m.id).first<{ n: number }>();
+      const paid = await db.prepare(`SELECT ROUND(COALESCE(SUM(net), 0), 2) AS n FROM payslips WHERE period_id = ? AND ${scopeSql('company_id', scope)}`).bind(m.id).first<{ n: number }>();
       dependencies.push({ id: m.id, code: m.code, kind: 'mid_month', status: m.status as PayrollPeriod['status'], relation: 'mid_month_round', advance: paid?.n ?? 0 });
     }
   } else {
     const m = await coveringMonthly(db, p);
     if (m) {
       const deducted = await db
-        .prepare('SELECT ROUND(COALESCE(SUM(advance), 0), 2) AS n FROM payslips WHERE period_id = ? AND employee_id IN (SELECT employee_id FROM payslips WHERE period_id = ?)')
+        .prepare(`SELECT ROUND(COALESCE(SUM(advance), 0), 2) AS n FROM payslips WHERE period_id = ? AND employee_id IN (SELECT employee_id FROM payslips WHERE period_id = ?) AND ${scopeSql('company_id', scope)}`)
         .bind(m.id, p.id)
         .first<{ n: number }>();
       dependencies.push({ id: m.id, code: m.code, kind: 'monthly', status: m.status as PayrollPeriod['status'], relation: 'month_end', advance: deducted?.n ?? 0 });
@@ -392,9 +401,11 @@ async function periodImpact(db: D1Database, p: PeriodRow): Promise<PeriodImpact>
   };
 }
 
+// Only for a period the user may change as a whole: a company-limited user gets 403 on an all-company period (its
+// figures cover every company) and 404 on another company's period; the figures are also filtered by scope.
 payrollRoutes.get('/periods/:id/impact', requirePeriodAdmin(...Object.values(PERIOD_ADMIN)), async (c) => {
-  const db = c.env.DB;
-  return c.json(await periodImpact(db, await period(db, intParam(c.req.param('id')), await payrollScope(c))));
+  const { p, scope } = await writablePeriod(c, intParam(c.req.param('id')));
+  return c.json(await periodImpact(c.env.DB, p, scope));
 });
 
 /** approved / published → calculated: payslips archived and unpublished (kept), nothing recalculated or published. */
@@ -522,13 +533,15 @@ payrollRoutes.post('/periods/:id/delete', requirePeriodAdmin(PERIOD_ADMIN.delete
   return c.json({ ok: true, id: p.id, code: p.code });
 });
 
+// A company-limited user sees deleted periods of companies in scope only: a deleted all-company period can only be
+// restored organisation-wide, and its archive covers every company. Archive counts are filtered by scope as well.
 payrollRoutes.get('/deleted-periods', requirePeriodAdmin(PERIOD_ADMIN.delete), async (c) => {
   const scope = await payrollScope(c);
   const { results } = await c.env.DB.prepare(
     `SELECT p.id, p.deleted_code AS code, p.name, p.kind, (SELECT name FROM companies c WHERE c.id = p.company_id) AS company, p.start_date, p.end_date, p.pay_date,
        p.deleted_at, (SELECT username FROM users u WHERE u.id = p.deleted_by) AS deleted_by, p.delete_reason,
-       (SELECT COUNT(*) FROM payslip_archive a WHERE a.period_id = p.id) AS archived
-     FROM payroll_periods p WHERE p.deleted_at IS NOT NULL AND (p.company_id IS NULL OR ${scopeSql('p.company_id', scope)}) ORDER BY p.deleted_at DESC`,
+       (SELECT COUNT(*) FROM payslip_archive a WHERE a.period_id = p.id AND ${scopeSql(`json_extract(a.row_json, '$.company_id')`, scope)}) AS archived
+     FROM payroll_periods p WHERE p.deleted_at IS NOT NULL AND ${scopeSql('p.company_id', scope)} ORDER BY p.deleted_at DESC`,
   ).all<DeletedPeriod>();
   return c.json(results);
 });

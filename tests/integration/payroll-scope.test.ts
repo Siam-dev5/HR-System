@@ -6,13 +6,15 @@
 // calculate / reopen / approve / publish / create, request tampering (?company, ids), refusals that change nothing,
 // organisation-wide roles unchanged, and a calculation by a scoped user equal to the engine's own figures.
 import { execFileSync } from 'node:child_process';
+import { createHash } from 'node:crypto';
 import { join } from 'node:path';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
+import type { Cell } from '../../src/shared/xlsx';
 import { Client, startHarness, type Harness } from './harness';
 
 let H: Harness;
 const c: Record<string, Client> = {};
-const ids = {} as Record<'A' | 'B' | 'PA1' | 'PB1' | 'PALL' | 'PA3' | 'PB3' | 'slipA' | 'slipB', number>;
+const ids = {} as Record<'A' | 'B' | 'PA1' | 'PB1' | 'PALL' | 'PA3' | 'PB3' | 'slipA' | 'slipB' | 'DALL' | 'DA', number>;
 const Y = new Date().getUTCFullYear() + 2;
 const WRANGLER = join('node_modules', 'wrangler', 'bin', 'wrangler.js');
 const one = (sql: string) => H.sql(sql)[0] as Record<string, any>;
@@ -63,7 +65,7 @@ beforeAll(async () => {
   // company-limited payroll roles (no employees.all): a payroll officer of one company and a read-only viewer
   H.sql(`INSERT INTO roles (code, name, description, privileged, system) VALUES
     ('zz_payroll_company', 'ZZ Payroll (company)', 'test', 0, 0), ('zz_payroll_viewer', 'ZZ Payroll viewer (company)', 'test', 0, 0);
-    INSERT INTO role_permissions (role_id, permission) SELECT r.id, p.value FROM roles r, json_each('["payroll.view","payroll.calculate","payroll.approve","payroll.publish","payroll.export","payroll_preview.view","payroll_preview.export","payslip_ytd.view","payslip.own"]') p WHERE r.code = 'zz_payroll_company';
+    INSERT INTO role_permissions (role_id, permission) SELECT r.id, p.value FROM roles r, json_each('["dashboard.view","payroll.view","payroll.calculate","payroll.approve","payroll.publish","payroll.export","payroll_preview.view","payroll_preview.export","payslip_ytd.view","payslip.own","attendance_import.view","attendance_import.create"]') p WHERE r.code = 'zz_payroll_company';
     INSERT INTO role_permissions (role_id, permission) SELECT r.id, p.value FROM roles r, json_each('["payroll.view","payroll_preview.view","payslip_ytd.view"]') p WHERE r.code = 'zz_payroll_viewer';`);
 
   const pw = (n: string) => `Zz-${n}-Scope-9a`;
@@ -300,5 +302,159 @@ describe('permissions', () => {
     }
     // the officer still calculates another company's period
     expect((await c.officer!.post(`/api/payroll/periods/${ids.PB3}/calculate`)).status).toBe(200);
+  });
+});
+
+// ---- Follow-up review of PR #23: period impact, deleted periods, attendance periods, dashboard KPI -------------
+const sha = (g: unknown) => createHash('sha256').update(JSON.stringify(g)).digest('hex');
+const GRID_B: Cell[][] = [['Employee ID', 'Name', 'Expected working hours(hr)', 'Actual working hours(hr)', 'Total overtime duration(hr)'], ['ZSB1', 'x', '176', '170', '0']];
+
+/** Soft-deletes a draft exactly as POST /periods/:id/delete does (test setup: the API needs a single-use TOTP). */
+function softDelete(id: number): void {
+  H.sql(`UPDATE payroll_periods SET deleted_at = datetime('now'), deleted_by = (SELECT id FROM users WHERE username = 'it_admin'), deleted_code = code,
+         code = code || '~deleted~' || id, delete_reason = 'zz scope test' WHERE id = ${id} AND status = 'draft' AND NOT EXISTS (SELECT 1 FROM payslips WHERE period_id = ${id});`);
+}
+
+/** Everything the requests below could change if they wrote: periods, payslips, archive, attendance imports. */
+const globalState = () => JSON.stringify(H.sqlEach(
+  `SELECT id, code, status, calc_version, updated_at, deleted_at FROM payroll_periods ORDER BY id;
+   SELECT COUNT(*) AS n, ROUND(COALESCE(SUM(net), 0), 2) AS net FROM payslips;
+   SELECT COUNT(*) AS n FROM payslip_archive;
+   SELECT id, status, version FROM attendance_imports ORDER BY id;`,
+));
+
+describe('follow-up: period impact', () => {
+  it('a company-limited user never gets impact figures (all-company or any period): 403, nothing changes', async () => {
+    const before = globalState();
+    for (const p of [ids.PALL, ids.PA1, ids.PB1]) {
+      const r = await c.payA!.get(`/api/payroll/periods/${p}/impact`);
+      expect(r.status).toBe(403);
+      expect(r.body.payslips).toBeUndefined();
+      expect(r.text).not.toMatch(/"gross"|"net"|"archive"|"dependencies"/);
+    }
+    expect((await c.viewA!.get(`/api/payroll/periods/${ids.PALL}/impact`)).status).toBe(403);
+    expect(globalState()).toBe(before);
+  });
+
+  it('organisation-wide period administration keeps the full figures of every company', async () => {
+    const r = await c.admin!.get(`/api/payroll/periods/${ids.PALL}/impact`);
+    expect(r.status).toBe(200);
+    const all = one(`SELECT COUNT(*) AS n, ROUND(SUM(gross), 2) AS gross, ROUND(SUM(net), 2) AS net FROM payslips WHERE period_id = ${ids.PALL}`);
+    expect(r.body.payslips.count).toBe(Number(all.n));
+    expect(r.body.payslips.gross).toBe(Number(all.gross));
+    expect(r.body.payslips.net).toBe(Number(all.net));
+    expect(Number(one(`SELECT COUNT(DISTINCT company_id) AS n FROM payslips WHERE period_id = ${ids.PALL}`).n)).toBeGreaterThan(1);
+  });
+});
+
+describe('follow-up: deleted periods', () => {
+  beforeAll(async () => {
+    // a deleted all-company period and a deleted company A period, each with archived slips (calculate, then reopen)
+    ids.DALL = await createPeriod('ZS-DALL8', '08', null);
+    ids.DA = await createPeriod('ZS-DA9', '09', ids.A);
+    for (const p of [ids.DALL, ids.DA]) {
+      expect((await c.admin!.post(`/api/payroll/periods/${p}/calculate`)).status).toBe(200);
+      expect((await c.admin!.post(`/api/payroll/periods/${p}/reopen`)).status).toBe(200);
+      softDelete(p);
+    }
+    expect(Number(one(`SELECT COUNT(DISTINCT json_extract(row_json, '$.company_id')) AS n FROM payslip_archive WHERE period_id = ${ids.DALL}`).n)).toBeGreaterThan(1);
+  });
+
+  it('a company-limited user cannot list deleted periods or restore an all-company one; nothing changes', async () => {
+    const before = globalState();
+    for (const who of [c.payA!, c.viewA!]) {
+      const r = await who.get('/api/payroll/deleted-periods');
+      expect(r.status).toBe(403);
+      expect(r.text).not.toContain('ZS-DALL8');
+      expect((await who.post(`/api/payroll/periods/${ids.DALL}/restore`, { reason: 'zz scope test' })).status).toBe(403);
+    }
+    expect(globalState()).toBe(before);
+  });
+
+  it('organisation-wide: every deleted period with its full archive count', async () => {
+    const r = await c.admin!.get('/api/payroll/deleted-periods');
+    expect(r.status).toBe(200);
+    const row = r.body.find((x: { code: string }) => x.code === 'ZS-DALL8');
+    expect(row.archived).toBe(Number(one(`SELECT COUNT(*) AS n FROM payslip_archive WHERE period_id = ${ids.DALL}`).n));
+    expect(r.body.map((x: { code: string }) => x.code)).toContain('ZS-DA9');
+  });
+});
+
+describe('follow-up: attendance periods', () => {
+  it('a company-limited user lists its own and all-company periods, never another company period', async () => {
+    const r = await c.payA!.get('/api/attendance/periods');
+    expect(r.status).toBe(200);
+    expect(codes(r.body)).toEqual(expect.arrayContaining(['ZS-A1', 'ZS-A3', 'ZS-ALL2']));
+    expect(codes(r.body).filter((x) => x.startsWith('ZS-B'))).toEqual([]);
+    expect(r.body.every((p: { company_id: number | null }) => p.company_id === null || p.company_id === ids.A)).toBe(true);
+    expect(codes(r.body)).not.toContain('ZS-DALL8'); // deleted
+  });
+
+  it('organisation-wide users still list every company period', async () => {
+    for (const who of [c.admin!, c.staff!]) {
+      const r = await who.get('/api/attendance/periods');
+      expect(r.status).toBe(200);
+      expect(codes(r.body)).toEqual(expect.arrayContaining(['ZS-A1', 'ZS-B1', 'ZS-ALL2', 'ZS-B3']));
+    }
+  });
+
+  it('attaching a file to another company period answers 404 without the period code; nothing is imported', async () => {
+    const before = globalState();
+    const body = { company_id: ids.A, period_id: ids.PB3, file_name: 'zz.csv', sha256: sha(GRID_B), grid: GRID_B };
+    for (const path of ['/api/attendance/imports/analyze', '/api/attendance/imports']) {
+      const r = await c.payA!.post(path, body);
+      expect(r.status, path).toBe(404);
+      expect(r.text).not.toContain('ZS-B3');
+    }
+    expect(globalState()).toBe(before);
+  });
+
+  it('a duplicate-file warning never names another company import', async () => {
+    const imp = await c.admin!.post('/api/attendance/imports', { company_id: ids.B, period_id: ids.PB3, file_name: 'zz-b.csv', sha256: sha(GRID_B), grid: GRID_B });
+    expect(imp.status, imp.text).toBe(201);
+    const mine = await c.payA!.post('/api/attendance/imports/analyze', { company_id: ids.A, period_id: ids.PA3, file_name: 'zz-b.csv', sha256: sha(GRID_B), grid: GRID_B });
+    expect(mine.status).toBe(200);
+    expect(mine.body.duplicateFile).toBeNull();
+    expect(mine.body.fileIssues.map((i: { code: string }) => i.code)).not.toContain('duplicate_file');
+    expect(mine.text).not.toContain('ZZ Scope B');
+    // organisation-wide users keep the cross-company duplicate warning
+    const all = await c.admin!.post('/api/attendance/imports/analyze', { company_id: ids.A, period_id: ids.PA3, file_name: 'zz-b.csv', sha256: sha(GRID_B), grid: GRID_B });
+    expect(all.body.duplicateFile.company).toBe('ZZ Scope B');
+  });
+});
+
+describe('follow-up: dashboard KPI "pending payroll periods"', () => {
+  const kpi = async (who: Client, query = '') => {
+    const r = await who.get(`/api/dashboard${query}`);
+    expect(r.status).toBe(200);
+    return r.body.kpis.find((k: { label: string }) => k.label === 'งวดเงินเดือนรอดำเนินการ') as { value: number; companyScoped: boolean } | undefined;
+  };
+  const pending = (where: string) => Number(one(`SELECT COUNT(*) AS n FROM payroll_periods WHERE status <> 'published' AND deleted_at IS NULL AND ${where}`).n);
+
+  it('a company-limited user counts its company periods and all-company periods only', async () => {
+    const k = await kpi(c.payA!);
+    expect(k?.value).toBe(pending(`(company_id IS NULL OR company_id = ${ids.A})`));
+    expect(k?.value).toBeLessThan(pending('1'));
+    expect(k?.companyScoped).toBe(true);
+    // another company's new pending period never moves the number
+    const n = k?.value;
+    const extra = await createPeriod('ZS-B11', '11', ids.B);
+    expect((await kpi(c.payA!))?.value).toBe(n);
+    expect((await kpi(c.admin!))?.value).toBe(pending('1'));
+    softDelete(extra);
+  });
+
+  it('organisation-wide: unchanged, every period, marked organisation-wide even with ?company', async () => {
+    const all = await kpi(c.admin!);
+    expect(all?.value).toBe(pending('1'));
+    expect(all?.companyScoped).toBe(false);
+    const b = await kpi(c.admin!, `?company=${ids.B}`);
+    expect(b?.value).toBe(pending('1'));
+    expect(b?.companyScoped).toBe(false);
+  });
+
+  it('?company of another company is refused; a user without a company gets no payroll KPI', async () => {
+    expect((await c.payA!.get(`/api/dashboard?company=${ids.B}`)).status).toBe(403);
+    expect(await kpi(c.noLink!)).toBeUndefined();
   });
 });

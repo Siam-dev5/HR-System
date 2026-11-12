@@ -91,7 +91,9 @@ async function prepare(c: Context<AppEnv>, body: Record<string, unknown>): Promi
   const db = c.env.DB;
   const company = await scopedCompany(c, body.company_id);
   const period = await db.prepare('SELECT id, code, name, start_date, end_date, status, company_id FROM payroll_periods WHERE id = ? AND deleted_at IS NULL').bind(intParam(String(body.period_id ?? ''), 'period_id')).first<PeriodLite>();
-  if (!period) throw notFound('ไม่พบงวดเงินเดือน');
+  // another company's own period is answered like a missing one (its code is never echoed to a company-limited user)
+  const scope = await scopeIds(db, currentUser(c));
+  if (!period || (scope && period.company_id !== null && !scope.includes(period.company_id))) throw notFound('ไม่พบงวดเงินเดือน');
   const fileName = str(body, 'file_name', { required: true, max: 255 }) as string;
   const sha256 = str(body, 'sha256', { required: true, max: 64 }) as string;
   if (!/^[0-9a-f]{64}$/.test(sha256)) throw badRequest('sha256 ไม่ถูกต้อง');
@@ -169,9 +171,10 @@ async function prepare(c: Context<AppEnv>, body: Record<string, unknown>): Promi
   const dup = await db
     .prepare(
       `SELECT i.id, i.version, i.status, i.company_id, i.payroll_period_id, c.name AS company, p.code AS period FROM attendance_imports i
-       JOIN companies c ON c.id = i.company_id JOIN payroll_periods p ON p.id = i.payroll_period_id WHERE i.file_sha256 = ? AND i.status != 'rolled_back' ORDER BY i.id DESC LIMIT 1`,
+       JOIN companies c ON c.id = i.company_id JOIN payroll_periods p ON p.id = i.payroll_period_id WHERE i.file_sha256 = ? AND i.status != 'rolled_back'
+       ${scope ? `AND i.company_id IN (${scope.map(() => '?').join(',')})` : ''} ORDER BY i.id DESC LIMIT 1`,
     )
-    .bind(sha256)
+    .bind(sha256, ...(scope ?? []))
     .first<{ id: number; version: number; status: string; company_id: number; payroll_period_id: number; company: string; period: string }>();
   if (dup) {
     const same = dup.company_id === company.id && dup.payroll_period_id === period.id && dup.status === 'active';
@@ -236,8 +239,15 @@ async function prepare(c: Context<AppEnv>, body: Record<string, unknown>): Promi
 }
 
 /** Payroll periods to attach attendance to (read-only list; HR Staff do not hold payroll.view). */
+// Company scope: periods of companies in scope, plus all-company periods (an import for the user's own company can
+// be attached to them); never another company's own period. A user without a company gets an empty list.
 attendanceRoutes.get('/periods', requirePerm('attendance_import.view', 'ot_review.view'), async (c) => {
-  const { results } = await c.env.DB.prepare('SELECT id, code, name, start_date, end_date, status, kind, company_id FROM payroll_periods WHERE deleted_at IS NULL ORDER BY start_date DESC, kind LIMIT 120').all();
+  const ids = await scopeIds(c.env.DB, currentUser(c));
+  if (ids && !ids.length) return c.json([]);
+  const inScope = ids ? ` AND (company_id IS NULL OR company_id IN (${ids.map(() => '?').join(',')}))` : '';
+  const { results } = await c.env.DB.prepare(`SELECT id, code, name, start_date, end_date, status, kind, company_id FROM payroll_periods WHERE deleted_at IS NULL${inScope} ORDER BY start_date DESC, kind LIMIT 120`)
+    .bind(...(ids ?? []))
+    .all();
   return c.json(results);
 });
 
