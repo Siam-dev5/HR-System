@@ -363,7 +363,8 @@ payrollRoutes.post('/periods/:id/publish', requirePerm('payroll.publish'), async
   const accounting = await db.prepare("SELECT status FROM payroll_accounting_reviews WHERE period_id = ? AND calc_version = ?").bind(p.id, p.calc_version).first<{ status: string }>();
   if (accounting?.status !== 'signed_off') throw conflict('ยังเผยแพร่ไม่ได้: ต้องผ่านการตรวจสอบ ACC Staff และลงนาม ACC Manager สำหรับ Calculation Version ปัจจุบันก่อน');
   const res = await db.batch([
-    db.prepare("UPDATE payroll_periods SET status = 'published', published_by = ?, published_at = datetime('now'), updated_at = datetime('now'), updated_by = ? WHERE id = ? AND status = 'approved' AND deleted_at IS NULL").bind(user.id, user.id, p.id),
+    db.prepare("UPDATE payroll_periods SET status = 'published', published_by = ?, published_at = datetime('now'), updated_at = datetime('now'), updated_by = ? WHERE id = ? AND status = 'approved' AND deleted_at IS NULL
+         AND EXISTS (SELECT 1 FROM payroll_accounting_reviews ar WHERE ar.period_id = payroll_periods.id AND ar.calc_version = payroll_periods.calc_version AND ar.status = 'signed_off')").bind(user.id, user.id, p.id),
     db.prepare("UPDATE payslips SET published = 1 WHERE period_id = ? AND EXISTS (SELECT 1 FROM payroll_periods WHERE id = ? AND status = 'published')").bind(p.id, p.id),
   ]);
   if (!res[0]?.meta.changes) throw conflict('งวดนี้ถูกเผยแพร่หรือเปลี่ยนสถานะไปแล้ว');
