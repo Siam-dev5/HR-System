@@ -92,7 +92,11 @@ describe('migration 0016', () => {
     }
     // the only difference: ACC Manager may export the Payroll Preview (no bank / ID columns)
     const staff = perms('acc_staff');
-    expect(perms('acc_manager').filter((x) => !staff.includes(x))).toEqual(['payroll_preview.export']);
+    expect(staff).toContain('payroll.accounting.review');
+    expect(staff).not.toContain('payroll.accounting.signoff');
+    expect(perms('acc_manager')).toContain('payroll.accounting.review');
+    expect(perms('acc_manager')).toContain('payroll.accounting.signoff');
+    expect(perms('acc_manager').filter((x) => !staff.includes(x))).toEqual(['payroll.accounting.signoff', 'payroll_preview.export']);
     expect(staff.filter((x) => !perms('acc_manager').includes(x))).toEqual([]);
   });
   it('the permissions of every other role are exactly those of a database built from migrations 0001–0015', () => {
