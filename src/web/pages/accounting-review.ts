@@ -53,7 +53,7 @@ export async function renderAccountingReview(main: HTMLElement): Promise<void> {
           h('td', null, statusText[p.accounting_status ?? ''] ?? 'รอ ACC Staff ตรวจสอบ'),
           h('td', { class: 'actions' },
             link(`/payroll/preview?period_id=${p.id}`, 'เปิด Preview', { class: 'btn small' }),
-            !p.accounting_status && can('payroll.accounting.review.submit') ? h('button', { class: 'btn small primary', onclick: () => void review(p) }, 'บันทึกผลตรวจ') : null,
+            p.period_status === 'approved' && !p.accounting_status && can('payroll.accounting.review.submit') ? h('button', { class: 'btn small primary', onclick: () => void review(p) }, 'บันทึกผลตรวจ') : null,
             p.accounting_status === 'reviewed' && can('payroll.accounting.signoff') ? h('button', { class: 'btn small primary', onclick: () => void signoff(p) }, 'ลงนามรับรอง') : null,
             p.accounting_status === 'reviewed' && can('payroll.accounting.signoff') ? h('button', { class: 'btn small danger', onclick: () => void returnToHr(p) }, 'ส่งกลับ HR') : null,
           ),
