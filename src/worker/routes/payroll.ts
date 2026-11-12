@@ -309,6 +309,7 @@ payrollRoutes.post('/periods/:id/accounting-review', requirePerm('payroll.accoun
   const { p } = await writablePeriod(c, intParam(c.req.param('id')));
   if (p.status !== 'approved') throw conflict('ฝ่ายบัญชีตรวจสอบได้หลัง HR อนุมัติงวดแล้วเท่านั้น');
   if (!p.employees || p.calc_version < 1) throw conflict('งวดนี้ไม่มีข้อมูลคำนวณที่ใช้ตรวจสอบ');
+  if (p.approved_by === user.id) throw forbidden('ผู้อนุมัติฝั่ง HR ต้องไม่ใช่ผู้ตรวจสอบ ACC Staff');
   const body = await readJson(c);
   const note = str(body, 'note', { max: 1000 }) ?? null;
   const db = c.env.DB;
@@ -339,6 +340,7 @@ payrollRoutes.post('/periods/:id/accounting-signoff', requirePerm('payroll.accou
     .bind(p.id, p.calc_version).first<{ status: string; staff_reviewed_by: number }>();
   if (!review || review.status !== 'reviewed') throw conflict('ต้องให้ ACC Staff ตรวจสอบก่อน ACC Manager ลงนาม');
   if (review.staff_reviewed_by === user.id) throw forbidden('ผู้ตรวจสอบ ACC Staff ต้องไม่ใช่ผู้ลงนาม ACC Manager');
+  if (p.approved_by === user.id) throw forbidden('ผู้อนุมัติฝั่ง HR ต้องไม่ใช่ผู้ลงนาม ACC Manager');
   const status = decision;
   const updated = await db.prepare(
     `UPDATE payroll_accounting_reviews SET status = ?, manager_signed_by = ?, manager_signed_at = datetime('now'),
