@@ -273,11 +273,95 @@ payrollRoutes.post('/periods/:id/approve', requirePerm('payroll.approve'), async
   return c.json(approved);
 });
 
+// ---- Accounting review / manager sign-off ----------------------------------------------------
+// Every decision is tied to calc_version. A recalculation creates a new version and cannot reuse an old sign-off.
+payrollRoutes.get('/accounting/periods', requirePerm('payroll.accounting.review'), async (c) => {
+  const scope = await payrollScope(c);
+  const { results } = await c.env.DB.prepare(
+    `SELECT p.id, p.code, p.name, p.company_id, p.status AS period_status, p.calc_version, p.approved_at,
+       r.status AS accounting_status, r.staff_reviewed_by, r.staff_reviewed_at, r.staff_note,
+       r.manager_signed_by, r.manager_signed_at, r.manager_note,
+       (SELECT COUNT(*) FROM payslips s WHERE s.period_id = p.id AND ${scopeSql('s.company_id', scope)}) AS employees,
+       (SELECT ROUND(COALESCE(SUM(s.net),0),2) FROM payslips s WHERE s.period_id = p.id AND ${scopeSql('s.company_id', scope)}) AS total_net
+     FROM payroll_periods p
+     LEFT JOIN payroll_accounting_reviews r ON r.period_id = p.id AND r.calc_version = p.calc_version
+     WHERE p.deleted_at IS NULL AND p.status IN ('approved','published')
+       AND (p.company_id IS NULL OR ${scopeSql('p.company_id', scope)})
+     ORDER BY p.start_date DESC`,
+  ).all<Record<string, unknown>>();
+  return c.json(results);
+});
+
+payrollRoutes.get('/periods/:id/accounting-review', requirePerm('payroll.accounting.review'), async (c) => {
+  const { p } = await writablePeriod(c, intParam(c.req.param('id')));
+  const review = await c.env.DB.prepare('SELECT * FROM payroll_accounting_reviews WHERE period_id = ? AND calc_version = ?')
+    .bind(p.id, p.calc_version).first();
+  const { results: events } = await c.env.DB.prepare(
+    `SELECT e.id, e.calc_version, e.action, e.note, e.created_at, u.username AS actor
+     FROM payroll_accounting_review_events e JOIN users u ON u.id = e.actor_id
+     WHERE e.period_id = ? ORDER BY e.id DESC LIMIT 100`,
+  ).bind(p.id).all();
+  return c.json({ period: p, review, events });
+});
+
+payrollRoutes.post('/periods/:id/accounting-review', requirePerm('payroll.accounting.review'), async (c) => {
+  const user = currentUser(c);
+  const { p } = await writablePeriod(c, intParam(c.req.param('id')));
+  if (p.status !== 'approved') throw conflict('ฝ่ายบัญชีตรวจสอบได้หลัง HR อนุมัติงวดแล้วเท่านั้น');
+  if (!p.employees || p.calc_version < 1) throw conflict('งวดนี้ไม่มีข้อมูลคำนวณที่ใช้ตรวจสอบ');
+  const body = await readJson(c);
+  const note = str(body, 'note', { max: 1000 }) ?? null;
+  const db = c.env.DB;
+  const exists = await db.prepare('SELECT status FROM payroll_accounting_reviews WHERE period_id = ? AND calc_version = ?')
+    .bind(p.id, p.calc_version).first<{ status: string }>();
+  if (exists) throw conflict(exists.status === 'returned' ? 'งวดนี้ถูกส่งกลับแล้ว ต้องให้ HR คำนวณใหม่ก่อนตรวจซ้ำ' : 'งวดนี้มีผลตรวจสอบสำหรับ Calculation Version นี้แล้ว');
+  await db.batch([
+    db.prepare(`INSERT INTO payroll_accounting_reviews (period_id, calc_version, status, staff_reviewed_by, staff_note)
+      VALUES (?, ?, 'reviewed', ?, ?)`).bind(p.id, p.calc_version, user.id, note),
+    db.prepare(`INSERT INTO payroll_accounting_review_events (period_id, calc_version, action, actor_id, note)
+      VALUES (?, ?, 'staff_reviewed', ?, ?)`).bind(p.id, p.calc_version, user.id, note),
+  ]);
+  await audit(c, 'payroll.accounting_reviewed', 'payroll_periods', p.id, { calc_version: p.calc_version, reviewer: user.id, note });
+  return c.json({ ok: true, calc_version: p.calc_version, status: 'reviewed' }, 201);
+});
+
+payrollRoutes.post('/periods/:id/accounting-signoff', requirePerm('payroll.accounting.signoff'), async (c) => {
+  const user = currentUser(c);
+  const { p } = await writablePeriod(c, intParam(c.req.param('id')));
+  if (p.status !== 'approved') throw conflict('ลงนามได้เฉพาะงวดที่ HR อนุมัติแล้ว');
+  const body = await readJson(c);
+  const decision = str(body, 'decision', { required: true, max: 20 });
+  if (decision !== 'signed_off' && decision !== 'returned') throw badRequest('decision ต้องเป็น signed_off หรือ returned');
+  const note = str(body, 'note', { required: decision === 'returned', max: 1000 }) ?? null;
+  if (decision === 'returned' && (!note || note.trim().length < 5)) throw badRequest('กรุณาระบุเหตุผลส่งกลับอย่างน้อย 5 ตัวอักษร');
+  const db = c.env.DB;
+  const review = await db.prepare('SELECT status, staff_reviewed_by FROM payroll_accounting_reviews WHERE period_id = ? AND calc_version = ?')
+    .bind(p.id, p.calc_version).first<{ status: string; staff_reviewed_by: number }>();
+  if (!review || review.status !== 'reviewed') throw conflict('ต้องให้ ACC Staff ตรวจสอบก่อน ACC Manager ลงนาม');
+  if (review.staff_reviewed_by === user.id) throw forbidden('ผู้ตรวจสอบ ACC Staff ต้องไม่ใช่ผู้ลงนาม ACC Manager');
+  const status = decision;
+  const updated = await db.prepare(
+    `UPDATE payroll_accounting_reviews SET status = ?, manager_signed_by = ?, manager_signed_at = datetime('now'),
+       manager_note = ?, updated_at = datetime('now')
+     WHERE period_id = ? AND calc_version = ? AND status = 'reviewed'`,
+  ).bind(status, user.id, note, p.id, p.calc_version).run();
+  if (!updated.meta.changes) throw conflict('รายการตรวจสอบถูกเปลี่ยนสถานะแล้ว กรุณาโหลดใหม่');
+  await db.prepare(
+    `INSERT INTO payroll_accounting_review_events (period_id, calc_version, action, actor_id, note)
+     VALUES (?, ?, ?, ?, ?)`,
+  ).bind(p.id, p.calc_version, decision === 'signed_off' ? 'manager_signed_off' : 'returned', user.id, note).run();
+  await audit(c, decision === 'signed_off' ? 'payroll.accounting_signed_off' : 'payroll.accounting_returned', 'payroll_periods', p.id,
+    { calc_version: p.calc_version, manager: user.id, reviewer: review.staff_reviewed_by, note });
+  return c.json({ ok: true, calc_version: p.calc_version, status });
+});
+
 payrollRoutes.post('/periods/:id/publish', requirePerm('payroll.publish'), async (c) => {
   const user = currentUser(c);
   const db = c.env.DB;
   const { p, scope } = await writablePeriod(c, intParam(c.req.param('id')));
   if (p.status !== 'approved') throw conflict('เผยแพร่ได้เฉพาะงวดที่อนุมัติแล้ว');
+  const accounting = await db.prepare("SELECT status FROM payroll_accounting_reviews WHERE period_id = ? AND calc_version = ?").bind(p.id, p.calc_version).first<{ status: string }>();
+  if (accounting?.status !== 'signed_off') throw conflict('ยังเผยแพร่ไม่ได้: ต้องผ่านการตรวจสอบ ACC Staff และลงนาม ACC Manager สำหรับ Calculation Version ปัจจุบันก่อน');
   const res = await db.batch([
     db.prepare("UPDATE payroll_periods SET status = 'published', published_by = ?, published_at = datetime('now'), updated_at = datetime('now'), updated_by = ? WHERE id = ? AND status = 'approved' AND deleted_at IS NULL").bind(user.id, user.id, p.id),
     db.prepare("UPDATE payslips SET published = 1 WHERE period_id = ? AND EXISTS (SELECT 1 FROM payroll_periods WHERE id = ? AND status = 'published')").bind(p.id, p.id),
