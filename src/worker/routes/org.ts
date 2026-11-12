@@ -31,7 +31,7 @@ async function orgCompany(c: Context<AppEnv>, raw: string | undefined): Promise<
   return { company: own, companies: scope.items };
 }
 
-async function loadOrg(db: D1Database, companyId: number | null): Promise<Omit<OrgDesignResponse, 'company' | 'companies' | 'canUpdate' | 'canImport' | 'canExport' | 'crossCompany'>> {
+async function loadOrg(db: D1Database, companyId: number | null, visibleCompanyIds: number[]): Promise<Omit<OrgDesignResponse, 'company' | 'companies' | 'canUpdate' | 'canImport' | 'canExport' | 'crossCompany'>> {
   const { results: deps } = await db
     .prepare('SELECT id, code, name, company_id, parent_id FROM departments WHERE active = 1 AND (?1 IS NULL OR company_id = ?1) ORDER BY code')
     .bind(companyId)
@@ -73,6 +73,23 @@ async function loadOrg(db: D1Database, companyId: number | null): Promise<Omit<O
   });
   // the photo itself is fetched through the authenticated avatar API; here only its version (null = no photo)
   const employees: OrgEmployeeNode[] = emps.map(({ avatar_key, ...e }) => ({ ...e, email: null, avatar: avatar_key ? avatarVersion(avatar_key) : null }));
+  // Fetch the real manager records referenced by manager_id but outside the selected company.
+  // Keep them as display-only context: they are not included in employees, headcount, stats or the reporting forest.
+  const employeeIds = new Set(employees.map((e) => e.id));
+  const missingManagerIds = [...new Set(employees.map((e) => e.manager_id).filter((id): id is number => id !== null && !employeeIds.has(id)))];
+  const managerReferences = missingManagerIds.length && visibleCompanyIds.length
+    ? await db.prepare(
+        `SELECT e.id, e.emp_code, e.first_name || ' ' || e.last_name AS name, e.company_id,
+                c.code AS company_code, p.title AS position_title
+         FROM employees e
+         JOIN companies c ON c.id = e.company_id
+         LEFT JOIN positions p ON p.id = e.position_id
+         WHERE e.id IN (SELECT value FROM json_each(?1))
+           AND e.company_id IN (SELECT value FROM json_each(?2))`,
+      ).bind(JSON.stringify(missingManagerIds), JSON.stringify(visibleCompanyIds))
+        .all<{ id: number; emp_code: string; name: string; company_id: number; company_code: string; position_title: string | null }>()
+        .then((r) => r.results)
+    : [];
   // reporting depth (levels of the reports-to chain inside this scope)
   const ids = new Set(employees.map((e) => e.id));
   const mgrDepth = new Map<number, number>();
@@ -90,6 +107,7 @@ async function loadOrg(db: D1Database, companyId: number | null): Promise<Omit<O
     departments,
     positions,
     employees,
+    managerReferences,
     stats: {
       employees: employees.length,
       departments: departments.length,
@@ -107,7 +125,7 @@ async function loadOrg(db: D1Database, companyId: number | null): Promise<Omit<O
 orgRoutes.get('/', requirePerm('org_chart.view'), async (c) => {
   const user = currentUser(c);
   const { company, companies } = await orgCompany(c, c.req.query('company'));
-  const data = await loadOrg(c.env.DB, company?.id ?? null);
+  const data = await loadOrg(c.env.DB, company?.id ?? null, companies.map((x) => x.id));
   // functional cross-company relationships (separate from manager_id); people outside the user's scope are masked
   const crossCompany = await orgCrossCompany(c.env.DB, await scopeCompanyIds(c.env.DB, user), company?.id ?? null, bangkokNow().date);
   return c.json<OrgDesignResponse>({ company, companies, ...data, crossCompany, canUpdate: can(user, 'org_chart.update'), canImport: can(user, 'org_chart.import'), canExport: can(user, 'org_chart.export') });
@@ -128,7 +146,7 @@ function tableRows(d: Awaited<ReturnType<typeof loadOrg>>, companies: CompanyOpt
 
 const exportOrg = (ext: 'csv' | 'xlsx') => async (c: Context<AppEnv>) => {
   const { company, companies } = await orgCompany(c, c.req.query('company'));
-  const data = await loadOrg(c.env.DB, company?.id ?? null);
+  const data = await loadOrg(c.env.DB, company?.id ?? null, companies.map((x) => x.id));
   const rows = tableRows(data, companies);
   const name = safeName(`organization${company ? `-${company.code}` : ''}`);
   await audit(c, 'org.exported', 'employees', null, { company: company?.id ?? null, format: ext, rows: data.employees.length });

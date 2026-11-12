@@ -93,6 +93,7 @@ export async function renderOrgChart(main: HTMLElement, params: URLSearchParams)
     const deptRank = new Map(deptIds.map((id, i) => [id, i]));
     const colorOf = (deptId: number | null) => (deptId === null ? NO_DEPT_COLOR : deptColor.get(deptId) ?? NO_DEPT_COLOR);
     const byId = new Map(d.employees.map((e) => [e.id, e]));
+    const managerById = new Map((d.managerReferences ?? []).map((e) => [e.id, e]));
     // ---- cross company assignments in effect (functional; the primary reporting line stays manager_id) ----
     const cross = d.crossCompany ?? { links: [], people: [] };
     const crossPerson = new Map<number, OrgCrossPerson>(cross.people.map((p) => [p.id, p]));
@@ -507,10 +508,13 @@ export async function renderOrgChart(main: HTMLElement, params: URLSearchParams)
       // with a dashed connector. This is a visual reference only; manager_id and the reporting forest stay unchanged.
       for (const b of lay.externals) {
         const m = byId.get(b.manager);
-        const managerTitle = m ? m.name : 'หัวหน้าอยู่ต่างบริษัท';
+        const externalManager = managerById.get(b.manager);
+        const managerTitle = m?.name ?? externalManager?.name ?? 'ไม่พบข้อมูลหัวหน้า';
         const managerSub = m
           ? `${pos(m.position_id)?.title ?? 'หัวหน้า'} · ${d.companies.find((c) => c.id === m.company_id)?.code ?? companyName(m.company_id)}`
-          : 'นอกผังบริษัทนี้';
+          : externalManager
+            ? `${externalManager.position_title ?? 'หัวหน้า'} · ${externalManager.company_code}`
+            : 'ไม่พบข้อมูลในขอบเขตสิทธิ์';
         const cardX = b.x + (b.w - W) / 2;
         const cardY = b.y - H - 24;
         const cx = b.x + b.w / 2;
