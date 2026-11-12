@@ -1002,3 +1002,13 @@ tr.is-future td { color: var(--primary); }
 .am-json { white-space: pre-wrap; word-break: break-word; max-width: 36rem; font-size: 0.8rem; background: var(--surface-2); padding: 0.5rem; border-radius: var(--radius-sm); }
 button.kpi { text-align: left; font: inherit; color: inherit; cursor: pointer; }
 @media (max-width: 640px) { .am-dl { grid-template-columns: 1fr; } .am-detail { min-width: 0; } }
+
+/* External-company manager: a visible reference card above its team, joined by a dashed connector. */
+.org-canvas .org-external-manager-card { fill: #fff; stroke: #64748b; }
+.org-canvas .org-external-manager-name { fill: #1e293b; }
+.org-canvas .org-external-manager-sub { fill: #64748b; }
+.org-canvas .org-external-connector { stroke: #64748b; }
+[data-theme='dark'] .org-canvas .org-external-manager-card { fill: #172033; stroke: #94a3b8; }
+[data-theme='dark'] .org-canvas .org-external-manager-name { fill: #e5edf7; }
+[data-theme='dark'] .org-canvas .org-external-manager-sub { fill: #94a3b8; }
+[data-theme='dark'] .org-canvas .org-external-connector { stroke: #94a3b8; }

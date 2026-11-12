@@ -372,7 +372,9 @@ export function layoutOrg(o: LayoutOptions): OrgLayout {
       x += u.w + UNIT_GAP;
     }
     const gy = MARGIN;
-    groups.push({ key: g.key, label: g.label, x: cursorX - 16, y: gy, w: innerW + 32, h: bottom + 16 - gy });
+    // Keep the company outline around the external-manager reference card as well as its team frame.
+    const groupTop = Math.min(gy, ...externals.filter((f) => f.key === g.key).map((f) => f.y - CARD_H - 24 - 16));
+    groups.push({ key: g.key, label: g.label, x: cursorX - 16, y: groupTop, w: innerW + 32, h: bottom + 16 - groupTop });
     maxBottom = Math.max(maxBottom, bottom + 16);
     cursorX += innerW + GROUP_GAP;
   }
@@ -394,6 +396,8 @@ export function layoutOrg(o: LayoutOptions): OrgLayout {
   }
   const minX = (xs.length ? Math.min(...xs) : 0) - MARGIN;
   const maxX = (xs.length ? Math.max(...xs) : CARD_W) + MARGIN;
+  // External-manager reference cards are drawn above their team frames by the chart renderer.
+  const minY = Math.min(0, ...externals.map((f) => f.y - CARD_H - 24 - 16));
   const maxY = Math.max(ys.length ? Math.max(...ys) : CARD_H, (bands[4] as { y: number }).y + CARD_H) + MARGIN;
-  return { nodes: sink.nodes, edges: sink.edges, groups, orphans: orphanBlocks, externals, refs, refFrames, bands, bounds: { x: minX, y: 0, w: maxX - minX, h: maxY } };
+  return { nodes: sink.nodes, edges: sink.edges, groups, orphans: orphanBlocks, externals, refs, refFrames, bands, bounds: { x: minX, y: minY, w: maxX - minX, h: maxY - minY } };
 }
