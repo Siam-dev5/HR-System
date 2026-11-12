@@ -6,7 +6,7 @@ import { createHmac, randomBytes } from 'node:crypto';
 import { join } from 'node:path';
 import { mkdirSync, readFileSync } from 'node:fs';
 import { build as esbuild } from 'esbuild';
-import { ROOT, EXE, SERVER_SPAWN, outDir, freePort, stopServer } from './lib/env.mjs';
+import { ROOT, EXE, SERVER_SPAWN, outDir, freePort, stopServer, seedAccountingSignOff } from './lib/env.mjs';
 
 const W = join('node_modules', 'wrangler', 'bin', 'wrangler.js');
 const SHOTS = outDir('ws-shots');
@@ -252,6 +252,7 @@ try {
     await login(page, 'w_pay');
     for (const p of (await api(page, 'GET', '/api/payroll/periods')).body.filter((x) => x.kind === 'monthly')) {
       await api(page, 'POST', `/api/payroll/periods/${p.id}/approve`);
+      seedAccountingSignOff(persist, p.id); // ACC review + sign-off fixture (publish gate, migration 0018)
       await api(page, 'POST', `/api/payroll/periods/${p.id}/publish`);
     }
     await page.goto(BASE + `/payroll/preview?period_id=${periodNov}&company=1`);

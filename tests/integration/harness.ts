@@ -146,6 +146,24 @@ ${log.slice(-4000)}
   };
 }
 
+/**
+ * Test fixture for suites whose subject is NOT the ACC workflow but that need a published period (payslip access, YTD,
+ * Super Admin period management, maker-checker audit): records an ACC Staff review and an ACC Manager sign-off for
+ * the period's current calc_version directly in D1, as two users unrelated to the period (it_staff / it_manager).
+ * Publishing still goes through the real API and its gate. The workflow itself (review, sign-off, return, invalidation,
+ * separation of duties, publish gate) is tested end to end through the API in accounting-signoff.test.ts.
+ */
+export function seedAccountingSignOff(h: Harness, periodId: number): void {
+  const id = Math.trunc(periodId);
+  h.sql(
+    `INSERT INTO payroll_accounting_reviews (period_id, calc_version, status, staff_reviewed_by, staff_note, manager_signed_by, manager_signed_at, manager_note)
+     SELECT p.id, p.calc_version, 'signed_off', (SELECT id FROM users WHERE username = 'it_staff'), 'test fixture', (SELECT id FROM users WHERE username = 'it_manager'), datetime('now'), 'test fixture'
+     FROM payroll_periods p WHERE p.id = ${id} AND p.calc_version > 0
+     ON CONFLICT (period_id, calc_version) DO UPDATE SET status = 'signed_off', manager_signed_by = excluded.manager_signed_by, manager_signed_at = excluded.manager_signed_at,
+       manager_note = excluded.manager_note, updated_at = datetime('now');`,
+  );
+}
+
 export interface Res<T = any> {
   status: number;
   body: T;

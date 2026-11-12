@@ -9,7 +9,7 @@ import { execFileSync } from 'node:child_process';
 import { mkdirSync, readFileSync, readdirSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
-import { Client, startHarness, type Harness } from './harness';
+import { Client, seedAccountingSignOff, startHarness, type Harness } from './harness';
 
 let H: Harness;
 const c: Record<string, Client> = {};
@@ -121,6 +121,9 @@ describe('payroll: HR Payroll prepares, HR Leader approves', () => {
     const a = audit('payroll.approved', 'payroll_periods', ids.period!)!;
     expect(a.user_id).toBe(userId('it_leader'));
     expect(JSON.parse(a.details)).toMatchObject({ calculated_by: userId('it_hrpay'), approved_by: userId('it_leader'), self_approved: false });
+    // HR approval alone does not let HR Payroll publish: the ACC sign-off of this version comes first
+    expect((await hrpay().post(`/api/payroll/periods/${ids.period}/publish`)).status).toBe(409);
+    seedAccountingSignOff(H, ids.period!);
     expect((await hrpay().post(`/api/payroll/periods/${ids.period}/publish`)).status).toBe(200);
   });
   it('the existing rule stays: a Payroll Officer cannot approve a period they calculated', async () => {
@@ -295,6 +298,7 @@ describe('hardening: publish only after approval; the audit links calculator, ap
     expect(one(`SELECT status FROM payroll_periods WHERE id = ${calc.body.id}`).status).toBe('calculated');
   });
   it('publishing an approved period records calculated_by, approved_by, published_by and the time', async () => {
+    seedAccountingSignOff(H, ids.h05!);
     const ok = await hrpay().post(`/api/payroll/periods/${ids.h05}/publish`);
     expect(ok.status, ok.text).toBe(200);
     const row = one(`SELECT calculated_by, approved_by, published_by, published_at FROM payroll_periods WHERE id = ${ids.h05}`);

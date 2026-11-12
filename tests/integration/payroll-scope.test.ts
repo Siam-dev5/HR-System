@@ -10,7 +10,7 @@ import { createHash } from 'node:crypto';
 import { join } from 'node:path';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import type { Cell } from '../../src/shared/xlsx';
-import { Client, startHarness, type Harness } from './harness';
+import { Client, seedAccountingSignOff, startHarness, type Harness } from './harness';
 
 let H: Harness;
 const c: Record<string, Client> = {};
@@ -87,13 +87,8 @@ beforeAll(async () => {
   for (const p of [ids.PA1, ids.PB1]) {
     expect((await c.admin.post(`/api/payroll/periods/${p}/calculate`)).status).toBe(200);
     expect((await c.officer.post(`/api/payroll/periods/${p}/approve`)).status).toBe(200);
-    // This suite isolates company-scope behaviour; seed a valid ACC sign-off for the exact version.
-    // End-to-end ACC role enforcement is covered separately in acc-roles.test.ts.
-    const version = Number(one(`SELECT calc_version FROM payroll_periods WHERE id = ${p}`).calc_version);
-    const staffId = Number(one("SELECT id FROM users WHERE username = 'it_staff'").id);
-    const managerId = Number(one("SELECT id FROM users WHERE username = 'it_admin'").id);
-    H.sql(`INSERT INTO payroll_accounting_reviews (period_id, calc_version, status, staff_reviewed_by, manager_signed_by, manager_signed_at)
-      VALUES (${p}, ${version}, 'signed_off', ${staffId}, ${managerId}, datetime('now'));`);
+    // this suite is about company scope: the ACC sign-off of the version is a fixture (workflow: accounting-signoff.test.ts)
+    seedAccountingSignOff(H, p);
     expect((await c.admin.post(`/api/payroll/periods/${p}/publish`)).status).toBe(200);
   }
   // month 2: one all-company period, calculated
