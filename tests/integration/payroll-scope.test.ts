@@ -149,6 +149,21 @@ describe('payroll periods follow the company scope', () => {
   });
 });
 
+describe('attendance period picker follows company scope', () => {
+  it('shows only the company user periods plus all-company periods; organisation-wide users keep all periods', async () => {
+    const a = await c.payA!.get('/api/attendance/periods');
+    expect(a.status).toBe(200);
+    const aCodes = codes(a.body);
+    expect(aCodes).toEqual(expect.arrayContaining(['ZS-A1', 'ZS-A3', 'ZS-ALL2']));
+    expect(aCodes).not.toContain('ZS-B1');
+    expect(aCodes).not.toContain('ZS-B3');
+    const all = await c.admin!.get('/api/attendance/periods');
+    expect(all.status).toBe(200);
+    expect(codes(all.body)).toEqual(expect.arrayContaining(['ZS-A1', 'ZS-B1', 'ZS-ALL2', 'ZS-A3', 'ZS-B3']));
+    expect((await c.noLink!.get('/api/attendance/periods')).body).toEqual([]);
+  });
+});
+
 describe('payslips follow the company scope', () => {
   it('the payslip list never contains another company\'s slips', async () => {
     const r = await c.payA!.get('/api/payroll/payslips');
