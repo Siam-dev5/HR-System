@@ -14,6 +14,8 @@ import { ewfConfig, loadSettings } from '../lib/settings';
 import { companyScope, requireCompany } from '../lib/companies';
 import { advancePeriods, assertCalculable, coveringMonthly, sameScope, computePeriod, type ComputedSlip } from '../lib/payroll-engine';
 import { verifyStepUp } from '../lib/step-up';
+import { clearHold, holdsEnabled, scanHolds, type ScanResult } from '../lib/attendance-holds';
+import { HOLD_KIND_LABEL, type HoldKind } from '../../shared/attendance-holds';
 import { can, currentUser, requireAuth, requirePerm, requirePeriodAdmin, requireSuperAdmin } from '../auth';
 
 // ---- Company scope ------------------------------------------------------------------------------
@@ -70,7 +72,8 @@ const periodSelect = (scope: PayrollScope) => {
   (SELECT COALESCE(SUM(net), 0) FROM payslips s WHERE ${slips}) AS total_net,
   (SELECT COALESCE(SUM(ewf_employer), 0) FROM payslips s WHERE ${slips}) AS total_ewf_employer,
   (SELECT COUNT(*) FROM payslips s WHERE ${slips} AND s.calc_version = 0) AS legacy_slips,
-  (SELECT r.status FROM payroll_accounting_reviews r WHERE r.period_id = p.id AND r.calc_version = p.calc_version) AS accounting_status
+  (SELECT r.status FROM payroll_accounting_reviews r WHERE r.period_id = p.id AND r.calc_version = p.calc_version) AS accounting_status,
+  (SELECT COUNT(*) FROM payroll_attendance_holds h WHERE h.period_id = p.id AND h.status = 'open' AND ${scopeSql('h.company_id', scope)}) AS open_holds
   FROM payroll_periods p`;
 };
 
@@ -237,6 +240,9 @@ payrollRoutes.post('/periods/:id/calculate', requirePerm('payroll.calculate'), a
   const forced = p.reopened_from ? await requireForce(c, p, 'period.force_recalculate') : null;
   const slips = await computePeriod(db, p);
   const version = p.calc_version + 1;
+  // attendance review (P1): scanned before the payslips are written, so a hold resolved by this scan is not newer than
+  // the calculation; holds never change the figures (approval is what they block)
+  const holds: ScanResult | null = (await holdsEnabled(db, p)) ? await scanHolds(db, p, user.id) : null;
 
   // the period must still be the one that was read (not approved / recalculated meanwhile): otherwise nothing is written,
   // so a recalculation can never replace payslips that were approved, reviewed or signed off in the meantime
@@ -272,7 +278,7 @@ payrollRoutes.post('/periods/:id/calculate', requirePerm('payroll.calculate'), a
   const superseded = await activeAccounting(db, p.id);
   stmts.push(...supersedeAccounting(db, p.id, user.id, `recalculated: version ${p.calc_version} → ${version}`));
   await runGuarded(db, stmts, 'งวดนี้ถูกอนุมัติหรือคำนวณใหม่ระหว่างดำเนินการ กรุณาโหลดใหม่');
-  await audit(c, 'payroll.calculated', 'payroll_periods', p.id, { employees: slips.length, version, kind: p.kind, archivedSlips: p.employees, archivedTotalNet: p.total_net, ...(superseded ? { accountingSuperseded: superseded } : {}), ...(p.legacy_slips ? { replacedLegacySlips: p.legacy_slips, legacyTotalNet: p.total_net } : {}), ...(forced ? { forced: true, reopenedFrom: p.reopened_from, reason: forced } : {}) });
+  await audit(c, 'payroll.calculated', 'payroll_periods', p.id, { employees: slips.length, version, kind: p.kind, archivedSlips: p.employees, archivedTotalNet: p.total_net, ...(superseded ? { accountingSuperseded: superseded } : {}), ...(holds ? { attendanceHolds: holds } : {}), ...(p.legacy_slips ? { replacedLegacySlips: p.legacy_slips, legacyTotalNet: p.total_net } : {}), ...(forced ? { forced: true, reopenedFrom: p.reopened_from, reason: forced } : {}) });
   return c.json({ ...(await period(db, p.id, scope)), totalNet: round2(totalNet) });
 });
 
@@ -312,6 +318,21 @@ payrollRoutes.post('/periods/:id/approve', requirePerm('payroll.approve'), async
   const pending = await pendingOt(db, p.id);
   if (pending) throw conflict(`มี OT จาก Feishu รอ HR ตรวจสอบ ${pending} รายการ ต้องยืนยันหรือปฏิเสธก่อนอนุมัติ`);
   if (p.kind === 'mid_month') await assertCalculable(db, p);
+  // attendance review (P1): a fresh scan; any open hold refuses approval, and a hold resolved after the calculation
+  // (the source data changed, e.g. a leave was approved) needs a recalculation first, since the pay may differ
+  if (await holdsEnabled(db, p)) {
+    const holds = await scanHolds(db, p, user.id);
+    if (holds.open) {
+      throw new HttpError(409, 'attendance_holds_open', `มีรายการเวลาทำงานรอ HR ตรวจสอบ (Attendance Hold) ${holds.open} รายการ ต้องแก้ไขข้อมูลต้นทางหรือ HR ยืนยันก่อนอนุมัติ`);
+    }
+    const changed = await db
+      .prepare("SELECT COUNT(*) AS n FROM payroll_attendance_holds WHERE period_id = ? AND status = 'resolved' AND resolved_at > ?")
+      .bind(p.id, p.calculated_at ?? '')
+      .first<{ n: number }>();
+    if (changed?.n) {
+      throw new HttpError(409, 'attendance_changed_recalculate', `ข้อมูลเวลาทำงาน/การลาเปลี่ยนหลังการคำนวณครั้งล่าสุด (${changed.n} รายการ) ต้องคำนวณงวดใหม่ก่อนอนุมัติ`);
+    }
+  }
   // figures ACC returned cannot be approved again unchanged: HR reopens and recalculates (a new calc_version)
   const returned = 'EXISTS (SELECT 1 FROM payroll_accounting_reviews r WHERE r.period_id = payroll_periods.id AND r.calc_version = payroll_periods.calc_version AND r.status = \'returned\')';
   if (await db.prepare(`SELECT 1 FROM payroll_periods WHERE id = ? AND ${returned}`).bind(p.id).first()) {
@@ -438,6 +459,90 @@ payrollRoutes.post('/periods/:id/accounting-signoff', requirePerm('payroll.accou
     ...(decision === 'returned' ? { periodStatus: { from: 'approved', to: 'calculated' } } : {}),
   });
   return c.json({ ok: true, calc_version: p.calc_version, status, period_status: decision === 'returned' ? 'calculated' : 'approved' });
+});
+
+// ---- Attendance holds (P1) ---------------------------------------------------------------------
+// Open holds block HR approval; HR clears a hold with a reason (no deduction) or the source data is corrected and the
+// next scan resolves it. Every list / change is limited to the companies in the user's scope.
+
+interface HoldRow {
+  id: number;
+  period_id: number;
+  employee_id: number;
+  company_id: number;
+  kind: HoldKind;
+  work_date: string | null;
+  source_json: string;
+  status: 'open' | 'cleared' | 'resolved';
+  first_detected_at: string;
+  last_detected_at: string;
+  resolved_at: string | null;
+  decision_by: number | null;
+  decision_at: string | null;
+  decision_reason: string | null;
+}
+
+payrollRoutes.get('/periods/:id/attendance-holds', async (c) => {
+  const db = c.env.DB;
+  const scope = await payrollScope(c);
+  const p = await period(db, intParam(c.req.param('id')), scope);
+  const status = c.req.query('status');
+  if (status && !['open', 'cleared', 'resolved'].includes(status)) throw badRequest('สถานะไม่ถูกต้อง');
+  const { results } = await db
+    .prepare(
+      `SELECT h.*, e.emp_code, e.first_name || ' ' || e.last_name AS employee, (SELECT username FROM users u WHERE u.id = h.decision_by) AS decided_by
+       FROM payroll_attendance_holds h JOIN employees e ON e.id = h.employee_id
+       WHERE h.period_id = ?1 AND ${scopeSql('h.company_id', scope)} AND (?2 IS NULL OR h.status = ?2)
+       ORDER BY e.emp_code, h.work_date, h.kind`,
+    )
+    .bind(p.id, status ?? null)
+    .all<HoldRow & { emp_code: string; employee: string; decided_by: string | null }>();
+  const { results: events } = results.length
+    ? await db
+        .prepare(
+          `SELECT ev.id, ev.hold_id, ev.action, ev.reason, ev.created_at, (SELECT username FROM users u WHERE u.id = ev.actor_id) AS actor
+           FROM payroll_attendance_hold_events ev JOIN payroll_attendance_holds h ON h.id = ev.hold_id
+           WHERE ev.period_id = ? AND ${scopeSql('h.company_id', scope)} ORDER BY ev.id`,
+        )
+        .bind(p.id)
+        .all<{ id: number; hold_id: number; action: string; reason: string | null; created_at: string; actor: string | null }>()
+    : { results: [] };
+  return c.json({
+    period: { id: p.id, code: p.code, status: p.status, kind: p.kind },
+    enabled: await holdsEnabled(db, p),
+    holds: results.map(({ source_json, ...h }) => ({ ...h, label: HOLD_KIND_LABEL[h.kind], source: JSON.parse(source_json) as unknown, events: events.filter((ev) => ev.hold_id === h.id) })),
+  });
+});
+
+payrollRoutes.post('/periods/:id/attendance-holds/scan', requirePerm('payroll.calculate'), async (c) => {
+  const user = currentUser(c);
+  const db = c.env.DB;
+  const { p } = await writablePeriod(c, intParam(c.req.param('id')));
+  if (!(await holdsEnabled(db, p))) throw new HttpError(409, 'attendance_review_disabled', 'งวดนี้ไม่อยู่ในการตรวจสอบเวลาทำงาน (เฉพาะงวดรายเดือนที่เริ่มตั้งแต่วันที่ตั้งค่า payroll.attendance_review_from)');
+  if (p.status !== 'draft' && p.status !== 'calculated') throw conflict('ตรวจสอบเวลาทำงานได้เฉพาะงวดที่ยังไม่อนุมัติ');
+  const result = await scanHolds(db, p, user.id);
+  await audit(c, 'payroll.attendance_holds_scanned', 'payroll_periods', p.id, { ...result });
+  return c.json(result);
+});
+
+payrollRoutes.post('/attendance-holds/:holdId/clear', requirePerm('payroll_hold.resolve'), async (c) => {
+  const user = currentUser(c);
+  const db = c.env.DB;
+  const scope = await payrollScope(c);
+  const holdId = intParam(c.req.param('holdId'), 'holdId');
+  const hold = await db.prepare('SELECT * FROM payroll_attendance_holds WHERE id = ?').bind(holdId).first<HoldRow>();
+  // a hold of a company outside the scope answers like a missing one
+  if (!hold || !(scope.all || scope.ids.includes(hold.company_id))) throw notFound('ไม่พบรายการ Attendance Hold');
+  const p = await period(db, hold.period_id, scope);
+  if (p.status !== 'draft' && p.status !== 'calculated') throw conflict('งวดนี้อนุมัติแล้ว จึงเปลี่ยนผลการตรวจสอบเวลาทำงานไม่ได้');
+  const body = await readJson(c);
+  const reason = str(body, 'reason', { required: true, max: 500 }) as string;
+  if (reason.trim().length < 5) throw badRequest('กรุณาระบุเหตุผลอย่างน้อย 5 ตัวอักษร');
+  if (!(await clearHold(db, hold.id, user.id, reason.trim()))) throw conflict('รายการนี้ไม่ได้อยู่ในสถานะรอตรวจสอบแล้ว (อาจถูกยืนยันหรือแก้ไขไปแล้ว)');
+  await audit(c, 'payroll.attendance_hold_cleared', 'payroll_attendance_holds', hold.id, {
+    period_id: hold.period_id, employee_id: hold.employee_id, company_id: hold.company_id, kind: hold.kind, work_date: hold.work_date, reason: reason.trim(),
+  });
+  return c.json({ ok: true, id: hold.id, status: 'cleared' });
 });
 
 payrollRoutes.post('/periods/:id/publish', requirePerm('payroll.publish'), async (c) => {
@@ -919,6 +1024,15 @@ async function buildPreview(c: Context<AppEnv>): Promise<PayrollPreviewResponse>
     .all<{ id: number; company_id: number }>();
   const ot = await pendingOt(db, p.id, companyId);
   if (ot) issues.push({ level: 'error', code: 'ot_pending', message: 'มี OT จาก Feishu ที่ยังไม่ยืนยัน (ไม่ถูกนำไปคำนวณ) ต้องตรวจสอบก่อน Export', count: ot });
+  // attendance review (P1): open holds of the companies shown block approval and export
+  const { results: held } = await db
+    .prepare(`SELECT kind, COUNT(*) AS n FROM payroll_attendance_holds WHERE period_id = ?1 AND status = 'open' AND (?2 IS NULL OR company_id = ?2) AND ${scopeSql('company_id', await payrollScope(c))} GROUP BY kind ORDER BY kind`)
+    .bind(p.id, companyId)
+    .all<{ kind: HoldKind; n: number }>();
+  const heldTotal = held.reduce((a, x) => a + x.n, 0);
+  if (heldTotal) {
+    issues.push({ level: 'error', code: 'attendance_hold', message: `มีรายการเวลาทำงานรอ HR ตรวจสอบ (Attendance Hold): ${held.map((x) => `${HOLD_KIND_LABEL[x.kind]} ${x.n}`).join(' · ')} — ต้องตรวจสอบก่อนอนุมัติและ Export`, count: heldTotal });
+  }
   if (source === 'snapshot') {
     const changed = active.filter((a) => !usedImports.has(a.id)).length + [...usedImports].filter((id) => !active.some((a) => a.id === id)).length;
     if (changed) issues.push({ level: 'error', code: 'attendance_changed', message: 'ข้อมูลเวลาทำงานถูกนำเข้าใหม่หรือย้อนกลับหลังการคำนวณ ต้องคำนวณงวดใหม่', count: changed });

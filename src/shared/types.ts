@@ -200,6 +200,8 @@ export interface PayrollPeriod {
   reopened_from?: 'approved' | 'published' | null;
   /** ACC review of the current calc_version (migration 0018); null = not reviewed yet */
   accounting_status?: 'reviewed' | 'returned' | 'signed_off' | 'superseded' | null;
+  /** open attendance holds (migration 0019) of companies in the user's scope */
+  open_holds?: number;
 }
 
 /** What a Super Admin period action would touch (shown before confirmation; blockers refuse the action). */
