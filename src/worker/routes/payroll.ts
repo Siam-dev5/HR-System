@@ -304,7 +304,7 @@ payrollRoutes.get('/periods/:id/accounting-review', requirePerm('payroll.account
   return c.json({ period: p, review, events });
 });
 
-payrollRoutes.post('/periods/:id/accounting-review', requirePerm('payroll.accounting.review'), async (c) => {
+payrollRoutes.post('/periods/:id/accounting-review', requirePerm('payroll.accounting.review.submit'), async (c) => {
   const user = currentUser(c);
   const { p } = await writablePeriod(c, intParam(c.req.param('id')));
   if (p.status !== 'approved') throw conflict('ฝ่ายบัญชีตรวจสอบได้หลัง HR อนุมัติงวดแล้วเท่านั้น');
