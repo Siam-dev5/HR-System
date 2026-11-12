@@ -30,6 +30,10 @@ SELECT r.id, 'payroll.accounting.review' FROM roles r
 WHERE r.code IN ('acc_staff','acc_manager')
 AND NOT EXISTS (SELECT 1 FROM role_permissions x WHERE x.role_id = r.id AND x.permission = 'payroll.accounting.review');
 INSERT INTO role_permissions (role_id, permission)
+SELECT r.id, 'payroll.accounting.review.submit' FROM roles r
+WHERE r.code = 'acc_staff'
+AND NOT EXISTS (SELECT 1 FROM role_permissions x WHERE x.role_id = r.id AND x.permission = 'payroll.accounting.review.submit');
+INSERT INTO role_permissions (role_id, permission)
 SELECT r.id, 'payroll.accounting.signoff' FROM roles r
 WHERE r.code = 'acc_manager'
 AND NOT EXISTS (SELECT 1 FROM role_permissions x WHERE x.role_id = r.id AND x.permission = 'payroll.accounting.signoff');
