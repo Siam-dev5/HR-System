@@ -204,6 +204,32 @@ describe('provisioning: script, employee link, first login', () => {
   });
 });
 
+describe('Accounting review and sign-off', () => {
+  it('requires ACC Staff review and a different ACC Manager sign-off for the exact calculation version before publish', async () => {
+    const p = await c.payroll!.post('/api/payroll/periods', {
+      company_id: ids.ZAA, code: `ZAS-${Y}-02`, name: 'zz accounting signoff',
+      start_date: `${Y}-02-01`, end_date: `${Y}-02-28`, pay_date: `${Y}-02-28`,
+    });
+    expect(p.status, p.text).toBe(201);
+    const periodId = p.body.id as number;
+    expect((await c.payroll!.post(`/api/payroll/periods/${periodId}/calculate`)).status).toBe(200);
+    expect((await adm().post(`/api/payroll/periods/${periodId}/approve`, { note: 'zz HR approval' })).status).toBe(200);
+    expect((await c.accStaff!.get('/api/payroll/accounting/periods')).status).toBe(200);
+    expect((await c.accStaff!.post(`/api/payroll/periods/${periodId}/accounting-signoff`, { decision: 'signed_off' })).status).toBe(403);
+    const reviewed = await c.accStaff!.post(`/api/payroll/periods/${periodId}/accounting-review`, { note: 'zz ตรวจสอบยอดแล้ว' });
+    expect(reviewed.status, reviewed.text).toBe(201);
+    expect((await c.payroll!.post(`/api/payroll/periods/${periodId}/publish`)).status).toBe(409);
+    expect((await c.accStaff!.post(`/api/payroll/periods/${periodId}/accounting-signoff`, { decision: 'signed_off' })).status).toBe(403);
+    const signed = await c.accMgr!.post(`/api/payroll/periods/${periodId}/accounting-signoff`, { decision: 'signed_off', note: 'zz manager approval' });
+    expect(signed.status, signed.text).toBe(200);
+    const published = await c.payroll!.post(`/api/payroll/periods/${periodId}/publish`);
+    expect(published.status, published.text).toBe(200);
+    expect(published.body.status).toBe('published');
+    const events = H.sql(`SELECT action FROM payroll_accounting_review_events WHERE period_id = ${periodId} ORDER BY id`).map((x) => x.action);
+    expect(events).toEqual(['staff_reviewed', 'manager_signed_off']);
+  });
+});
+
 describe('ACC reads every company', () => {
   const accs = () => [c.accStaff as Client, c.accStaff2 as Client, c.accMgr as Client];
   it('company scope is "all" (from the companies table), including an account with no employee link', async () => {
