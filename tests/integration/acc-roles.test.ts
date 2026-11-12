@@ -93,8 +93,10 @@ describe('migration 0016', () => {
     // the only difference: ACC Manager may export the Payroll Preview (no bank / ID columns)
     const staff = perms('acc_staff');
     expect(staff).toContain('payroll.accounting.review');
+    expect(staff).toContain('payroll.accounting.review.submit');
     expect(staff).not.toContain('payroll.accounting.signoff');
     expect(perms('acc_manager')).toContain('payroll.accounting.review');
+    expect(perms('acc_manager')).not.toContain('payroll.accounting.review.submit');
     expect(perms('acc_manager')).toContain('payroll.accounting.signoff');
     expect(perms('acc_manager').filter((x) => !staff.includes(x))).toEqual(['payroll.accounting.signoff', 'payroll_preview.export']);
     expect(staff.filter((x) => !perms('acc_manager').includes(x))).toEqual([]);
