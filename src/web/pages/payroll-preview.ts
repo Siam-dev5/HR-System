@@ -3,19 +3,12 @@
 import type { PayrollPeriod, PayrollPreviewResponse } from '../../shared/types';
 import { PREVIEW_GROUPS, type LayoutColumn, type PreviewGroup } from '../../shared/payroll-columns';
 import { get, put, del, qs } from '../api';
-import { h, mount, loading, errorBox, fmtDate, fmtMoney, fmtNum, modal, toast, confirmDialog } from '../dom';
+import { h, mount, loading, errorBox, fmtDate, fmtMoney, modal, toast, confirmDialog } from '../dom';
 import { optionLabel } from '../labels';
 import { basePath, can, isSuperAdmin, state } from '../app';
+import { previewTable } from './payroll-preview-table';
 
 const msg = (e: unknown) => (e instanceof Error ? e.message : String(e));
-
-function cellText(v: string | number | null | undefined, type: string): string {
-  if (v === null || v === undefined || v === '') return '-';
-  if (type === 'money') return fmtMoney(v);
-  if (type === 'number') return fmtNum(v);
-  if (type === 'date') return fmtDate(v);
-  return String(v);
-}
 
 export async function renderPayrollPreview(main: HTMLElement, params: URLSearchParams): Promise<void> {
   mount(main, loading());
@@ -43,13 +36,6 @@ export async function renderPayrollPreview(main: HTMLElement, params: URLSearchP
       companies.map((c) => h('option', { value: String(c.id), selected: String(c.id) === company }, c.name)));
 
     const visible = d.layout.filter((l) => l.visible).map((l) => d.columns.find((c) => c.key === l.key)).filter((c): c is PayrollPreviewResponse['columns'][number] => !!c);
-    // grouped header: consecutive columns of the same group share one header cell
-    const groups: Array<{ group: string; span: number }> = [];
-    for (const c of visible) {
-      const last = groups[groups.length - 1];
-      if (last && last.group === c.group) last.span++;
-      else groups.push({ group: c.group, span: 1 });
-    }
     const errors = d.issues.filter((i) => i.level === 'error');
     const t = d.totals;
     const kpi = (label: string, value: string) => h('div', { class: 'card kpi' }, h('div', { class: 'kpi-label' }, label), h('div', { class: 'kpi-value' }, value));
@@ -73,6 +59,8 @@ export async function renderPayrollPreview(main: HTMLElement, params: URLSearchP
         : null);
     };
 
+    // frozen selection / code / name columns, search and selection (payroll-preview-table.ts)
+    const table = d.rows.length ? await previewTable(d, pid, visible, () => go({})) : null;
     mount(main,
       h('div', { class: 'toolbar' },
         h('label', { class: 'field inline' }, h('span', null, 'งวด'), periodSel),
@@ -87,14 +75,7 @@ export async function renderPayrollPreview(main: HTMLElement, params: URLSearchP
         isSuperAdmin() && !d.company ? ' · เลือกบริษัทเพื่อจัดคอลัมน์' : null),
       d.issues.map((i) => h('div', { class: `alert ${i.level === 'error' ? 'alert-error' : ''}` }, `${i.level === 'error' ? '⛔' : '⚠'} ${i.message}${i.count > 1 ? ` (${i.count})` : ''}`)),
       h('div', { class: 'kpis' }, kpi('พนักงาน', String(d.rows.length)), kpi('รวมเงินได้', fmtMoney(t.total_income)), kpi('รวมเงินหัก', fmtMoney(t.total_deduction)), kpi('เงินได้สุทธิ', fmtMoney(t.net_pay)), kpi('EWF นายจ้างสมทบ', fmtMoney(t.ewf_employer))),
-      d.rows.length
-        ? h('div', { class: 'table-wrap preview-wrap' }, h('table', { class: 'table compact preview-table' },
-            h('thead', null,
-              h('tr', { class: 'group-row' }, groups.map((g) => h('th', { colspan: g.span, class: `g-${g.group}` }, PREVIEW_GROUPS[g.group as PreviewGroup] ?? g.group))),
-              h('tr', null, visible.map((c) => h('th', { class: c.type === 'money' || c.type === 'number' ? 'num' : null }, c.label)))),
-            h('tbody', null, d.rows.map((r) => h('tr', null, visible.map((c) => h('td', { class: c.type === 'money' || c.type === 'number' ? 'num' : null }, cellText(r[c.key], c.type)))))),
-            h('tfoot', null, h('tr', { class: 'total' }, visible.map((c, i) => h('td', { class: c.type === 'money' || c.type === 'number' ? 'num' : null }, c.type === 'money' || c.type === 'number' ? cellText(t[c.key], c.type) : i === visible.findIndex((x) => x.type !== 'money' && x.type !== 'number') ? 'รวม' : ''))))))
-        : h('div', { class: 'empty' }, 'ไม่มีพนักงานในงวด / บริษัทนี้'),
+      table ?? h('div', { class: 'empty' }, 'ไม่มีพนักงานในงวด / บริษัทนี้'),
     );
   } catch (e) {
     mount(main, errorBox(e));

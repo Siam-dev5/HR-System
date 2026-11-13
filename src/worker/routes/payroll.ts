@@ -630,7 +630,8 @@ async function buildPreview(c: Context<AppEnv>): Promise<PayrollPreviewResponse>
   if (p.status === 'draft') {
     source = 'live';
     const slips: ComputedSlip[] = await computePeriod(db, p, companyId);
-    rows = slips.map((s) => previewRow(s.employee, { ...s.pay, ewf_employee: s.pay.ewfEmployee, ewf_employer: s.pay.ewfEmployer, unpaid_leave: s.pay.unpaidLeave, ot_amount: s.pay.otAmount }, s.calc, pvdCode));
+    // employee_id identifies the row for selection (not a column: the layout and the export never show it)
+    rows = slips.map((s) => ({ employee_id: s.employee.id, ...previewRow(s.employee, { ...s.pay, ewf_employee: s.pay.ewfEmployee, ewf_employer: s.pay.ewfEmployer, unpaid_leave: s.pay.unpaidLeave, ot_amount: s.pay.otAmount }, s.calc, pvdCode) }));
     missingBank = slips.filter((s) => !s.employee.bank_account).length;
     issues.push({ level: 'error', code: 'not_calculated', message: 'งวดยังไม่ได้คำนวณ: ตัวเลขเป็นการคำนวณชั่วคราว (ยังไม่บันทึก) ต้องคำนวณงวดก่อน Export', count: 1 });
   } else {
@@ -643,11 +644,11 @@ async function buildPreview(c: Context<AppEnv>): Promise<PayrollPreviewResponse>
          WHERE s.period_id = ?1 AND (?2 IS NULL OR COALESCE(s.company_id, e.company_id) = ?2) ORDER BY e.emp_code`,
       )
       .bind(p.id, companyId)
-      .all<SlipLike & EmpLike & { lines_json: string; calc_json: string | null }>();
+      .all<SlipLike & EmpLike & { employee_id: number; lines_json: string; calc_json: string | null }>();
     rows = results.map((r) => {
       const calc = r.calc_json ? (JSON.parse(r.calc_json) as PayslipCalc) : null;
       if (calc?.attendance.importId) usedImports.add(calc.attendance.importId);
-      return previewRow(r, { ...r, lines: JSON.parse(r.lines_json) as SlipLike['lines'] }, calc, pvdCode);
+      return { employee_id: r.employee_id, ...previewRow(r, { ...r, lines: JSON.parse(r.lines_json) as SlipLike['lines'] }, calc, pvdCode) };
     });
     missingBank = results.filter((r) => !r.bank_account).length;
   }

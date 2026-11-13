@@ -189,15 +189,18 @@ try {
     check('layout editor: ↓ button and drag & drop reorder columns', order.join(',') === 'company,employee_name,emp_code', order.join(','));
     await confirmModal(page, 'บันทึก Layout');
     await page.waitForSelector('text=ใช้ Layout ของบริษัท');
-    const heads2 = await page.$$eval('.preview-table thead tr:last-child th', (x) => x.map((e) => e.textContent));
-    check('layout saved: order applied, hidden column removed', !heads2.includes('ภาษีหัก ณ ที่จ่าย') && heads2.slice(0, 3).join('|') === 'บริษัท|ชื่อ-นามสกุล|รหัสพนักงาน', heads2.slice(0, 4).join(' | '));
+    // code and name are frozen on the left (always); the saved layout orders the other columns and the export
+    const frozenHeads = await page.$$eval('.preview-table thead tr:last-child th.fz-code, .preview-table thead tr:last-child th.fz-name', (x) => x.map((e) => e.textContent));
+    const heads2 = await page.$$eval('.preview-table thead tr:last-child th:not(.fz)', (x) => x.map((e) => e.textContent));
+    check('layout saved: frozen code + name, layout order for the other columns, hidden column removed', frozenHeads.join('|') === 'รหัสพนักงาน|ชื่อ-นามสกุล' && !heads2.includes('ภาษีหัก ณ ที่จ่าย') && heads2[0] === 'บริษัท', [...frozenHeads, ...heads2.slice(0, 3)].join(' | '));
 
     // Preview before export → CSV download that matches the table
     await page.click('button:has-text("Preview ก่อน Export")');
     await page.waitForSelector('.modal:has-text("ตรวจสอบก่อน Export")');
     const [dl] = await Promise.all([page.waitForEvent('download'), page.click('.modal a:has-text("ดาวน์โหลด CSV")')]);
     const csv = readFileSync(await dl.path(), 'utf8').replace(/^\uFEFF/, '');
-    check('CSV export header = previewed columns', csv.split('\r\n')[0] === heads2.join(','), csv.split('\r\n')[0].slice(0, 80));
+    // the export keeps the saved layout exactly (company, name, code, …): the frozen columns are a screen aid only
+    check('CSV export header = the saved layout', csv.split('\r\n')[0] === ['บริษัท', 'ชื่อ-นามสกุล', 'รหัสพนักงาน', ...heads2.slice(1)].join(','), csv.split('\r\n')[0].slice(0, 80));
     await page.keyboard.press('Escape');
     const [dlx] = await Promise.all([page.waitForEvent('download'), (async () => { await page.click('button:has-text("Preview ก่อน Export")'); await page.click('.modal a:has-text("ดาวน์โหลด Excel")'); })()]);
     check('Excel export downloads an .xlsx', dlx.suggestedFilename().endsWith('.xlsx'));
