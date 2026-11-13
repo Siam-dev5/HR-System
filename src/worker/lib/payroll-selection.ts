@@ -90,19 +90,21 @@ interface EmpRow {
   hire_date: string | null;
   termination_date: string | null;
   base_salary: number | null;
+  employment_type: string | null;
 }
 
 /** Eligibility of these employees for the period (selection rows give origin and HR confirmations). */
 export async function evaluateEmployees(db: D1Database, p: Pick<SelPeriod, 'start_date' | 'end_date' | 'company_id'>, ids: readonly number[], sel?: EffectiveSelection): Promise<EvaluatedEmployee[]> {
   if (!ids.length) return [];
   const json = JSON.stringify([...new Set(ids)]);
-  const [{ results: emps }, { results: history }, assignments] = await Promise.all([
-    db.prepare('SELECT id, emp_code, company_id, status, hire_date, termination_date, base_salary FROM employees WHERE id IN (SELECT value FROM json_each(?1)) ORDER BY emp_code').bind(json).all<EmpRow>(),
+  const [{ results: emps }, { results: history }, assignments, { results: contracts }] = await Promise.all([
+    db.prepare('SELECT id, emp_code, company_id, status, hire_date, termination_date, base_salary, employment_type FROM employees WHERE id IN (SELECT value FROM json_each(?1)) ORDER BY emp_code').bind(json).all<EmpRow>(),
     db.prepare('SELECT employee_id, effective_date, base_salary FROM employee_salary_history WHERE employee_id IN (SELECT value FROM json_each(?1)) AND effective_date <= ?2').bind(json, p.end_date).all<{ employee_id: number; effective_date: string; base_salary: number }>(),
     loadAssignments(db, ids),
+    db.prepare("SELECT employee_id, start_date, end_date, status FROM employee_contracts WHERE employee_id IN (SELECT value FROM json_each(?1)) AND status = 'active'").bind(json).all<{ employee_id: number; start_date: string; end_date: string | null; status: 'active' | 'cancelled' }>(),
   ]);
   return emps.map((e) => {
-    const eligibility = evaluateEligibility({ period: p, employee: e, salaryHistory: history.filter((h) => h.employee_id === e.id), assignments: assignments.filter((a) => a.employee_id === e.id) });
+    const eligibility = evaluateEligibility({ period: p, employee: e, salaryHistory: history.filter((h) => h.employee_id === e.id), assignments: assignments.filter((a) => a.employee_id === e.id), contracts: contracts.filter((c) => c.employee_id === e.id) });
     const row = sel?.rows.get(e.id) ?? null;
     const origin = sel ? (sel.origin.get(e.id) ?? (row?.status === 'deselected' ? 'deselected' : 'outside')) : 'standard';
     const ok = payable(eligibility, row);

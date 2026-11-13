@@ -10,7 +10,7 @@ import { audit } from '../lib/audit';
 import { companyScope } from '../lib/companies';
 import { badRequest, conflict, HttpError, intParam, notFound, readJson } from '../lib/http';
 import { effectiveSelection, evaluateEmployees, selectionVersion, type EffectiveSelection, type EvaluatedEmployee, type SelPeriod } from '../lib/payroll-selection';
-import { ELIGIBILITY_REASON_LABEL, OUTSIDE_LABEL, outsideReason, reviewBasis } from '../../shared/payroll-eligibility';
+import { ELIGIBILITY_NOTE_LABEL, ELIGIBILITY_REASON_LABEL, OUTSIDE_LABEL, outsideReason, reviewBasis } from '../../shared/payroll-eligibility';
 
 export const payrollSelectionRoutes = new Hono<AppEnv>();
 payrollSelectionRoutes.use('*', requireAuth);
@@ -70,6 +70,8 @@ const view = (x: EvaluatedEmployee, names: Map<number, string>, sel: EffectiveSe
     decision: x.eligibility.decision,
     reasons: x.eligibility.reasons,
     labels: x.eligibility.reasons.map((r) => ELIGIBILITY_REASON_LABEL[r]),
+    notes: x.eligibility.notes,
+    note_labels: x.eligibility.notes.map((n) => ELIGIBILITY_NOTE_LABEL[n]),
     paid_from: x.eligibility.from,
     paid_to: x.eligibility.to,
     confirmed: x.confirmed,
