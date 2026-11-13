@@ -10,6 +10,7 @@ PRAGMA defer_foreign_keys = on;
 
 DROP TRIGGER IF EXISTS trg_employees_company_change;
 DROP TRIGGER IF EXISTS trg_employees_company_assignment_insert;
+DROP TRIGGER IF EXISTS trg_employees_company_assignment_delete;
 
 DROP TRIGGER IF EXISTS trg_employee_company_assignment_history_readonly;
 DROP TRIGGER IF EXISTS trg_employee_company_assignment_history_nodelete;

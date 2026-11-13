@@ -351,6 +351,19 @@ describe('payroll integration', () => {
     expect((await c.admin!.put(`/api/m/employees/${ids.B1}`, { phone: '0000000000' })).status).toBe(200);
   });
 
+  it('an unused employee entered by mistake can still be deleted (with its first assignment); a moved one cannot', async () => {
+    const r = await c.admin!.post('/api/m/employees', { emp_code: 'XQ7200', first_name: 'zz_test', last_name: 'XQ7200', company_id: ids.C, hire_date: '2026-01-01', employment_type: 'permanent', status: 'active' });
+    expect(r.status).toBe(201);
+    expect(assignments(r.body.id)).toHaveLength(1);
+    expect((await c.admin!.del(`/api/m/employees/${r.body.id}`)).status).toBe(200);
+    expect(H.sql(`SELECT 1 FROM employee_company_assignments WHERE employee_id = ${r.body.id}`)).toHaveLength(0);
+    // the first assignment of an existing employee is not deletable on its own
+    expect(() => H.sql(`DELETE FROM employee_company_assignments WHERE employee_id = ${ids.A3}`)).toThrow();
+    // ST7002 has moved (and has payslips): the employee record cannot be deleted
+    expect((await c.admin!.del(`/api/m/employees/${ids.A2}`)).status).toBe(409);
+    expect(assignments(ids.A2)).toHaveLength(2);
+  });
+
   it('concurrent transfers of one employee: exactly one moves them', async () => {
     const rs = await Promise.all([ids.A, ids.C, ids.A].map((co) => c.hr!.post(`/api/company-detection/employees/${ids.B1}/transfer`, { company_id: co, effective_from: '2026-11-12', ...REASON })));
     expect(rs.filter((r) => r.status === 200), JSON.stringify(rs.map((r) => [r.status, r.body.error?.code, r.body.error?.message]))).toHaveLength(1);

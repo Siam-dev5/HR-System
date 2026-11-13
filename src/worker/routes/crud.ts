@@ -341,6 +341,10 @@ crudRoutes.delete('/:key/:id', async (c) => {
   try {
     await c.env.DB.prepare(`DELETE FROM ${m.table} WHERE id = ?`).bind(id).run();
   } catch (e) {
+    // P3: an employee who has moved between companies keeps their record (the company history is never deleted)
+    if (m.table === 'employees' && /never deleted|append-only/.test(`${e instanceof Error ? e.message : String(e)} ${String((e as { cause?: unknown })?.cause ?? '')}`)) {
+      throw new HttpError(409, 'employee_has_company_history', 'ลบพนักงานที่มีประวัติการย้ายบริษัทไม่ได้ (ประวัติการกำหนดบริษัทต้องเก็บไว้)');
+    }
     translateDbError(e, m);
   }
   await audit(c, 'data.delete', m.key, id);

@@ -107,7 +107,13 @@ CREATE TABLE employee_company_assignments (
 CREATE INDEX idx_employee_company_assignments_employee ON employee_company_assignments(employee_id, effective_from);
 CREATE INDEX idx_employee_company_assignments_company ON employee_company_assignments(company_id, status);
 CREATE INDEX idx_employee_company_assignments_op ON employee_company_assignments(op_token);
+-- never deleted while the employee exists, nor once the employee has moved (a transfer row exists): only the first
+-- assignment of an employee who never moved goes, together with the employee record itself (an unused employee
+-- entered by mistake; see trg_employees_company_assignment_delete — refused as a whole if anything else references
+-- the employee)
 CREATE TRIGGER trg_employee_company_assignments_nodelete BEFORE DELETE ON employee_company_assignments
+WHEN EXISTS (SELECT 1 FROM employees e WHERE e.id = OLD.employee_id)
+  OR EXISTS (SELECT 1 FROM employee_company_assignments x WHERE x.employee_id = OLD.employee_id AND x.source = 'transfer')
 BEGIN
   SELECT RAISE(ABORT, 'employee_company_assignments rows are cancelled, never deleted');
 END;
@@ -152,6 +158,8 @@ BEGIN
   SELECT RAISE(ABORT, 'employee_company_assignment_history is append-only');
 END;
 CREATE TRIGGER trg_employee_company_assignment_history_nodelete BEFORE DELETE ON employee_company_assignment_history
+WHEN EXISTS (SELECT 1 FROM employees e WHERE e.id = OLD.employee_id)
+  OR EXISTS (SELECT 1 FROM employee_company_assignments x WHERE x.employee_id = OLD.employee_id AND x.source = 'transfer')
 BEGIN
   SELECT RAISE(ABORT, 'employee_company_assignment_history is append-only');
 END;
@@ -175,6 +183,13 @@ BEGIN
   INSERT INTO employee_company_assignment_history (assignment_id, employee_id, action, after_json, reason, actor_id)
   SELECT id, employee_id, 'created', json_object('company_id', company_id, 'effective_from', effective_from, 'effective_to', effective_to, 'status', status, 'source', source), reason, created_by
   FROM employee_company_assignments WHERE employee_id = NEW.id;
+END;
+-- deleting an employee record (allowed by the API only when nothing references it) takes the first assignment and
+-- its history along; for an employee who has moved, the triggers above refuse and the whole delete is refused
+CREATE TRIGGER trg_employees_company_assignment_delete AFTER DELETE ON employees
+BEGIN
+  DELETE FROM employee_company_assignment_history WHERE employee_id = OLD.id;
+  DELETE FROM employee_company_assignments WHERE employee_id = OLD.id;
 END;
 -- employees.company_id follows the open verified assignment: changing it any other way (e.g. the generic employee
 -- form) is refused, so a move always has a dated, reasoned, lock-checked transfer behind it

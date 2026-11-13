@@ -22,7 +22,9 @@ async function stepUp(only?: Client): Promise<{ who: Client; totp: string }> {
     const now = Math.floor(Date.now() / 30_000);
     for (const [i, who] of admins.entries()) {
       if (only && who !== only) continue;
-      for (const s of [0, 1, -1]) {
+      // the current or the next window only: a code of the previous window is accepted by the server only until the
+      // next window boundary, so under load it can expire between generation and verification (403 mfa_invalid)
+      for (const s of [0, 1]) {
         const key = `${i}:${now + s}`;
         if (!used.has(key)) {
           used.add(key);
