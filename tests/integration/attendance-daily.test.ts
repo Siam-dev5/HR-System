@@ -4,7 +4,8 @@
 // (correction API, CRUD compatibility, Time Correction approval), validation holds (invalid / pending review), the
 // attendance version and append-only snapshots per calc_version, the approval / ACC sign-off / publish gates, Preview
 // warnings, reconciliation (amounts identical with and without the review), audit, and races.
-import { execFileSync } from 'node:child_process';
+import { execFile, execFileSync } from 'node:child_process';
+import { promisify } from 'node:util';
 import { join } from 'node:path';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { Client, startHarness, type Harness } from './harness';
@@ -24,6 +25,9 @@ const holdId = (periodId: number, emp: number, kind: string) => Number(one(`SELE
 const snapshots = (periodId: number) => H.sql(`SELECT calc_version, attendance_version, judged_through FROM payroll_attendance_snapshots WHERE period_id = ${periodId} ORDER BY calc_version`) as Array<{ calc_version: number; attendance_version: string; judged_through: string }>;
 const calcVersion = (periodId: number) => Number(one(`SELECT calc_version FROM payroll_periods WHERE id = ${periodId}`).calc_version);
 const nets = (periodId: number) => H.sql(`SELECT employee_id, net, gross, unpaid_leave, ot_amount FROM payslips WHERE period_id = ${periodId} ORDER BY employee_id`);
+/** A write from another process while the Worker serves requests (an import landing at the same moment). */
+const sqlAsync = (sql: string) =>
+  promisify(execFile)(process.execPath, [WRANGLER, 'd1', 'execute', 'hr-system-db', '--local', '--persist-to', join(H.dir, 'state'), '--command', sql], { env: { ...process.env, CI: '1' } });
 const REASON = { reason: 'zz แก้ไขตามใบแจ้ง HR', reference: 'ZZ-DOC-1' };
 
 const weekdays = (() => {
@@ -357,6 +361,9 @@ describe('payroll integration', () => {
     expect((await c.staff!.put(`/api/m/attendance/${id}`, { note: 'zz', correction_reason: REASON.reason, correction_reference: REASON.reference })).status).toBe(409);
     expect(() => H.sql(`UPDATE attendance_records SET clock_in = '08:40', change_op = 'zz-lock' WHERE id = ${id}`)).toThrow();
     expect(one(`SELECT clock_in FROM attendance_records WHERE id = ${id}`).clock_in).toBe('09:00');
+    // an import (a new record, no operation of a user) cannot land in a locked day either
+    expect(() => H.sql(`INSERT INTO attendance_records (employee_id, work_date, clock_in, clock_out, status, source) VALUES (${ids.D1}, '2026-06-13', '09:00', '18:00', 'present', 'import')`)).toThrow();
+    expect(H.sql(`SELECT 1 FROM attendance_records WHERE employee_id = ${ids.D1} AND work_date = '2026-06-13'`)).toHaveLength(0);
     // company B is not locked by company A's period
     expect((await c.staff!.post(`/api/attendance/records/${recId(ids.D4, '2026-06-11')}/correct`, { clock_in: '08:40', ...REASON })).status).toBe(200);
   });
@@ -387,19 +394,30 @@ describe('payroll integration', () => {
     expect((await c.employee!.get(`/api/payroll/periods/${ids.PJ}/attendance`)).status).toBe(403);
   });
 
-  it('46b. a correction racing a calculation never leaves an approvable stale snapshot', async () => {
+  it('46b. an import and a correction racing a calculation never leave an approvable stale snapshot', async () => {
     ids.PB = await newPeriod('ZD-B-2026-06', ids.B, '2026-06-01', '2026-06-30');
     const id = recId(ids.D4, '2026-06-15');
-    for (const t of ['08:31', '08:32', '08:33']) {
-      const [calc] = await Promise.all([c.payroll!.post(`/api/payroll/periods/${ids.PB}/calculate`), c.staff!.post(`/api/attendance/records/${id}/correct`, { clock_in: t, ...REASON })]);
+    const rounds: Array<[string, string]> = [['08:31', '2026-06-06'], ['08:32', '2026-06-13'], ['08:33', '2026-06-20']];
+    for (const [t, saturday] of rounds) {
+      const [calc, fix] = await Promise.all([
+        c.payroll!.post(`/api/payroll/periods/${ids.PB}/calculate`),
+        c.staff!.post(`/api/attendance/records/${id}/correct`, { clock_in: t, ...REASON }),
+        sqlAsync(`INSERT INTO attendance_records (employee_id, work_date, clock_in, clock_out, status, source) VALUES (${ids.D4}, '${saturday}', '09:00', '12:00', 'present', 'import')`),
+      ]);
       expect([200, 409]).toContain(calc.status);
+      if (calc.status === 409) expect(['attendance_changed_during_calculation', 'conflict']).toContain(calc.body.error?.code);
+      expect(fix.status).toBe(200);
     }
     if (calcVersion(ids.PB) === 0) expect((await c.payroll!.post(`/api/payroll/periods/${ids.PB}/calculate`)).status).toBe(200);
+    // every stored snapshot is internally consistent: its version is the hash of what it aggregated, so the live
+    // check of the current one decides; approval succeeds only when it matches the attendance as it is now
     const live = (await c.payroll!.get(`/api/payroll/periods/${ids.PB}/attendance`)).body;
     const approve = await c.admin!.post(`/api/payroll/periods/${ids.PB}/approve`);
-    // invariant: approval succeeds only when the stored snapshot matches the attendance as it is now
     if (live.snapshot.current) expect(approve.status, approve.text).toBe(200);
     else expect(approve.body.error?.code).toBe('attendance_version_changed');
+    // the imported Saturdays exist exactly once each, with their creation revision
+    expect(Number(one(`SELECT COUNT(*) AS n FROM attendance_records WHERE employee_id = ${ids.D4} AND work_date IN ('2026-06-06', '2026-06-13', '2026-06-20')`).n)).toBe(3);
+    expect(Number(one(`SELECT COUNT(*) AS n FROM attendance_record_revisions WHERE employee_id = ${ids.D4} AND work_date IN ('2026-06-06', '2026-06-13', '2026-06-20') AND action = 'created'`).n)).toBe(3);
   });
 });
 
@@ -415,6 +433,22 @@ describe('Time Correction approval uses the same revision and lock rules', () =>
     const e7 = Number(one("SELECT id FROM employees WHERE emp_code = 'E007'").id);
     const rev = revisions(recId(e7, '2026-05-20')).at(-1)!;
     expect(rev).toMatchObject({ channel: 'time_correction', reason: 'zz ลืมสแกน', reference: `TC-${tc.body.id}`, actor_id: ids.admin, reason_missing: 0 });
+  });
+
+  it('web clock-in is locked too: no clock on a day of an approved period', async () => {
+    const co = Number(one("SELECT company_id FROM employees WHERE emp_code = 'E007'").company_id);
+    const today = String(one("SELECT date('now', '+7 hours') AS d").d);
+    const [y, m] = today.split('-');
+    const last = new Date(Date.UTC(Number(y), Number(m), 0)).getUTCDate();
+    // fixture: an approved monthly period covering today for E007's company (the approval workflow is tested above)
+    H.sql(`INSERT INTO payroll_periods (code, name, start_date, end_date, pay_date, status, kind, company_id) VALUES ('ZD-E7-NOW', 'zz now', '${y}-${m}-01', '${y}-${m}-${last}', '${y}-${m}-${last}', 'approved', 'monthly', ${co})`);
+    const e7 = Number(one("SELECT id FROM employees WHERE emp_code = 'E007'").id);
+    const before = H.sql(`SELECT clock_in FROM attendance_records WHERE employee_id = ${e7} AND work_date = '${today}'`);
+    const r = await c.employee!.post('/api/ess/clock', { action: 'in' });
+    expect(r.status).toBe(409);
+    expect(r.body.error?.code).toBe('attendance_period_locked');
+    expect(H.sql(`SELECT clock_in FROM attendance_records WHERE employee_id = ${e7} AND work_date = '${today}'`)).toEqual(before);
+    H.sql("UPDATE payroll_periods SET status = 'draft' WHERE code = 'ZD-E7-NOW'");
   });
 
   it('a request for a day of an approved period cannot be approved (nothing is written)', async () => {

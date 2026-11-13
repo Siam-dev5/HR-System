@@ -61,7 +61,7 @@ export async function assertNotLocked(db: D1Database, companyId: number, dates: 
 /** Throws the HTTP answer of a database error raised by the attendance triggers; returns for any other error. */
 export function attendanceDbError(e: unknown): void {
   const text = e instanceof Error ? `${e.message} ${String((e as { cause?: unknown }).cause ?? '')}` : String(e);
-  if (text.includes('attendance_period_locked')) throw new HttpError(409, 'attendance_period_locked', 'วันที่นี้อยู่ในงวดเงินเดือนที่อนุมัติหรือเผยแพร่แล้ว แก้ไขเวลาทำงานไม่ได้');
+  if (text.includes('attendance_period_locked')) throw new HttpError(409, 'attendance_period_locked', 'วันที่นี้อยู่ในงวดเงินเดือนที่อนุมัติหรือเผยแพร่แล้ว บันทึกหรือแก้ไขเวลาทำงานไม่ได้ (ติดต่อ HR)');
   if (text.includes('never deleted')) throw new HttpError(409, 'attendance_delete_forbidden', 'ลบบันทึกเวลาทำงานไม่ได้ ใช้การแก้ไขพร้อมเหตุผลแทน (ประวัติการแก้ไขถูกเก็บไว้)');
 }
 
