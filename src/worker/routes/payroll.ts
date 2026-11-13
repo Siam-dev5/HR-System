@@ -1,5 +1,5 @@
 import { Hono } from 'hono';
-import { assertSelectionApprovable, effectiveSelection, notReadyError, selectionCalcStatements, selectionForCalculation, selectionReadiness } from '../lib/payroll-selection';
+import { assertSelectionApprovable, notReadyError, selectionCalcStatements, selectionForCalculation, selectionReadiness } from '../lib/payroll-selection';
 import { assertPayrollCompanies, issueCode, issueMessage, payrollCompanyIssues } from '../lib/company-detection';
 import { approvalBody, approvalNote, checkMakerChecker } from '../lib/approval';
 import type { Context } from 'hono';
@@ -1122,10 +1122,13 @@ async function buildPreview(c: Context<AppEnv>): Promise<PayrollPreviewResponse>
 
   if (p.status === 'draft') {
     source = 'live';
-    const sel = await effectiveSelection(db, p);
-    const slips: ComputedSlip[] = await computePeriod(db, p, companyId, sel.hasRows ? sel.ids : undefined);
+    // P4: a changed list previews the payable employees only (blocked / unconfirmed review cases are listed as issues,
+    // never computed), exactly what a calculation would pay
+    const ready = await selectionReadiness(db, p);
+    const slips: ComputedSlip[] = await computePeriod(db, p, companyId, ready.selection.hasRows ? ready.evaluated.filter((x) => x.payable).map((x) => x.employee_id) : undefined);
     for (const s of slips) paid.set(s.employee.id, s.calc.attendance);
-    rows = slips.map((s) => previewRow(s.employee, { ...s.pay, ewf_employee: s.pay.ewfEmployee, ewf_employer: s.pay.ewfEmployer, unpaid_leave: s.pay.unpaidLeave, ot_amount: s.pay.otAmount }, s.calc, pvdCode));
+    // employee_id identifies the row for selection (not a column: the layout and the export never show it)
+    rows = slips.map((s) => ({ employee_id: s.employee.id, ...previewRow(s.employee, { ...s.pay, ewf_employee: s.pay.ewfEmployee, ewf_employer: s.pay.ewfEmployer, unpaid_leave: s.pay.unpaidLeave, ot_amount: s.pay.otAmount }, s.calc, pvdCode) }));
     missingBank = slips.filter((s) => !s.employee.bank_account).length;
     issues.push({ level: 'error', code: 'not_calculated', message: 'งวดยังไม่ได้คำนวณ: ตัวเลขเป็นการคำนวณชั่วคราว (ยังไม่บันทึก) ต้องคำนวณงวดก่อน Export', count: 1 });
   } else {
@@ -1143,7 +1146,7 @@ async function buildPreview(c: Context<AppEnv>): Promise<PayrollPreviewResponse>
       const calc = r.calc_json ? (JSON.parse(r.calc_json) as PayslipCalc) : null;
       if (calc?.attendance.importId) usedImports.add(calc.attendance.importId);
       if (calc) paid.set(r.employee_id, calc.attendance);
-      return previewRow(r, { ...r, lines: JSON.parse(r.lines_json) as SlipLike['lines'] }, calc, pvdCode);
+      return { employee_id: r.employee_id, ...previewRow(r, { ...r, lines: JSON.parse(r.lines_json) as SlipLike['lines'] }, calc, pvdCode) };
     });
     missingBank = results.filter((r) => !r.bank_account).length;
   }

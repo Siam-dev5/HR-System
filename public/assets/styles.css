@@ -640,7 +640,36 @@ input[aria-invalid='true'], select[aria-invalid='true'], textarea[aria-invalid='
 .preview-wrap { max-height: 70vh; }
 .preview-table th, .preview-table td { white-space: nowrap; }
 .preview-table thead tr:first-child th { position: sticky; top: 0; z-index: 2; }
-.preview-table thead tr:last-child th { position: sticky; top: 1.9rem; z-index: 2; }
+.preview-table thead tr:last-child th { position: sticky; top: var(--group-h, 1.9rem); z-index: 2; }
+/* Frozen left columns: selection, employee code, employee name. Fixed widths make the left offsets exact (each offset is
+   the sum of the widths before it); separate borders keep sticky cells' borders attached; opaque backgrounds so the
+   scrolled columns never show through; header cells are above body cells, frozen header cells above both. */
+.preview-table { --fz-check: 2.75rem; --fz-code: 7.5rem; --fz-name: 15rem; border-collapse: separate; border-spacing: 0; }
+.preview-table .fz { position: sticky; z-index: 1; background: var(--surface); box-sizing: border-box; overflow: hidden; text-overflow: ellipsis; }
+/* above the other (sticky) header cells: those rules are more specific (tr:first-child / tr:last-child th), so match them */
+.preview-table thead tr:first-child th.fz, .preview-table thead tr:last-child th.fz { z-index: 4; background: var(--surface-2); }
+.preview-table tfoot .fz { background: var(--surface-2); }
+.preview-table .fz-check { left: 0; width: var(--fz-check); min-width: var(--fz-check); max-width: var(--fz-check); text-align: center; padding-left: 0.4rem; padding-right: 0.4rem; }
+.preview-table .fz-code { left: var(--fz-check); width: var(--fz-code); min-width: var(--fz-code); max-width: var(--fz-code); }
+.preview-table .fz-name { left: calc(var(--fz-check) + var(--fz-code)); width: var(--fz-name); min-width: var(--fz-name); max-width: var(--fz-name); box-shadow: inset -1px 0 0 var(--border-strong), 6px 0 6px -6px rgba(15, 23, 42, 0.35); }
+.preview-table .fz-group { left: 0; text-align: left; box-shadow: inset -1px 0 0 var(--border-strong), 6px 0 6px -6px rgba(15, 23, 42, 0.35); }
+.preview-table .fz-check input { width: 1.05rem; height: 1.05rem; margin: 0; cursor: pointer; accent-color: var(--primary); }
+.preview-table tbody tr.is-picked td, .preview-table tbody tr.is-picked .fz { background: var(--surface-3); }
+.preview-table tbody tr:hover td, .preview-table tbody tr:hover .fz { background: var(--surface-2); }
+.preview-table tbody tr.is-picked:hover td, .preview-table tbody tr.is-picked:hover .fz { background: var(--surface-3); }
+.preview-table .empty-row { text-align: center; color: var(--text-2); padding: 1.5rem; }
+.preview-table .elig .badge { white-space: nowrap; }
+.preview-table .elig-pay { background: #dcfce7; color: #166534; }
+.preview-table .elig-review { background: #fef3c7; color: #92400e; }
+.preview-table .elig-block { background: #fee2e2; color: #991b1b; }
+.pick-bar { align-items: center; flex-wrap: wrap; gap: 0.6rem; }
+.pick-bar .pick-search { min-width: 14rem; flex: 0 1 20rem; }
+.pick-count { color: var(--text-2); font-size: 0.88rem; }
+.result-list { margin: 0; padding-left: 1.2rem; max-height: 14rem; overflow: auto; }
+@media (max-width: 640px) {
+  .preview-table { --fz-code: 5.5rem; --fz-name: 8.5rem; }
+  .pick-bar .pick-search { min-width: 0; flex: 1 1 100%; }
+}
 .preview-table .group-row th { text-align: center; color: var(--text); border-left: 1px solid var(--border); }
 .layout-list { list-style: none; margin: 0; padding: 0; max-height: 55vh; overflow-y: auto; border: 1px solid var(--border); border-radius: var(--radius); }
 .layout-item { display: flex; align-items: center; gap: 0.5rem; padding: 0.35rem 0.6rem; border-bottom: 1px solid var(--border); background: var(--surface); cursor: grab; }
