@@ -345,7 +345,7 @@ adminRoutes.get('/settings', requireSuperAdmin, async (c) => {
 
 /** Per-key rules on top of the bool/number/text type check. */
 function validateSettingValue(key: string, value: string): string | null {
-  if (key.endsWith('_date') && value !== '') {
+  if ((key.endsWith('_date') || key === 'payroll.attendance_review_from') && value !== '') {
     if (!DATE_RE.test(value) || Number.isNaN(Date.parse(value))) return `${key} ต้องเป็นวันที่รูปแบบ YYYY-MM-DD`;
   }
   if (/^payroll\.ewf_.*_rate$/.test(key) && Number(value) > 100) return `${key} ต้องเป็นเปอร์เซ็นต์ระหว่าง 0-100`;
