@@ -15,6 +15,8 @@ DROP TRIGGER IF EXISTS trg_attendance_records_revision_update;
 DROP TRIGGER IF EXISTS trg_attendance_records_revision_insert;
 DROP TRIGGER IF EXISTS trg_attendance_records_change_op;
 DROP TRIGGER IF EXISTS trg_attendance_records_nodelete;
+DROP TRIGGER IF EXISTS trg_attendance_records_lock_insert;
+DROP TRIGGER IF EXISTS trg_attendance_records_lock_update;
 DROP TRIGGER IF EXISTS trg_attendance_revisions_readonly;
 DROP TRIGGER IF EXISTS trg_attendance_revisions_nodelete;
 DROP TABLE IF EXISTS attendance_record_revisions;

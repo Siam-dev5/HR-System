@@ -100,6 +100,26 @@ BEGIN
   );
 END;
 
+-- the days of an approved or published monthly period are locked: a change needs the period reopened through the
+-- existing authorised workflow (reopen-closed). Web clock-in (the employee's own clock, change_channel 'web') is not a
+-- correction and stays possible on days after an early approval; the version check covers what the approval judged.
+CREATE TRIGGER trg_attendance_records_lock_insert BEFORE INSERT ON attendance_records
+WHEN IFNULL(NEW.change_channel, '') <> 'web' AND EXISTS (
+  SELECT 1 FROM payroll_periods pp JOIN employees e ON e.id = NEW.employee_id
+  WHERE pp.kind = 'monthly' AND pp.deleted_at IS NULL AND pp.status IN ('approved', 'published') AND (pp.company_id IS NULL OR pp.company_id = e.company_id)
+    AND NEW.work_date BETWEEN pp.start_date AND pp.end_date)
+BEGIN
+  SELECT RAISE(ABORT, 'attendance_period_locked');
+END;
+CREATE TRIGGER trg_attendance_records_lock_update BEFORE UPDATE OF employee_id, work_date, clock_in, clock_out, clock_out_next_day, status, source, note, shift_id, late_minutes, early_leave_minutes, worked_minutes ON attendance_records
+WHEN IFNULL(NEW.change_channel, '') <> 'web' AND EXISTS (
+  SELECT 1 FROM payroll_periods pp JOIN employees e ON e.id IN (OLD.employee_id, NEW.employee_id)
+  WHERE pp.kind = 'monthly' AND pp.deleted_at IS NULL AND pp.status IN ('approved', 'published') AND (pp.company_id IS NULL OR pp.company_id = e.company_id)
+    AND (OLD.work_date BETWEEN pp.start_date AND pp.end_date OR NEW.work_date BETWEEN pp.start_date AND pp.end_date))
+BEGIN
+  SELECT RAISE(ABORT, 'attendance_period_locked');
+END;
+
 -- ===== 2. Attendance snapshot per Calculation Version ============================================================
 CREATE TABLE payroll_attendance_snapshots (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
