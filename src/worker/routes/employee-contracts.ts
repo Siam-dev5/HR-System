@@ -5,7 +5,7 @@
 // days are not covered); the pay formula is unchanged.
 import { Hono, type Context } from 'hono';
 import type { AppEnv } from '../env';
-import { currentUser, requireAuth, requirePerm } from '../auth';
+import { can, currentUser, requireAuth, requirePerm } from '../auth';
 import { audit } from '../lib/audit';
 import { companyScope } from '../lib/companies';
 import { badRequest, conflict, HttpError, intParam, notFound, readJson } from '../lib/http';
@@ -59,6 +59,9 @@ function dbError(e: unknown): never {
   if (text.includes('employee_contract_overlap')) throw new HttpError(409, 'employee_contract_overlap', 'ช่วงวันที่ของสัญญาซ้อนกับสัญญาที่ใช้งานอยู่');
   throw e;
 }
+
+/** Entry of the page (menu reachability): what the user may do here; no employee data. */
+employeeContractRoutes.get('/', requirePerm('employee_contract.view'), (c) => c.json({ can_manage: can(currentUser(c), 'employee_contract.manage') }));
 
 employeeContractRoutes.get('/employees/:id', requirePerm('employee_contract.view'), async (c) => {
   const e = await scopedEmployee(c, intParam(c.req.param('id')));

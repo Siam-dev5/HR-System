@@ -5,7 +5,7 @@
 // answers like a missing one); every change is versioned, recorded as an append-only event and audited.
 import { Hono, type Context } from 'hono';
 import type { AppEnv, AuthUser } from '../env';
-import { currentUser, requireAuth, requirePerm } from '../auth';
+import { can, currentUser, requireAuth, requirePerm } from '../auth';
 import { audit } from '../lib/audit';
 import { companyScope } from '../lib/companies';
 import { badRequest, conflict, HttpError, intParam, notFound, readJson } from '../lib/http';
@@ -115,6 +115,12 @@ async function selectionView(db: D1Database, p: SelPeriod, s: Scope) {
   const nm = await names(db, visible.map((x) => x.employee_id));
   return { sel, selected, deselected: out, nm, summary: summarize(selected, out.length) };
 }
+
+/** Entry of the page (menu reachability): what the user may do here; no employee or pay data. */
+payrollSelectionRoutes.get('/', requirePerm('payroll_selection.view'), (c) => {
+  const u = currentUser(c);
+  return c.json({ can_manage: can(u, 'payroll_selection.manage'), can_override: can(u, 'payroll_selection.override') });
+});
 
 payrollSelectionRoutes.get('/periods/:id', requirePerm('payroll_selection.view'), async (c) => {
   const db = c.env.DB;
