@@ -66,6 +66,8 @@ const view = (x: EvaluatedEmployee, names: Map<number, string>, sel: EffectiveSe
     name: names.get(x.employee_id) ?? null,
     company_id: x.company_id,
     origin: x.origin,
+    employment_type: x.employment_type,
+    pay_frequency: x.pay_frequency,
     eligibility: x.eligibility.status,
     decision: x.eligibility.decision,
     reasons: x.eligibility.reasons,

@@ -6,7 +6,7 @@ import {
   type CodeMapping, type CompanyAssignment, type PayrollCompanyError, type PayrollCompanyReason,
 } from '../../shared/company-detection';
 import { HttpError } from './http';
-import { selectedIdsOrNull } from './payroll-selection';
+import { MONTHLY_FREQUENCY_EXCLUDED, selectedIdsOrNull } from './payroll-selection';
 
 export async function loadMappings(db: D1Database): Promise<CodeMapping[]> {
   const { results } = await db.prepare('SELECT id, company_id, prefix, priority, status, effective_from, effective_to FROM company_code_mappings ORDER BY id').all<CodeMapping>();
@@ -24,6 +24,7 @@ export async function loadAssignments(db: D1Database, employeeIds: readonly numb
 
 export interface CompanyPeriod {
   id: number;
+  kind: string;
   start_date: string;
   end_date: string;
   company_id: number | null;
@@ -65,6 +66,7 @@ export async function payrollCompanyIssues(db: D1Database, p: CompanyPeriod, pay
          AND (?3 IS NULL OR e.company_id = ?3 OR EXISTS (
            SELECT 1 FROM employee_company_assignments a WHERE a.employee_id = e.id AND a.company_id = ?3 AND a.status <> 'cancelled'
              AND a.effective_from <= ?1 AND (a.effective_to IS NULL OR a.effective_to >= ?2)))
+         ${p.kind === 'mid_month' ? `AND ${MONTHLY_FREQUENCY_EXCLUDED}` : ''}
        ORDER BY e.emp_code`,
     )
     .bind(p.end_date, p.start_date, p.company_id)

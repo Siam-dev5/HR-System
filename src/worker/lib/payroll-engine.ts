@@ -2,7 +2,7 @@
 // Inputs come only from D1: employees, approved salary history, active attendance imports (confirmed OT only),
 // approved requests, recurring pay items, System Settings. Nothing here writes.
 import type { PayResult } from '../../shared/payroll';
-import { STANDARD_WHERE } from './payroll-selection';
+import { standardWhere } from './payroll-selection';
 import { calculatePay, resolveEwf, round2, wageSegments, type EwfStatus, type WageResult } from '../../shared/payroll';
 import { priceHolidayWork, type ApplicableRule, type HolidayWorkInput as HolidayWorkBase } from '../../shared/holidays';
 import type { HolidayPaySnapshot, PayslipCalc, PayrollPeriod } from '../../shared/types';
@@ -132,7 +132,7 @@ export async function computePeriod(db: D1Database, p: PeriodRowLike, filterComp
       `SELECT e.id, e.emp_code, e.first_name, e.last_name, e.company_id, c.name AS company, d.name AS department, x.title AS position,
               e.hire_date, e.termination_date, e.base_salary, e.ewf_equivalent_welfare, e.bank_account, e.employment_type
        FROM employees e LEFT JOIN companies c ON c.id = e.company_id LEFT JOIN departments d ON d.id = e.department_id LEFT JOIN positions x ON x.id = e.position_id
-       WHERE ${employeeIds ? 'e.id IN (SELECT value FROM json_each(?4)) AND (?3 IS NULL OR e.company_id = ?3) AND ?1 IS NOT NULL AND ?2 IS NOT NULL' : STANDARD_WHERE}
+       WHERE ${employeeIds ? 'e.id IN (SELECT value FROM json_each(?4)) AND (?3 IS NULL OR e.company_id = ?3) AND ?1 IS NOT NULL AND ?2 IS NOT NULL' : standardWhere(p.kind)}
        ORDER BY e.emp_code`,
     )
     .bind(p.end_date, p.start_date, companyId, ...(employeeIds ? [JSON.stringify(employeeIds)] : []))

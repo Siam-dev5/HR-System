@@ -21,8 +21,15 @@ export const STANDARD_WHERE = `e.hire_date <= ?1 AND e.base_salary IS NOT NULL A
   AND (e.status IN ('active', 'probation') OR (e.status IN ('resigned', 'terminated') AND e.termination_date IS NOT NULL AND e.termination_date >= ?2))
   AND (?3 IS NULL OR e.company_id = ?3)`;
 
-export async function standardIds(db: D1Database, p: Pick<SelPeriod, 'start_date' | 'end_date' | 'company_id'>): Promise<number[]> {
-  const { results } = await db.prepare(`SELECT e.id FROM employees e WHERE ${STANDARD_WHERE} ORDER BY e.id`).bind(p.end_date, p.start_date, p.company_id).all<{ id: number }>();
+/**
+ * P6: a mid-month round (the semi-monthly advance) leaves out employees whose effective pay frequency is 'monthly'
+ * (employee override, else the company's). Not configured (NULL) = included, exactly as before.
+ */
+export const MONTHLY_FREQUENCY_EXCLUDED = `COALESCE(e.pay_frequency, (SELECT fc.pay_frequency FROM companies fc WHERE fc.id = e.company_id), '') <> 'monthly'`;
+export const standardWhere = (kind: string): string => (kind === 'mid_month' ? `${STANDARD_WHERE} AND ${MONTHLY_FREQUENCY_EXCLUDED}` : STANDARD_WHERE);
+
+export async function standardIds(db: D1Database, p: Pick<SelPeriod, 'start_date' | 'end_date' | 'company_id' | 'kind'>): Promise<number[]> {
+  const { results } = await db.prepare(`SELECT e.id FROM employees e WHERE ${standardWhere(p.kind)} ORDER BY e.id`).bind(p.end_date, p.start_date, p.company_id).all<{ id: number }>();
   return results.map((r) => r.id);
 }
 
@@ -57,7 +64,7 @@ export interface EffectiveSelection {
   standard: Set<number>;
 }
 
-export async function effectiveSelection(db: D1Database, p: Pick<SelPeriod, 'id' | 'start_date' | 'end_date' | 'company_id'>): Promise<EffectiveSelection> {
+export async function effectiveSelection(db: D1Database, p: Pick<SelPeriod, 'id' | 'start_date' | 'end_date' | 'company_id' | 'kind'>): Promise<EffectiveSelection> {
   const [standard, rows] = await Promise.all([standardIds(db, p), selectionRows(db, p.id)]);
   const byEmp = new Map(rows.map((r) => [r.employee_id, r]));
   const origin = new Map<number, Origin>();
@@ -67,7 +74,7 @@ export async function effectiveSelection(db: D1Database, p: Pick<SelPeriod, 'id'
 }
 
 /** Selected employee ids when HR changed the list, otherwise null (callers keep the standard selection SQL). */
-export async function selectedIdsOrNull(db: D1Database, p: Pick<SelPeriod, 'id' | 'start_date' | 'end_date' | 'company_id'>): Promise<number[] | null> {
+export async function selectedIdsOrNull(db: D1Database, p: Pick<SelPeriod, 'id' | 'start_date' | 'end_date' | 'company_id' | 'kind'>): Promise<number[] | null> {
   const has = await db.prepare('SELECT 1 FROM payroll_period_selections WHERE period_id = ? LIMIT 1').bind(p.id).first();
   return has ? (await effectiveSelection(db, p)).ids : null;
 }
@@ -77,6 +84,10 @@ export interface EvaluatedEmployee {
   emp_code: string;
   company_id: number;
   origin: Origin | 'deselected' | 'outside';
+  /** effective pay frequency (null = not configured) */
+  pay_frequency: string | null;
+  /** employees.employment_type */
+  employment_type: string | null;
   eligibility: Eligibility;
   confirmed: boolean;
   payable: boolean;
@@ -91,24 +102,25 @@ interface EmpRow {
   termination_date: string | null;
   base_salary: number | null;
   employment_type: string | null;
+  pay_frequency: string | null;
 }
 
 /** Eligibility of these employees for the period (selection rows give origin and HR confirmations). */
-export async function evaluateEmployees(db: D1Database, p: Pick<SelPeriod, 'start_date' | 'end_date' | 'company_id'>, ids: readonly number[], sel?: EffectiveSelection): Promise<EvaluatedEmployee[]> {
+export async function evaluateEmployees(db: D1Database, p: Pick<SelPeriod, 'start_date' | 'end_date' | 'company_id' | 'kind'>, ids: readonly number[], sel?: EffectiveSelection): Promise<EvaluatedEmployee[]> {
   if (!ids.length) return [];
   const json = JSON.stringify([...new Set(ids)]);
   const [{ results: emps }, { results: history }, assignments, { results: contracts }] = await Promise.all([
-    db.prepare('SELECT id, emp_code, company_id, status, hire_date, termination_date, base_salary, employment_type FROM employees WHERE id IN (SELECT value FROM json_each(?1)) ORDER BY emp_code').bind(json).all<EmpRow>(),
+    db.prepare('SELECT e.id, e.emp_code, e.company_id, e.status, e.hire_date, e.termination_date, e.base_salary, e.employment_type, COALESCE(e.pay_frequency, c.pay_frequency) AS pay_frequency FROM employees e LEFT JOIN companies c ON c.id = e.company_id WHERE e.id IN (SELECT value FROM json_each(?1)) ORDER BY e.emp_code').bind(json).all<EmpRow>(),
     db.prepare('SELECT employee_id, effective_date, base_salary FROM employee_salary_history WHERE employee_id IN (SELECT value FROM json_each(?1)) AND effective_date <= ?2').bind(json, p.end_date).all<{ employee_id: number; effective_date: string; base_salary: number }>(),
     loadAssignments(db, ids),
     db.prepare("SELECT employee_id, start_date, end_date, status FROM employee_contracts WHERE employee_id IN (SELECT value FROM json_each(?1)) AND status = 'active'").bind(json).all<{ employee_id: number; start_date: string; end_date: string | null; status: 'active' | 'cancelled' }>(),
   ]);
   return emps.map((e) => {
-    const eligibility = evaluateEligibility({ period: p, employee: e, salaryHistory: history.filter((h) => h.employee_id === e.id), assignments: assignments.filter((a) => a.employee_id === e.id), contracts: contracts.filter((c) => c.employee_id === e.id) });
+    const eligibility = evaluateEligibility({ period: { start_date: p.start_date, end_date: p.end_date, company_id: p.company_id, kind: p.kind }, employee: e, salaryHistory: history.filter((h) => h.employee_id === e.id), assignments: assignments.filter((a) => a.employee_id === e.id), contracts: contracts.filter((c) => c.employee_id === e.id) });
     const row = sel?.rows.get(e.id) ?? null;
     const origin = sel ? (sel.origin.get(e.id) ?? (row?.status === 'deselected' ? 'deselected' : 'outside')) : 'standard';
     const ok = payable(eligibility, row);
-    return { employee_id: e.id, emp_code: e.emp_code, company_id: e.company_id, origin, eligibility, confirmed: eligibility.decision === 'review' && ok, payable: ok };
+    return { employee_id: e.id, emp_code: e.emp_code, company_id: e.company_id, origin, pay_frequency: e.pay_frequency, employment_type: e.employment_type, eligibility, confirmed: eligibility.decision === 'review' && ok, payable: ok };
   });
 }
 
