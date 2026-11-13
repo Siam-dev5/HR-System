@@ -12,6 +12,7 @@ import {
 } from '../../shared/attendance-daily';
 import type { HoldExemption, ScheduleKind } from '../../shared/attendance-holds';
 import { applicable } from '../routes/holidays';
+import { selectedIdsOrNull } from './payroll-selection';
 import { HttpError } from './http';
 import { resolveDays } from './shift-resolver';
 import { bangkokNow } from './time';
@@ -24,8 +25,16 @@ export interface DailyPeriod {
   company_id: number | null;
 }
 
-/** Employees the period pays: the same selection as computePeriod (lib/payroll-engine). */
+/** Employees the period pays: the same selection as computePeriod (lib/payroll-engine), or HR's selection (P4). */
 async function periodEmployees(db: D1Database, p: DailyPeriod): Promise<DailyInput['employees']> {
+  const selected = await selectedIdsOrNull(db, p);
+  if (selected) {
+    const { results } = await db
+      .prepare('SELECT e.id, e.company_id, e.hire_date, e.termination_date FROM employees e WHERE e.id IN (SELECT value FROM json_each(?1)) ORDER BY e.id')
+      .bind(JSON.stringify(selected))
+      .all<{ id: number; company_id: number; hire_date: string; termination_date: string | null }>();
+    return results;
+  }
   const { results } = await db
     .prepare(
       `SELECT e.id, e.company_id, e.hire_date, e.termination_date FROM employees e

@@ -6,6 +6,7 @@ import {
   type CodeMapping, type CompanyAssignment, type PayrollCompanyError, type PayrollCompanyReason,
 } from '../../shared/company-detection';
 import { HttpError } from './http';
+import { selectedIdsOrNull } from './payroll-selection';
 
 export async function loadMappings(db: D1Database): Promise<CodeMapping[]> {
   const { results } = await db.prepare('SELECT id, company_id, prefix, priority, status, effective_from, effective_to FROM company_code_mappings ORDER BY id').all<CodeMapping>();
@@ -53,7 +54,10 @@ interface Emp {
  * to the company that owns it. A calculation replaces its payslips, so it checks without them.
  */
 export async function payrollCompanyIssues(db: D1Database, p: CompanyPeriod, payslips = p.status !== 'draft'): Promise<PayrollCompanyIssue[]> {
-  const { results: selected } = await db
+  const chosen = await selectedIdsOrNull(db, p);
+  const { results: selected } = chosen
+    ? await db.prepare('SELECT e.id, e.emp_code, e.company_id, e.hire_date, e.termination_date FROM employees e WHERE e.id IN (SELECT value FROM json_each(?1)) ORDER BY e.emp_code').bind(JSON.stringify(chosen)).all<Emp>()
+    : await db
     .prepare(
       `SELECT e.id, e.emp_code, e.company_id, e.hire_date, e.termination_date FROM employees e
        WHERE e.hire_date <= ?1 AND e.base_salary IS NOT NULL AND e.base_salary > 0

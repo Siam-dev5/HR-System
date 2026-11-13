@@ -2,6 +2,7 @@
 // Inputs come only from D1: employees, approved salary history, active attendance imports (confirmed OT only),
 // approved requests, recurring pay items, System Settings. Nothing here writes.
 import type { PayResult } from '../../shared/payroll';
+import { STANDARD_WHERE } from './payroll-selection';
 import { calculatePay, resolveEwf, round2, wageSegments, type EwfStatus, type WageResult } from '../../shared/payroll';
 import { priceHolidayWork, type ApplicableRule, type HolidayWorkInput as HolidayWorkBase } from '../../shared/holidays';
 import type { HolidayPaySnapshot, PayslipCalc, PayrollPeriod } from '../../shared/types';
@@ -113,7 +114,11 @@ interface EmpRow {
   employment_type: string;
 }
 
-export async function computePeriod(db: D1Database, p: PeriodRowLike, filterCompany: number | null = null): Promise<ComputedSlip[]> {
+/**
+ * `employeeIds` (P4): the employees HR selected and eligibility allows — replaces the standard selection below when the
+ * period's list was changed; everything after the selection (salary, proration, OT, leave, deductions…) is unchanged.
+ */
+export async function computePeriod(db: D1Database, p: PeriodRowLike, filterCompany: number | null = null, employeeIds?: readonly number[]): Promise<ComputedSlip[]> {
   // a company-scoped period only ever pays that company's employees
   if (p.company_id !== null && filterCompany !== null && p.company_id !== filterCompany) return [];
   const companyId = p.company_id ?? filterCompany;
@@ -127,12 +132,10 @@ export async function computePeriod(db: D1Database, p: PeriodRowLike, filterComp
       `SELECT e.id, e.emp_code, e.first_name, e.last_name, e.company_id, c.name AS company, d.name AS department, x.title AS position,
               e.hire_date, e.termination_date, e.base_salary, e.ewf_equivalent_welfare, e.bank_account, e.employment_type
        FROM employees e LEFT JOIN companies c ON c.id = e.company_id LEFT JOIN departments d ON d.id = e.department_id LEFT JOIN positions x ON x.id = e.position_id
-       WHERE e.hire_date <= ?1 AND e.base_salary IS NOT NULL AND e.base_salary > 0
-         AND (e.status IN ('active', 'probation') OR (e.status IN ('resigned', 'terminated') AND e.termination_date IS NOT NULL AND e.termination_date >= ?2))
-         AND (?3 IS NULL OR e.company_id = ?3)
+       WHERE ${employeeIds ? 'e.id IN (SELECT value FROM json_each(?4)) AND (?3 IS NULL OR e.company_id = ?3) AND ?1 IS NOT NULL AND ?2 IS NOT NULL' : STANDARD_WHERE}
        ORDER BY e.emp_code`,
     )
-    .bind(p.end_date, p.start_date, companyId)
+    .bind(p.end_date, p.start_date, companyId, ...(employeeIds ? [JSON.stringify(employeeIds)] : []))
     .all<EmpRow>();
   const { results: history } = await db
     .prepare('SELECT employee_id, effective_date, base_salary FROM employee_salary_history WHERE effective_date <= ?')

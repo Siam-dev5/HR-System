@@ -1,4 +1,5 @@
 import { Hono } from 'hono';
+import { assertSelectionApprovable, effectiveSelection, notReadyError, selectionCalcStatements, selectionForCalculation, selectionReadiness } from '../lib/payroll-selection';
 import { assertPayrollCompanies, issueCode, issueMessage, payrollCompanyIssues } from '../lib/company-detection';
 import { approvalBody, approvalNote, checkMakerChecker } from '../lib/approval';
 import type { Context } from 'hono';
@@ -244,7 +245,9 @@ payrollRoutes.post('/periods/:id/calculate', requirePerm('payroll.calculate'), a
   // payslips being replaced are not checked)
   await assertPayrollCompanies(db, p, false);
   const forced = p.reopened_from ? await requireForce(c, p, 'period.force_recalculate') : null;
-  const slips = await computePeriod(db, p);
+  // P4: every selected employee must be payable (eligible, or a review case HR confirmed); the engine pays exactly them
+  const selection = await selectionForCalculation(db, p);
+  const slips = await computePeriod(db, p, null, selection.engineIds);
   const version = p.calc_version + 1;
   // attendance review (P1): scanned before the payslips are written, so a hold resolved by this scan is not newer than
   // the calculation; holds never change the figures (approval is what they block)
@@ -283,6 +286,8 @@ payrollRoutes.post('/periods/:id/calculate', requirePerm('payroll.calculate'), a
         r.ewfEmployee, r.ewfEmployer, s.ewf.employeeRate, s.ewf.employerRate, s.ewf.status, s.employee.company_id, r.advance, JSON.stringify(s.calc), version),
     );
   }
+  // P4: the selection read is still the current one; record the version used and who was / was not paid
+  stmts.push(...selectionCalcStatements(db, p, version, selection, new Set(slips.map((s) => s.employee.id)), GUARD_FAILED));
   // holiday work paid by these slips is locked to the period (released by "reopen"); the check fails the whole batch
   // when a record changed between the calculation and this write, so a slip never pays an unlocked record
   const holidayIds = JSON.stringify(slips.flatMap((s) => s.holidayRecordIds));
@@ -340,6 +345,8 @@ payrollRoutes.post('/periods/:id/approve', requirePerm('payroll.approve'), async
   if (p.kind === 'mid_month') await assertCalculable(db, p);
   // P3: a transfer after the calculation (or a held assignment) is not approved through — recalculate
   await assertPayrollCompanies(db, p);
+  // P4: the selection is the one calculated, and every selected employee is still payable
+  await assertSelectionApprovable(db, p);
   // attendance review (P1): a fresh scan; any open hold refuses approval, and a hold resolved after the calculation
   // (the source data changed, e.g. a leave was approved) needs a recalculation first, since the pay may differ
   if (await holdsEnabled(db, p)) {
@@ -1115,7 +1122,8 @@ async function buildPreview(c: Context<AppEnv>): Promise<PayrollPreviewResponse>
 
   if (p.status === 'draft') {
     source = 'live';
-    const slips: ComputedSlip[] = await computePeriod(db, p, companyId);
+    const sel = await effectiveSelection(db, p);
+    const slips: ComputedSlip[] = await computePeriod(db, p, companyId, sel.hasRows ? sel.ids : undefined);
     for (const s of slips) paid.set(s.employee.id, s.calc.attendance);
     rows = slips.map((s) => previewRow(s.employee, { ...s.pay, ewf_employee: s.pay.ewfEmployee, ewf_employer: s.pay.ewfEmployer, unpaid_leave: s.pay.unpaidLeave, ot_amount: s.pay.otAmount }, s.calc, pvdCode));
     missingBank = slips.filter((s) => !s.employee.bank_account).length;
@@ -1164,6 +1172,13 @@ async function buildPreview(c: Context<AppEnv>): Promise<PayrollPreviewResponse>
   const viewScope = await payrollScope(c);
   const companyIssues = (await payrollCompanyIssues(db, p)).filter((i) => (companyId === null || i.company_id === companyId) && (viewScope.all || viewScope.ids.includes(i.company_id)));
   if (companyIssues.length) issues.push({ level: 'error', code: issueCode(companyIssues), message: issueMessage(companyIssues), count: companyIssues.length });
+  // P4: selected employees who cannot be paid yet (review / blocked), and a selection changed since the calculation
+  const ready = await selectionReadiness(db, p);
+  const notReady = ready.notReady.filter((x) => (companyId === null || x.company_id === companyId) && (viewScope.all || viewScope.ids.includes(x.company_id)));
+  if (notReady.length) issues.push({ level: 'error', code: 'selection_not_ready', message: notReadyError(notReady).message, count: notReady.length });
+  if (source === 'snapshot' && ready.version.version > 0 && ready.version.calculated_version !== ready.version.version) {
+    issues.push({ level: 'error', code: 'selection_changed_recalculate', message: 'รายชื่อพนักงานของงวดเปลี่ยนหลังการคำนวณ ต้องคำนวณงวดใหม่', count: 1 });
+  }
   const negative = rows.filter((r) => typeof r.net_pay === 'number' && r.net_pay < 0).length;
   if (negative) issues.push({ level: 'error', code: 'net_negative', message: 'มีพนักงานที่เงินได้สุทธิติดลบ', count: negative });
   if (source === 'snapshot' && p.legacy_slips > 0) issues.push({ level: 'warning', code: 'legacy', message: 'สลิปงวดนี้คำนวณด้วยเวอร์ชันก่อนหน้า (Legacy, ก่อน Migration 0005) จึงไม่มีข้อมูลเวลาทำงาน/สถานะทดลองงานใน Preview ยอดเงินคงเดิมจนกว่าจะยืนยันคำนวณใหม่', count: p.legacy_slips });
