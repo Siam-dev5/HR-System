@@ -1,4 +1,5 @@
 import { Hono } from 'hono';
+import { holdIfMappingDiffers } from '../lib/company-detection';
 import { CHANGE_SET, attendanceDbError, changeValues, crudChange } from '../lib/attendance-records';
 import type { Context } from 'hono';
 import type { AppEnv, AuthUser } from '../env';
@@ -276,7 +277,9 @@ crudRoutes.post('/:key', async (c) => {
     translateDbError(e, m);
   }
   if (m.workflow) await startWorkflow(c, m, id, values);
-  await audit(c, 'data.create', m.key, id, { fields: cols, ...(change ? { change: { op: change.op, reason: change.reason, reference: change.reference } } : {}) });
+  // P3: the entered company is the employee's first assignment; held for HR review when the prefix mapping differs
+  const companyHold = m.table === 'employees' ? await holdIfMappingDiffers(c.env.DB, id, user.id) : null;
+  await audit(c, 'data.create', m.key, id, { fields: cols, ...(change ? { change: { op: change.op, reason: change.reason, reference: change.reference } } : {}), ...(companyHold?.held ? { companyHeld: companyHold } : {}) });
   return c.json(maskRow(user, m, await loadVisible(c, user, m, id)), 201);
 });
 
@@ -306,6 +309,10 @@ crudRoutes.put('/:key/:id', async (c) => {
       .run();
   } catch (e) {
     if (change) attendanceDbError(e);
+    // P3: the company of an employee changes only through the transfer (history, reason, payroll lock)
+    if (m.table === 'employees' && /employee_company_needs_transfer/.test(`${e instanceof Error ? e.message : String(e)} ${String((e as { cause?: unknown })?.cause ?? '')}`)) {
+      throw new HttpError(409, 'employee_company_needs_transfer', 'การเปลี่ยนบริษัทของพนักงานต้องทำผ่านการย้ายบริษัท (POST /api/company-detection/employees/:id/transfer) พร้อมเหตุผลและวันที่มีผล');
+    }
     translateDbError(e, m);
   }
   const changed = cols.filter((k) => String(existing[k] ?? '') !== String(values[k] ?? ''));

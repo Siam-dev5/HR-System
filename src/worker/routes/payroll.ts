@@ -1,4 +1,5 @@
 import { Hono } from 'hono';
+import { assertPayrollCompanies, issueCode, issueMessage, payrollCompanyIssues } from '../lib/company-detection';
 import { approvalBody, approvalNote, checkMakerChecker } from '../lib/approval';
 import type { Context } from 'hono';
 import type { AppEnv } from '../env';
@@ -239,6 +240,9 @@ payrollRoutes.post('/periods/:id/calculate', requirePerm('payroll.calculate'), a
     throw new HttpError(409, 'legacy_recalculation', `งวด ${p.code} มีสลิป ${p.legacy_slips} รายการที่คำนวณด้วยเวอร์ชันก่อนหน้า (Legacy) การคำนวณใหม่ใช้กติกาปัจจุบันและยอดอาจเปลี่ยน ต้องยืนยันการคำนวณใหม่อย่างชัดเจน`);
   }
   await assertCalculable(db, p);
+  // P3: every employee the period pays belongs to one verified company — the period's — for every paid day (the
+  // payslips being replaced are not checked)
+  await assertPayrollCompanies(db, p, false);
   const forced = p.reopened_from ? await requireForce(c, p, 'period.force_recalculate') : null;
   const slips = await computePeriod(db, p);
   const version = p.calc_version + 1;
@@ -334,6 +338,8 @@ payrollRoutes.post('/periods/:id/approve', requirePerm('payroll.approve'), async
   const pending = await pendingOt(db, p.id);
   if (pending) throw conflict(`มี OT จาก Feishu รอ HR ตรวจสอบ ${pending} รายการ ต้องยืนยันหรือปฏิเสธก่อนอนุมัติ`);
   if (p.kind === 'mid_month') await assertCalculable(db, p);
+  // P3: a transfer after the calculation (or a held assignment) is not approved through — recalculate
+  await assertPayrollCompanies(db, p);
   // attendance review (P1): a fresh scan; any open hold refuses approval, and a hold resolved after the calculation
   // (the source data changed, e.g. a leave was approved) needs a recalculation first, since the pay may differ
   if (await holdsEnabled(db, p)) {
@@ -1154,6 +1160,10 @@ async function buildPreview(c: Context<AppEnv>): Promise<PayrollPreviewResponse>
     if (changed) issues.push({ level: 'error', code: 'attendance_changed', message: 'ข้อมูลเวลาทำงานถูกนำเข้าใหม่หรือย้อนกลับหลังการคำนวณ ต้องคำนวณงวดใหม่', count: changed });
   }
   if (await holdsEnabled(db, p)) issues.push(...(await dailyIssues(db, p, source, companyId, await payrollScope(c), paid)));
+  // P3: employees whose company is unresolved, in conflict or moved within the period block calculation and approval
+  const viewScope = await payrollScope(c);
+  const companyIssues = (await payrollCompanyIssues(db, p)).filter((i) => (companyId === null || i.company_id === companyId) && (viewScope.all || viewScope.ids.includes(i.company_id)));
+  if (companyIssues.length) issues.push({ level: 'error', code: issueCode(companyIssues), message: issueMessage(companyIssues), count: companyIssues.length });
   const negative = rows.filter((r) => typeof r.net_pay === 'number' && r.net_pay < 0).length;
   if (negative) issues.push({ level: 'error', code: 'net_negative', message: 'มีพนักงานที่เงินได้สุทธิติดลบ', count: negative });
   if (source === 'snapshot' && p.legacy_slips > 0) issues.push({ level: 'warning', code: 'legacy', message: 'สลิปงวดนี้คำนวณด้วยเวอร์ชันก่อนหน้า (Legacy, ก่อน Migration 0005) จึงไม่มีข้อมูลเวลาทำงาน/สถานะทดลองงานใน Preview ยอดเงินคงเดิมจนกว่าจะยืนยันคำนวณใหม่', count: p.legacy_slips });
