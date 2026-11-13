@@ -63,7 +63,7 @@ describe('prepare-d1-restore', () => {
   const at = (re: RegExp) => lines.findIndex((l) => re.test(l));
 
   it('keeps every statement unchanged, only re-ordered', () => {
-    expect(log).toMatch(/^ok: 16 statements \(5 tables, 8 inserts, 1 indexes; parents before children, 2 self-referencing table\(s\) re-ordered\)/);
+    expect(log).toMatch(/^ok: 16 statements \(5 tables, 8 inserts, 1 indexes, 0 triggers; parents before children, 2 self-referencing table\(s\) re-ordered\)/);
     const statements = (s: string) => s.split(/;\n(?=PRAGMA|CREATE|INSERT)/).map((x) => x.trim().replace(/;$/, '')).filter(Boolean).sort();
     expect(statements(out)).toEqual(statements(DUMP));
   });
@@ -96,5 +96,32 @@ describe('prepare-d1-restore', () => {
   it('refuses rows that reference each other in a cycle instead of writing a file that cannot load', () => {
     const cyclic = DUMP.replace("VALUES(3,2,NULL,NULL)", 'VALUES(3,2,2,NULL)');
     expect(() => prepare(cyclic)).toThrow(/cycle/);
+  });
+
+  it('keeps a comment with an apostrophe inside a CREATE TABLE and restores triggers whole, after the rows', () => {
+    // as in a real export since 0009 (comments in table definitions) and 0011 (triggers with BEGIN ... END bodies)
+    const dump = `PRAGMA defer_foreign_keys=TRUE;
+CREATE TABLE records (
+  id INTEGER PRIMARY KEY,
+  -- the approver confirms these hours are not also part of the employee's normal OT
+  hours REAL
+);
+INSERT INTO "records" ("id","hours") VALUES(1,2.5);
+CREATE TRIGGER trg_records_nodelete BEFORE DELETE ON records
+BEGIN
+  SELECT RAISE(ABORT, 'records are kept; never deleted');
+END;
+CREATE INDEX idx_records_hours ON records(hours);
+`;
+    const r = prepare(dump);
+    expect(r.log).toMatch(/^ok: 5 statements \(1 tables, 1 inserts, 1 indexes, 1 triggers;/);
+    const order = r.out.trim().split(/\n(?=PRAGMA|CREATE|INSERT)/).map((x) => x.split(' ').slice(0, 2).join(' '));
+    expect(order).toEqual(['PRAGMA defer_foreign_keys=TRUE;', 'CREATE TABLE', 'INSERT INTO', 'CREATE INDEX', 'CREATE TRIGGER']);
+    expect(r.out).toContain("BEGIN\n  SELECT RAISE(ABORT, 'records are kept; never deleted');\nEND;");
+    const db = new DatabaseSync(':memory:');
+    db.exec(r.out);
+    expect(db.prepare('SELECT hours FROM records').get()).toEqual({ hours: 2.5 });
+    expect(() => db.exec('DELETE FROM records')).toThrow(/never deleted/);
+    db.close();
   });
 });

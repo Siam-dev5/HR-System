@@ -69,8 +69,10 @@ export async function startHarness(): Promise<Harness> {
   };
   const sql = (command: string) => sqlEach(command).flat();
 
-  // a port the OS reports free: parallel test files must never share (or probe) another file's server
-  const port = await new Promise<number>((res, rej) => {
+  // a port the OS reports free: parallel test files must never share (or probe) another file's server. The port is
+  // free when asked but another process can take it before wrangler binds it (time of check vs time of use): wrangler
+  // then exits with "Address already in use" and the start is retried on a new port (any other failure is raised).
+  const freePort = () => new Promise<number>((res, rej) => {
     const srv = createServer().once('error', rej);
     srv.listen(0, '127.0.0.1', () => {
       const p = (srv.address() as { port: number }).port;
@@ -78,32 +80,56 @@ export async function startHarness(): Promise<Harness> {
     });
   });
   const key = randomBytes(32).toString('base64');
-  const child: ChildProcess = spawn(
-    process.execPath,
-    [WRANGLER, 'dev', '--local', '--port', String(port), '--ip', '127.0.0.1', '--persist-to', persist, '--var', `MFA_ENCRYPTION_KEY:${key}`, '--show-interactive-dev-session=false', '--log-level', 'warn'],
-    { cwd: ROOT, env: { ...process.env, CI: '1' }, stdio: ['ignore', 'pipe', 'pipe'] },
-  );
-  let log = '';
-  child.stdout?.on('data', (d) => (log += String(d)));
-  child.stderr?.on('data', (d) => (log += String(d)));
-  // diagnostics only: if the dev server dies or logs an error mid-run, the reason reaches the test output
   let stopping = false;
-  child.on('exit', (code) => {
-    if (!stopping) process.stderr.write(`[harness] wrangler dev (port ${port}) exited unexpectedly, code ${code}:
+  let child!: ChildProcess;
+  let baseUrl!: string;
+  // the log and port of the server that started (read by stop())
+  let serverLog = () => '';
+  let serverPort = 0;
+  for (let attempt = 1; ; attempt++) {
+    const port = await freePort();
+    const proc: ChildProcess = spawn(
+      process.execPath,
+      [WRANGLER, 'dev', '--local', '--port', String(port), '--ip', '127.0.0.1', '--persist-to', persist, '--var', `MFA_ENCRYPTION_KEY:${key}`, '--show-interactive-dev-session=false', '--log-level', 'warn'],
+      { cwd: ROOT, env: { ...process.env, CI: '1' }, stdio: ['ignore', 'pipe', 'pipe'] },
+    );
+    let log = '';
+    proc.stdout?.on('data', (d) => (log += String(d)));
+    proc.stderr?.on('data', (d) => (log += String(d)));
+    // diagnostics only: if the dev server dies or logs an error mid-run, the reason reaches the test output
+    proc.on('exit', (code) => {
+      if (!stopping && proc === child) process.stderr.write(`[harness] wrangler dev (port ${port}) exited unexpectedly, code ${code}:
 ${log.slice(-4000)}
 `);
-  });
-  const baseUrl = `http://127.0.0.1:${port}`;
-  const started = Date.now();
-  for (;;) {
-    try {
-      const r = await fetch(`${baseUrl}/api/health`);
-      if (r.ok) break;
-    } catch {
-      /* not up yet */
+    });
+    const url = `http://127.0.0.1:${port}`;
+    const started = Date.now();
+    let up = false;
+    for (;;) {
+      try {
+        const r = await fetch(`${url}/api/health`);
+        if (r.ok) {
+          up = true;
+          break;
+        }
+      } catch {
+        /* not up yet */
+      }
+      if (Date.now() - started > 120_000 || proc.exitCode !== null) break;
+      await new Promise((r) => setTimeout(r, 500));
     }
-    if (Date.now() - started > 120_000 || child.exitCode !== null) throw new Error(`wrangler dev did not start:\n${log}`);
-    await new Promise((r) => setTimeout(r, 500));
+    if (up) {
+      child = proc;
+      baseUrl = url;
+      serverLog = () => log;
+      serverPort = port;
+      break;
+    }
+    const portTaken = proc.exitCode !== null && /Address already in use/i.test(log);
+    if (!portTaken || attempt >= 3) throw new Error(`wrangler dev did not start (attempt ${attempt}, port ${port}):
+${log}`);
+    process.stderr.write(`[harness] port ${port} was taken before wrangler dev bound it; retrying on a new port (attempt ${attempt + 1})
+`);
   }
 
   const r2Has = (key: string) => {
@@ -124,7 +150,8 @@ ${log.slice(-4000)}
     r2Has,
     stop: async () => {
       stopping = true;
-      if (/error|exception|crash/i.test(log)) process.stderr.write(`[harness] wrangler dev (port ${port}) logged:
+      const log = serverLog();
+      if (/error|exception|crash/i.test(log)) process.stderr.write(`[harness] wrangler dev (port ${serverPort}) logged:
 ${log.slice(-4000)}
 `);
       if (child.pid) {

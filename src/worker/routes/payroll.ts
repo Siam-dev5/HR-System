@@ -1,4 +1,6 @@
 import { Hono } from 'hono';
+import { assertSelectionApprovable, notReadyError, selectionCalcStatements, selectionForCalculation, selectionReadiness } from '../lib/payroll-selection';
+import { assertPayrollCompanies, issueCode, issueMessage, payrollCompanyIssues } from '../lib/company-detection';
 import { approvalBody, approvalNote, checkMakerChecker } from '../lib/approval';
 import type { Context } from 'hono';
 import type { AppEnv } from '../env';
@@ -15,7 +17,9 @@ import { companyScope, requireCompany } from '../lib/companies';
 import { advancePeriods, assertCalculable, coveringMonthly, sameScope, computePeriod, type ComputedSlip } from '../lib/payroll-engine';
 import { verifyStepUp } from '../lib/step-up';
 import { clearHold, holdsEnabled, scanHolds, type ScanResult } from '../lib/attendance-holds';
-import { HOLD_KIND_LABEL, type HoldKind } from '../../shared/attendance-holds';
+import { CLEARABLE_KINDS, HOLD_KIND_LABEL, type HoldKind } from '../../shared/attendance-holds';
+import { DIFFERENCE_LABEL, payDifferences, type DifferenceCode, type EmployeeAggregate } from '../../shared/attendance-daily';
+import { assertAttendanceCurrent, attendanceVersion, dailyState, loadDaily, snapshotOf, snapshotStatements, watermarkSql, type DailyState } from '../lib/attendance-daily';
 import { can, currentUser, requireAuth, requirePerm, requirePeriodAdmin, requireSuperAdmin } from '../auth';
 
 // ---- Company scope ------------------------------------------------------------------------------
@@ -237,12 +241,25 @@ payrollRoutes.post('/periods/:id/calculate', requirePerm('payroll.calculate'), a
     throw new HttpError(409, 'legacy_recalculation', `งวด ${p.code} มีสลิป ${p.legacy_slips} รายการที่คำนวณด้วยเวอร์ชันก่อนหน้า (Legacy) การคำนวณใหม่ใช้กติกาปัจจุบันและยอดอาจเปลี่ยน ต้องยืนยันการคำนวณใหม่อย่างชัดเจน`);
   }
   await assertCalculable(db, p);
+  // P3: every employee the period pays belongs to one verified company — the period's — for every paid day (the
+  // payslips being replaced are not checked)
+  await assertPayrollCompanies(db, p, false);
   const forced = p.reopened_from ? await requireForce(c, p, 'period.force_recalculate') : null;
-  const slips = await computePeriod(db, p);
+  // P4: every selected employee must be payable (eligible, or a review case HR confirmed); the engine pays exactly them
+  const selection = await selectionForCalculation(db, p);
+  const slips = await computePeriod(db, p, null, selection.engineIds);
   const version = p.calc_version + 1;
   // attendance review (P1): scanned before the payslips are written, so a hold resolved by this scan is not newer than
   // the calculation; holds never change the figures (approval is what they block)
-  const holds: ScanResult | null = (await holdsEnabled(db, p)) ? await scanHolds(db, p, user.id) : null;
+  const reviewed = await holdsEnabled(db, p);
+  const holds: ScanResult | null = reviewed ? await scanHolds(db, p, user.id) : null;
+  // daily attendance (P2): validated, aggregated and versioned from one read, stored with this calc_version. Read
+  // again just before writing: a change in between (correction, import, leave…) refuses the calculation instead of
+  // storing a snapshot that is already stale; the revision watermark guards the batch itself.
+  const daily: DailyState | null = reviewed ? await dailyState(db, p) : null;
+  if (daily && (await attendanceVersion((await loadDaily(db, p, daily.input.today)).input, p)) !== daily.version) {
+    throw new HttpError(409, 'attendance_changed_during_calculation', 'ข้อมูลเวลาทำงานเปลี่ยนระหว่างการคำนวณ กรุณาคำนวณใหม่อีกครั้ง');
+  }
 
   // the period must still be the one that was read (not approved / recalculated meanwhile): otherwise nothing is written,
   // so a recalculation can never replace payslips that were approved, reviewed or signed off in the meantime
@@ -250,6 +267,12 @@ payrollRoutes.post('/periods/:id/calculate', requirePerm('payroll.calculate'), a
     guard(db, "EXISTS (SELECT 1 FROM payroll_periods WHERE id = ? AND status IN ('draft', 'calculated') AND calc_version = ? AND deleted_at IS NULL)", p.id, p.calc_version),
     ...archiveSlips(db, p.id, 'recalculate', user.id, crypto.randomUUID()), db.prepare('DELETE FROM payslips WHERE period_id = ?').bind(p.id),
   ];
+  if (daily) {
+    stmts.push(
+      db.prepare(`SELECT CASE WHEN ${watermarkSql(1)} = ?3 THEN 1 ELSE json('${GUARD_FAILED}') END AS ok`).bind(p.start_date, p.end_date, daily.watermark),
+      ...snapshotStatements(db, p.id, version, daily, user.id),
+    );
+  }
   let totalNet = 0;
   for (const s of slips) {
     const r = s.pay;
@@ -263,6 +286,8 @@ payrollRoutes.post('/periods/:id/calculate', requirePerm('payroll.calculate'), a
         r.ewfEmployee, r.ewfEmployer, s.ewf.employeeRate, s.ewf.employerRate, s.ewf.status, s.employee.company_id, r.advance, JSON.stringify(s.calc), version),
     );
   }
+  // P4: the selection read is still the current one; record the version used and who was / was not paid
+  stmts.push(...selectionCalcStatements(db, p, version, selection, new Set(slips.map((s) => s.employee.id)), GUARD_FAILED));
   // holiday work paid by these slips is locked to the period (released by "reopen"); the check fails the whole batch
   // when a record changed between the calculation and this write, so a slip never pays an unlocked record
   const holidayIds = JSON.stringify(slips.flatMap((s) => s.holidayRecordIds));
@@ -278,7 +303,7 @@ payrollRoutes.post('/periods/:id/calculate', requirePerm('payroll.calculate'), a
   const superseded = await activeAccounting(db, p.id);
   stmts.push(...supersedeAccounting(db, p.id, user.id, `recalculated: version ${p.calc_version} → ${version}`));
   await runGuarded(db, stmts, 'งวดนี้ถูกอนุมัติหรือคำนวณใหม่ระหว่างดำเนินการ กรุณาโหลดใหม่');
-  await audit(c, 'payroll.calculated', 'payroll_periods', p.id, { employees: slips.length, version, kind: p.kind, archivedSlips: p.employees, archivedTotalNet: p.total_net, ...(superseded ? { accountingSuperseded: superseded } : {}), ...(holds ? { attendanceHolds: holds } : {}), ...(p.legacy_slips ? { replacedLegacySlips: p.legacy_slips, legacyTotalNet: p.total_net } : {}), ...(forced ? { forced: true, reopenedFrom: p.reopened_from, reason: forced } : {}) });
+  await audit(c, 'payroll.calculated', 'payroll_periods', p.id, { employees: slips.length, version, kind: p.kind, archivedSlips: p.employees, archivedTotalNet: p.total_net, ...(superseded ? { accountingSuperseded: superseded } : {}), ...(holds ? { attendanceHolds: holds } : {}), ...(daily ? { attendance: { version: daily.version, judgedThrough: daily.judgedThrough, records: daily.validation.counts } } : {}), ...(p.legacy_slips ? { replacedLegacySlips: p.legacy_slips, legacyTotalNet: p.total_net } : {}), ...(forced ? { forced: true, reopenedFrom: p.reopened_from, reason: forced } : {}) });
   return c.json({ ...(await period(db, p.id, scope)), totalNet: round2(totalNet) });
 });
 
@@ -318,6 +343,10 @@ payrollRoutes.post('/periods/:id/approve', requirePerm('payroll.approve'), async
   const pending = await pendingOt(db, p.id);
   if (pending) throw conflict(`มี OT จาก Feishu รอ HR ตรวจสอบ ${pending} รายการ ต้องยืนยันหรือปฏิเสธก่อนอนุมัติ`);
   if (p.kind === 'mid_month') await assertCalculable(db, p);
+  // P3: a transfer after the calculation (or a held assignment) is not approved through — recalculate
+  await assertPayrollCompanies(db, p);
+  // P4: the selection is the one calculated, and every selected employee is still payable
+  await assertSelectionApprovable(db, p);
   // attendance review (P1): a fresh scan; any open hold refuses approval, and a hold resolved after the calculation
   // (the source data changed, e.g. a leave was approved) needs a recalculation first, since the pay may differ
   if (await holdsEnabled(db, p)) {
@@ -332,6 +361,9 @@ payrollRoutes.post('/periods/:id/approve', requirePerm('payroll.approve'), async
     if (changed?.n) {
       throw new HttpError(409, 'attendance_changed_recalculate', `ข้อมูลเวลาทำงาน/การลาเปลี่ยนหลังการคำนวณครั้งล่าสุด (${changed.n} รายการ) ต้องคำนวณงวดใหม่ก่อนอนุมัติ`);
     }
+    // P2: the calculation must have been made from the daily attendance as it is now (any change, even one that
+    // opened or resolved no hold, needs a recalculation — a new calc_version)
+    await assertAttendanceCurrent(db, p, 'approval');
   }
   // figures ACC returned cannot be approved again unchanged: HR reopens and recalculates (a new calc_version)
   const returned = 'EXISTS (SELECT 1 FROM payroll_accounting_reviews r WHERE r.period_id = payroll_periods.id AND r.calc_version = payroll_periods.calc_version AND r.status = \'returned\')';
@@ -431,6 +463,8 @@ payrollRoutes.post('/periods/:id/accounting-signoff', requirePerm('payroll.accou
   if (review.staff_reviewed_by === user.id) throw forbidden('ผู้ตรวจสอบ ACC Staff ต้องไม่ใช่ผู้ลงนาม ACC Manager');
   if (p.approved_by === user.id) throw forbidden('ผู้อนุมัติฝั่ง HR ต้องไม่ใช่ผู้ลงนาม ACC Manager');
   if (p.calculated_by === user.id) throw forbidden('ผู้คำนวณเงินเดือนต้องไม่ใช่ผู้ลงนาม ACC Manager');
+  // P2: nothing may have changed inside the days the approved calculation judged (returning to HR stays possible)
+  if (decision === 'signed_off' && (await holdsEnabled(db, p))) await assertAttendanceCurrent(db, p, 'coverage');
   const status = decision;
   // one transaction: the decision (only from 'reviewed', claimed with a token so a duplicate request acts once),
   // the event, and for a return the period back to HR (approved → calculated, approval cleared) so HR can reopen
@@ -535,6 +569,9 @@ payrollRoutes.post('/attendance-holds/:holdId/clear', requirePerm('payroll_hold.
   if (!hold || !(scope.all || scope.ids.includes(hold.company_id))) throw notFound('ไม่พบรายการ Attendance Hold');
   const p = await period(db, hold.period_id, scope);
   if (p.status !== 'draft' && p.status !== 'calculated') throw conflict('งวดนี้อนุมัติแล้ว จึงเปลี่ยนผลการตรวจสอบเวลาทำงานไม่ได้');
+  if (!CLEARABLE_KINDS.has(hold.kind)) {
+    throw new HttpError(409, 'attendance_invalid_correct_first', 'บันทึกเวลาที่ไม่ถูกต้องยืนยันข้ามไม่ได้ ต้องแก้ไขบันทึกเวลา (POST /api/attendance/records/:id/correct) แล้วตรวจสอบใหม่');
+  }
   const body = await readJson(c);
   const reason = str(body, 'reason', { required: true, max: 500 }) as string;
   if (reason.trim().length < 5) throw badRequest('กรุณาระบุเหตุผลอย่างน้อย 5 ตัวอักษร');
@@ -545,6 +582,55 @@ payrollRoutes.post('/attendance-holds/:holdId/clear', requirePerm('payroll_hold.
   return c.json({ ok: true, id: hold.id, status: 'cleared' });
 });
 
+// ---- Daily attendance (P2) -------------------------------------------------------------------------
+// Live validation / aggregation of the period's daily records (scoped to the user's companies) compared with the
+// snapshot stored for the current calc_version, and the stored snapshot of any calc_version (append-only history).
+
+const scopedAggregates = (rows: readonly EmployeeAggregate[], scope: PayrollScope) => rows.filter((a) => scope.all || scope.ids.includes(a.company_id));
+
+payrollRoutes.get('/periods/:id/attendance', requirePerm('payroll_preview.view'), async (c) => {
+  const db = c.env.DB;
+  const scope = await payrollScope(c);
+  const p = await period(db, intParam(c.req.param('id')), scope);
+  const enabled = await holdsEnabled(db, p);
+  const state = await dailyState(db, p);
+  const snap = p.calc_version > 0 ? await snapshotOf(db, p.id, p.calc_version) : null;
+  const visible = (x: { company_id: number }) => scope.all || scope.ids.includes(x.company_id);
+  return c.json({
+    period: { id: p.id, code: p.code, status: p.status, kind: p.kind, calc_version: p.calc_version },
+    enabled,
+    version: state.version,
+    judgedThrough: state.judgedThrough,
+    snapshot: snap ? { calc_version: snap.calc_version, attendance_version: snap.attendance_version, judged_through: snap.judged_through, created_at: snap.created_at, current: snap.attendance_version === state.version } : null,
+    // company-wide counts only when the user sees every company
+    counts: scope.all ? state.validation.counts : null,
+    records: state.validation.records.filter(visible).filter((v) => v.status !== 'valid').map((v) => ({ id: v.record.id, employee_id: v.record.employee_id, work_date: v.record.work_date, status: v.status, confirmed: v.confirmed, counted: v.counted, issues: v.issues })),
+    dayIssues: state.validation.days.filter(visible),
+    aggregates: scopedAggregates(state.aggregates, scope),
+  });
+});
+
+payrollRoutes.get('/periods/:id/attendance-snapshots/:calcVersion', requirePerm('payroll_preview.view'), async (c) => {
+  const db = c.env.DB;
+  const scope = await payrollScope(c);
+  const p = await period(db, intParam(c.req.param('id')), scope);
+  const snap = await snapshotOf(db, p.id, intParam(c.req.param('calcVersion'), 'calcVersion'));
+  if (!snap) throw notFound('ไม่พบข้อมูลเวลาทำงานของ Calculation Version นี้');
+  const { results } = await db
+    .prepare(`SELECT employee_id, company_id, aggregate_json FROM payroll_attendance_snapshot_rows WHERE snapshot_id = ? AND ${scopeSql('company_id', scope)} ORDER BY employee_id`)
+    .bind(snap.id)
+    .all<{ employee_id: number; company_id: number; aggregate_json: string }>();
+  return c.json({
+    period: { id: p.id, code: p.code },
+    calc_version: snap.calc_version,
+    attendance_version: snap.attendance_version,
+    judged_through: snap.judged_through,
+    created_at: snap.created_at,
+    totals: scope.all ? (JSON.parse(snap.totals_json) as unknown) : null,
+    rows: results.map((r) => JSON.parse(r.aggregate_json) as EmployeeAggregate),
+  });
+});
+
 payrollRoutes.post('/periods/:id/publish', requirePerm('payroll.publish'), async (c) => {
   const user = currentUser(c);
   const db = c.env.DB;
@@ -552,6 +638,8 @@ payrollRoutes.post('/periods/:id/publish', requirePerm('payroll.publish'), async
   if (p.status !== 'approved') throw conflict('เผยแพร่ได้เฉพาะงวดที่อนุมัติแล้ว');
   const accounting = await db.prepare("SELECT status FROM payroll_accounting_reviews WHERE period_id = ? AND calc_version = ?").bind(p.id, p.calc_version).first<{ status: string }>();
   if (accounting?.status !== 'signed_off') throw conflict('ยังเผยแพร่ไม่ได้: ต้องผ่านการตรวจสอบ ACC Staff และลงนาม ACC Manager สำหรับ Calculation Version ปัจจุบันก่อน');
+  // P2: the signed-off figures must still match the daily attendance they were calculated from
+  if (await holdsEnabled(db, p)) await assertAttendanceCurrent(db, p, 'coverage');
   const res = await db.batch([
     db.prepare(`UPDATE payroll_periods SET status = 'published', published_by = ?, published_at = datetime('now'), updated_at = datetime('now'), updated_by = ? WHERE id = ? AND status = 'approved' AND deleted_at IS NULL
          AND EXISTS (SELECT 1 FROM payroll_accounting_reviews ar WHERE ar.period_id = payroll_periods.id AND ar.calc_version = payroll_periods.calc_version AND ar.status = 'signed_off')`).bind(user.id, user.id, p.id),
@@ -980,6 +1068,43 @@ async function payrollCompany(c: Context<AppEnv>): Promise<CompanyOption | null>
   return own;
 }
 
+/**
+ * Daily attendance in the Preview (P2): an error when the calculation in force no longer matches the daily attendance
+ * (recalculate), and warnings where the daily aggregation differs from what the engine used for money. Warnings never
+ * change an amount (D1: no formula change); they are there for HR / ACC to see the difference.
+ */
+async function dailyIssues(db: D1Database, p: PeriodRow, source: 'snapshot' | 'live', companyId: number | null, scope: PayrollScope, paid: ReadonlyMap<number, PayslipCalc['attendance']>): Promise<PreviewIssue[]> {
+  const out: PreviewIssue[] = [];
+  let aggregates: EmployeeAggregate[];
+  if (source === 'snapshot') {
+    try {
+      await assertAttendanceCurrent(db, p, p.status === 'calculated' ? 'approval' : 'coverage');
+    } catch (e) {
+      if (!(e instanceof HttpError)) throw e;
+      out.push({ level: 'error', code: e.code, message: e.message, count: 1 });
+    }
+    // the aggregation the calculation in force used (not today's data)
+    const snap = await snapshotOf(db, p.id, p.calc_version);
+    const { results } = snap
+      ? await db.prepare('SELECT aggregate_json FROM payroll_attendance_snapshot_rows WHERE snapshot_id = ?').bind(snap.id).all<{ aggregate_json: string }>()
+      : { results: [] };
+    aggregates = results.map((r) => JSON.parse(r.aggregate_json) as EmployeeAggregate);
+  } else {
+    aggregates = (await dailyState(db, p)).aggregates;
+  }
+  const shown = aggregates.filter((a) => (companyId === null || a.company_id === companyId) && (scope.all || scope.ids.includes(a.company_id)));
+  const byCode = new Map<DifferenceCode, number>();
+  for (const a of shown) {
+    const att = paid.get(a.employee_id);
+    if (!att) continue;
+    for (const code of payDifferences(a, { source: att.source, otHours: att.otHours, unpaidLeaveDays: att.unpaidLeaveDays, workDays: att.source === 'feishu' ? att.workDays : null })) {
+      byCode.set(code, (byCode.get(code) ?? 0) + 1);
+    }
+  }
+  for (const [code, n] of byCode) out.push({ level: 'warning', code: `attendance_${code}`, message: `${DIFFERENCE_LABEL[code]} (ยอดเงินไม่เปลี่ยน ต้องตรวจสอบ)`, count: n });
+  return out;
+}
+
 async function buildPreview(c: Context<AppEnv>): Promise<PayrollPreviewResponse> {
   const db = c.env.DB;
   const user = currentUser(c);
@@ -991,11 +1116,17 @@ async function buildPreview(c: Context<AppEnv>): Promise<PayrollPreviewResponse>
   let rows: Array<Record<string, string | number | null>>;
   let source: 'snapshot' | 'live';
   const usedImports = new Set<number>();
+  // what the engine used per employee (compared with the daily attendance, P2)
+  const paid = new Map<number, PayslipCalc['attendance']>();
   let missingBank: number;
 
   if (p.status === 'draft') {
     source = 'live';
-    const slips: ComputedSlip[] = await computePeriod(db, p, companyId);
+    // P4: a changed list previews the payable employees only (blocked / unconfirmed review cases are listed as issues,
+    // never computed), exactly what a calculation would pay
+    const ready = await selectionReadiness(db, p);
+    const slips: ComputedSlip[] = await computePeriod(db, p, companyId, ready.selection.hasRows ? ready.evaluated.filter((x) => x.payable).map((x) => x.employee_id) : undefined);
+    for (const s of slips) paid.set(s.employee.id, s.calc.attendance);
     // employee_id identifies the row for selection (not a column: the layout and the export never show it)
     rows = slips.map((s) => ({ employee_id: s.employee.id, ...previewRow(s.employee, { ...s.pay, ewf_employee: s.pay.ewfEmployee, ewf_employer: s.pay.ewfEmployer, unpaid_leave: s.pay.unpaidLeave, ot_amount: s.pay.otAmount }, s.calc, pvdCode) }));
     missingBank = slips.filter((s) => !s.employee.bank_account).length;
@@ -1014,6 +1145,7 @@ async function buildPreview(c: Context<AppEnv>): Promise<PayrollPreviewResponse>
     rows = results.map((r) => {
       const calc = r.calc_json ? (JSON.parse(r.calc_json) as PayslipCalc) : null;
       if (calc?.attendance.importId) usedImports.add(calc.attendance.importId);
+      if (calc) paid.set(r.employee_id, calc.attendance);
       return { employee_id: r.employee_id, ...previewRow(r, { ...r, lines: JSON.parse(r.lines_json) as SlipLike['lines'] }, calc, pvdCode) };
     });
     missingBank = results.filter((r) => !r.bank_account).length;
@@ -1037,6 +1169,18 @@ async function buildPreview(c: Context<AppEnv>): Promise<PayrollPreviewResponse>
   if (source === 'snapshot') {
     const changed = active.filter((a) => !usedImports.has(a.id)).length + [...usedImports].filter((id) => !active.some((a) => a.id === id)).length;
     if (changed) issues.push({ level: 'error', code: 'attendance_changed', message: 'ข้อมูลเวลาทำงานถูกนำเข้าใหม่หรือย้อนกลับหลังการคำนวณ ต้องคำนวณงวดใหม่', count: changed });
+  }
+  if (await holdsEnabled(db, p)) issues.push(...(await dailyIssues(db, p, source, companyId, await payrollScope(c), paid)));
+  // P3: employees whose company is unresolved, in conflict or moved within the period block calculation and approval
+  const viewScope = await payrollScope(c);
+  const companyIssues = (await payrollCompanyIssues(db, p)).filter((i) => (companyId === null || i.company_id === companyId) && (viewScope.all || viewScope.ids.includes(i.company_id)));
+  if (companyIssues.length) issues.push({ level: 'error', code: issueCode(companyIssues), message: issueMessage(companyIssues), count: companyIssues.length });
+  // P4: selected employees who cannot be paid yet (review / blocked), and a selection changed since the calculation
+  const ready = await selectionReadiness(db, p);
+  const notReady = ready.notReady.filter((x) => (companyId === null || x.company_id === companyId) && (viewScope.all || viewScope.ids.includes(x.company_id)));
+  if (notReady.length) issues.push({ level: 'error', code: 'selection_not_ready', message: notReadyError(notReady).message, count: notReady.length });
+  if (source === 'snapshot' && ready.version.version > 0 && ready.version.calculated_version !== ready.version.version) {
+    issues.push({ level: 'error', code: 'selection_changed_recalculate', message: 'รายชื่อพนักงานของงวดเปลี่ยนหลังการคำนวณ ต้องคำนวณงวดใหม่', count: 1 });
   }
   const negative = rows.filter((r) => typeof r.net_pay === 'number' && r.net_pay < 0).length;
   if (negative) issues.push({ level: 'error', code: 'net_negative', message: 'มีพนักงานที่เงินได้สุทธิติดลบ', count: negative });

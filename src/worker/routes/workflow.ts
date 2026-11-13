@@ -1,4 +1,5 @@
 import { Hono } from 'hono';
+import { assertNotLocked, attendanceDbError, changeValues, newChange } from '../lib/attendance-records';
 import type { Context } from 'hono';
 import type { AppEnv, AuthUser } from '../env';
 import type { CrudModule } from '../../shared/modules';
@@ -169,7 +170,14 @@ workflowRoutes.post('/:id/decide', async (c) => {
     if (decision === 'approved' && req.type === 'time_correction') {
       // Apply the approved correction to that day's attendance and re-evaluate lateness against the shift in force
       // that day (schedule entry, shift group, then the legacy assignment; default start time without a shift).
-      const tc = await db.prepare('SELECT employee_id, work_date, clock_in FROM time_corrections WHERE id = ?').bind(req.ref_id).first<{ employee_id: number; work_date: string; clock_in: string | null }>();
+      const tc = await db.prepare('SELECT employee_id, work_date, clock_in, reason FROM time_corrections WHERE id = ?').bind(req.ref_id).first<{ employee_id: number; work_date: string; clock_in: string | null; reason: string | null }>();
+      // P2: the same rules as an HR correction — the day must not be in an approved / published payroll period, and the
+      // change is recorded as a revision (the request's reason, reference TC-<id>, the approver as actor)
+      if (tc) {
+        const emp = await db.prepare('SELECT company_id FROM employees WHERE id = ?').bind(tc.employee_id).first<{ company_id: number }>();
+        if (emp) await assertNotLocked(db, emp.company_id, [tc.work_date]);
+      }
+      const change = newChange('time_correction', tc?.reason ?? null, `TC-${req.ref_id}`);
       let status = 'present';
       let shiftId: number | null = null;
       if (tc?.clock_in) {
@@ -181,22 +189,28 @@ workflowRoutes.post('/:id/decide', async (c) => {
       }
       stmts.push(
         db.prepare(
-          `INSERT INTO attendance_records (employee_id, work_date, clock_in, clock_out, status, source, note, shift_id, created_by, updated_by)
-           SELECT tc.employee_id, tc.work_date, tc.clock_in, tc.clock_out, ?, 'manual', 'แก้ไขเวลา TC-' || tc.id, ?, ?, ?
+          `INSERT INTO attendance_records (employee_id, work_date, clock_in, clock_out, status, source, note, shift_id, created_by, updated_by, change_op, change_channel, change_reason, change_reference)
+           SELECT tc.employee_id, tc.work_date, tc.clock_in, tc.clock_out, ?, 'manual', 'แก้ไขเวลา TC-' || tc.id, ?, ?, ?, ?, ?, ?, ?
            FROM time_corrections tc WHERE tc.id = ?
            ON CONFLICT (employee_id, work_date) DO UPDATE SET
              clock_in = COALESCE(excluded.clock_in, attendance_records.clock_in),
              clock_out = COALESCE(excluded.clock_out, attendance_records.clock_out),
              status = CASE WHEN excluded.clock_in IS NULL THEN attendance_records.status ELSE excluded.status END,
              shift_id = CASE WHEN excluded.clock_in IS NULL THEN attendance_records.shift_id ELSE excluded.shift_id END,
-             source = 'manual', note = excluded.note, updated_at = datetime('now'), updated_by = excluded.updated_by`,
-        ).bind(status, shiftId, user.id, user.id, req.ref_id),
+             source = 'manual', note = excluded.note, updated_at = datetime('now'), updated_by = excluded.updated_by,
+             change_op = excluded.change_op, change_channel = excluded.change_channel, change_reason = excluded.change_reason, change_reference = excluded.change_reference`,
+        ).bind(status, shiftId, user.id, user.id, ...changeValues(change), req.ref_id),
       );
     }
   } else {
     stmts.push(db.prepare("UPDATE workflow_requests SET current_step = ?, updated_at = datetime('now') WHERE id = ?").bind(next.step, id));
   }
-  await db.batch(stmts);
+  try {
+    await db.batch(stmts);
+  } catch (e) {
+    attendanceDbError(e);
+    throw e;
+  }
 
   const m = crudModule(req.module_key);
   if (final) {

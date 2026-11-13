@@ -1,6 +1,8 @@
 // Attendance holds (P1) in D1: loads the inputs of detectHolds (shared/attendance-holds.ts) for a payroll period,
 // and keeps payroll_attendance_holds in step with what a scan finds. Nothing here touches payslips or money.
 //
+// Kinds: absent / pending_leave / missing_attendance (P1, shared/attendance-holds.ts) and invalid_record /
+// pending_review (P2 validation of the daily records, shared/attendance-daily.ts); all share this lifecycle.
 // Lifecycle of one hold (period + employee + kind + date), each change recorded in payroll_attendance_hold_events:
 //   found, no row                         → open      ('opened')
 //   open, found again                     → open      (source refreshed, no event)
@@ -12,9 +14,9 @@
 // update, so concurrent scans never open, resolve or record a change twice; the events of a scan are exactly the rows
 // carrying its token.
 import { detectHolds, holdKey, holdsApply, type DetectedHold, type HoldInput, type ScheduleKind } from '../../shared/attendance-holds';
-import { applicable } from '../routes/holidays';
+import { validateDaily, validationHolds, type DailyInput } from '../../shared/attendance-daily';
+import { loadDaily } from './attendance-daily';
 import { loadSettings, settingText } from './settings';
-import { resolveDays } from './shift-resolver';
 import { bangkokNow } from './time';
 
 export interface HoldPeriod {
@@ -34,58 +36,25 @@ export async function holdsEnabled(db: D1Database, p: HoldPeriod): Promise<boole
   return holdsApply(p, await attendanceReviewFrom(db));
 }
 
-/** Employees the period pays: the same selection as computePeriod (lib/payroll-engine). */
-async function periodEmployees(db: D1Database, p: HoldPeriod): Promise<HoldInput['employees']> {
-  const { results } = await db
-    .prepare(
-      `SELECT e.id, e.company_id, e.hire_date, e.termination_date FROM employees e
-       WHERE e.hire_date <= ?1 AND e.base_salary IS NOT NULL AND e.base_salary > 0
-         AND (e.status IN ('active', 'probation') OR (e.status IN ('resigned', 'terminated') AND e.termination_date IS NOT NULL AND e.termination_date >= ?2))
-         AND (?3 IS NULL OR e.company_id = ?3)
-       ORDER BY e.id`,
-    )
-    .bind(p.end_date, p.start_date, p.company_id)
-    .all<{ id: number; company_id: number; hire_date: string; termination_date: string | null }>();
-  return results;
+/** Everything detectHolds needs for the period, read from D1 (the daily attendance load of P2, projected). */
+export async function holdInput(db: D1Database, p: HoldPeriod, today = bangkokNow().date): Promise<HoldInput> {
+  return toHoldInput((await loadDaily(db, p, today)).input);
 }
 
-/** Everything detectHolds needs for the period, read from D1. */
-export async function holdInput(db: D1Database, p: HoldPeriod, today = bangkokNow().date): Promise<HoldInput> {
-  const employees = await periodEmployees(db, p);
-  const ids = employees.map((e) => e.id);
-  const from = p.start_date;
-  const to = p.end_date;
-  const empty: HoldInput = { periodStart: from, periodEnd: to, today, employees, schedule: new Map(), calendars: new Map(), attendance: [], leaves: [], exemptions: [] };
-  if (!ids.length) return empty;
-  const json = JSON.stringify(ids);
-  const [days, attendance, requests, imports, exemptions] = await Promise.all([
-    resolveDays(db, ids, from, to),
-    db.prepare('SELECT id, employee_id, work_date, status, clock_in, clock_out FROM attendance_records WHERE employee_id IN (SELECT value FROM json_each(?1)) AND work_date BETWEEN ?2 AND ?3')
-      .bind(json, from, to).all<HoldInput['attendance'][number]>(),
-    db.prepare("SELECT id, employee_id, start_date, end_date, status FROM leave_requests WHERE employee_id IN (SELECT value FROM json_each(?1)) AND start_date <= ?3 AND end_date >= ?2 AND status IN ('approved', 'pending', 'rejected', 'cancelled')")
-      .bind(json, from, to).all<{ id: number; employee_id: number; start_date: string; end_date: string; status: 'approved' | 'pending' | 'rejected' | 'cancelled' }>(),
-    db.prepare(
-      `SELECT id, employee_id, start_date, end_date, approval_status AS status FROM leave_import_records
-       WHERE status IN ('valid', 'warning') AND employee_id IN (SELECT value FROM json_each(?1)) AND approval_status IN ('approved', 'pending', 'rejected', 'cancelled')
-         AND start_date IS NOT NULL AND end_date IS NOT NULL AND start_date <= ?3 AND end_date >= ?2`,
-    ).bind(json, from, to).all<{ id: number; employee_id: number; start_date: string; end_date: string; status: 'approved' | 'pending' | 'rejected' | 'cancelled' }>(),
-    db.prepare('SELECT employee_id, effective_from, effective_to, revoked_at FROM employee_attendance_exemptions WHERE employee_id IN (SELECT value FROM json_each(?1)) AND effective_from <= ?3 AND (effective_to IS NULL OR effective_to >= ?2)')
-      .bind(json, from, to).all<HoldInput['exemptions'][number]>(),
-  ]);
+/** The P1 view of the daily inputs: the same rows, without the P2 fields. */
+export function toHoldInput(d: DailyInput): HoldInput {
   const schedule = new Map<string, ScheduleKind>();
-  for (const [key, day] of days) schedule.set(key, day.kind);
-  const calendars = new Map<number, { weeklyRest: number[]; holidays: Set<string> }>();
-  for (const companyId of new Set(employees.map((e) => e.company_id))) {
-    const a = await applicable(db, companyId, from, to);
-    calendars.set(companyId, { weeklyRest: a.weeklyRest, holidays: new Set(a.holidays.map((h) => h.holiday_date)) });
-  }
+  for (const [key, day] of d.schedule) schedule.set(key, day.kind);
   return {
-    ...empty,
+    periodStart: d.periodStart,
+    periodEnd: d.periodEnd,
+    today: d.today,
+    employees: d.employees,
     schedule,
-    calendars,
-    attendance: attendance.results,
-    leaves: [...requests.results.map((l) => ({ ...l, source: 'request' as const })), ...imports.results.map((l) => ({ ...l, source: 'import' as const }))],
-    exemptions: exemptions.results,
+    calendars: d.calendars,
+    attendance: d.records.map((r) => ({ id: r.id, employee_id: r.employee_id, work_date: r.work_date, status: r.status, clock_in: r.clock_in, clock_out: r.clock_out })),
+    leaves: d.leaves.map((l) => ({ source: l.source, id: l.id, employee_id: l.employee_id, start_date: l.start_date, end_date: l.end_date, status: l.status })),
+    exemptions: d.exemptions,
   };
 }
 
@@ -103,7 +72,9 @@ const found = (param: number) => `(SELECT json_extract(j.value, '$.s') FROM json
 
 /** Runs a scan of the period and brings its holds up to date (see the lifecycle above). */
 export async function scanHolds(db: D1Database, p: HoldPeriod, actorId: number, today = bangkokNow().date): Promise<ScanResult> {
-  const detected: DetectedHold[] = detectHolds(await holdInput(db, p, today));
+  // P1 detection and the P2 validation of the daily records (invalid_record / pending_review) from one load
+  const { input } = await loadDaily(db, p, today);
+  const detected: DetectedHold[] = [...detectHolds(toHoldInput(input)), ...validationHolds(validateDaily(input))];
   const items = JSON.stringify(detected.map((h) => ({ k: holdKey(h), e: h.employee_id, c: h.company_id, kind: h.kind, d: h.work_date, s: JSON.stringify(h.source) })));
   const op = crypto.randomUUID();
   await db.batch([

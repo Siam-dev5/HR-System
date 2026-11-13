@@ -62,6 +62,7 @@ export async function renderPayroll(main: HTMLElement): Promise<void> {
                   : null,
                 can('payroll_preview.view') ? link(`/payroll/preview?period_id=${p.id}`, 'Preview', { class: 'btn small' }) : null,
                 p.status === 'approved' && can('payroll.publish') ? h('button', { class: 'btn small primary', onclick: () => void act(p, 'publish', 'เผยแพร่') }, 'เผยแพร่') : null,
+                can('payroll_selection.view') ? h('a', { class: 'btn small', href: `${basePath()}/payroll/selection?period_id=${p.id}` }, 'รายชื่อพนักงาน') : null,
                 p.employees ? link(`/payroll/payslips?period_id=${p.id}`, 'ดูสลิป', { class: 'btn small' }) : null,
                 p.employees && can('payroll.export') ? h('a', { class: 'btn small', href: `${basePath()}/api/payroll/periods/${p.id}/export.csv`, download: true }, 'Export') : null,
                 (p.status === 'approved' || p.status === 'published') && adminCan(PERIOD_ADMIN.reopen) ? h('button', { class: 'btn small', onclick: () => void adminDialog(p, 'reopen', reload) }, 'เปิดงวดที่ปิดแล้ว') : null,

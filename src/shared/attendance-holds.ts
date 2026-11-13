@@ -16,13 +16,19 @@
 // hold. An employee with no attendance and no leave of any status on any judged workday gets one 'missing_attendance'
 // hold for the period instead of one 'absent' hold per day. Days after `today` are never judged.
 
-export type HoldKind = 'absent' | 'pending_leave' | 'missing_attendance';
-export const HOLD_KINDS: readonly HoldKind[] = ['absent', 'pending_leave', 'missing_attendance'];
+// invalid_record / pending_review come from the daily attendance validation (P2, shared/attendance-daily.ts); they
+// share the lifecycle, the approval gate and the history of the holds detected here
+export type HoldKind = 'absent' | 'pending_leave' | 'missing_attendance' | 'invalid_record' | 'pending_review';
+export const HOLD_KINDS: readonly HoldKind[] = ['absent', 'pending_leave', 'missing_attendance', 'invalid_record', 'pending_review'];
 export const HOLD_KIND_LABEL: Record<HoldKind, string> = {
   absent: 'ขาดงาน (ไม่มีเวลาเข้างานและไม่มีใบลาที่อนุมัติ)',
   pending_leave: 'ใบลารออนุมัติ',
   missing_attendance: 'ไม่มีข้อมูลเวลาทำงานทั้งงวด',
+  invalid_record: 'บันทึกเวลาไม่ถูกต้อง (ต้องแก้ไขบันทึก)',
+  pending_review: 'บันทึกเวลาไม่ครบหรือขัดแย้ง (รอ HR ยืนยัน)',
 };
+/** Kinds HR may clear with a reason; an invalid record must be corrected instead. */
+export const CLEARABLE_KINDS: ReadonlySet<HoldKind> = new Set(['absent', 'pending_leave', 'missing_attendance', 'pending_review']);
 
 export interface HoldEmployee {
   id: number;

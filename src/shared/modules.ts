@@ -297,6 +297,9 @@ export const MODULES: readonly ModuleDef[] = [
   page('payroll', '/payroll', 'งวดเงินเดือน', 'payroll', 'payroll.view', '/api/payroll/periods'),
   page('payroll_preview', '/payroll/preview', 'Payroll Preview', 'payroll', 'payroll_preview.view', '/api/payroll/periods'),
   page('accounting_review', '/payroll/accounting-review', 'ACC ตรวจสอบและลงนาม', 'payroll', 'payroll.accounting.review', '/api/payroll/accounting/periods'),
+  page('payroll_selection', '/payroll/selection', 'รายชื่อพนักงานในงวด', 'payroll', 'payroll_selection.view', '/api/payroll-selection'),
+  page('employee_contracts', '/payroll/contracts', 'สัญญาจ้างพนักงาน', 'payroll', 'employee_contract.view', '/api/employee-contracts'),
+  page('pay_frequency', '/payroll/pay-frequency', 'รอบการจ่ายเงินเดือน', 'payroll', 'payroll.view', '/api/pay-frequency/companies'),
   page('payslips', '/payroll/payslips', 'สลิปเงินเดือน (HR)', 'payroll', 'payroll.view', '/api/payroll/payslips'),
   crud({
     key: 'pay_components', path: '/payroll/components', title: 'รายการเงินได้/เงินหัก', group: 'payroll', table: 'pay_components', description: 'Master รายการเงินได้และเงินหัก', labelExpr: codeName, codeField: 'code', defaultSort: 'code',
@@ -391,7 +394,7 @@ export function permissionCatalogue(): string[] {
   for (const p of PAGE_MODULES) perms.add(p.perm);
   for (const extra of ['payroll.calculate', 'payroll.approve', 'payroll.publish', 'payroll.export', 'workflow.approve', 'workflow.approve_any', 'reports.export',
     'attendance_import.create', 'attendance_import.update', 'ot_review.update', 'attendance_file.import', 'shift_groups.manage', 'shift_schedule.manage', 'payroll_preview.export', 'org_chart.update', 'org_chart.import', 'org_chart.export', 'payslip_ytd.view',
-    'payroll.accounting.review', 'payroll.accounting.review.submit', 'payroll.accounting.signoff', 'payroll_hold.resolve', 'holiday_calendar.create', 'holiday_calendar.update', 'holiday_calendar.delete', 'holiday_calendar.approve', 'holiday_calendar.import', 'holiday_calendar.export', 'attendance_exemption.view', 'attendance_exemption.manage', 'org_assignment.manage']) perms.add(extra);
+    'payroll.accounting.review', 'payroll.accounting.review.submit', 'payroll.accounting.signoff', 'payroll_hold.resolve', 'attendance.correct', 'company_mapping.view', 'company_mapping.manage', 'employee_company.transfer', 'payroll_selection.view', 'payroll_selection.manage', 'payroll_selection.override', 'employee_contract.view', 'employee_contract.manage', 'pay_frequency.manage', 'holiday_calendar.create', 'holiday_calendar.update', 'holiday_calendar.delete', 'holiday_calendar.approve', 'holiday_calendar.import', 'holiday_calendar.export', 'attendance_exemption.view', 'attendance_exemption.manage', 'org_assignment.manage']) perms.add(extra);
   for (const r of RESERVED_PERMISSIONS) perms.delete(r);
   return [...perms].sort();
 }

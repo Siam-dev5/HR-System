@@ -82,7 +82,7 @@ export async function previewTable(d: PayrollPreviewResponse, pid: string, visib
     if (support.state !== 'ready') return null;
     const id = idOf(r);
     const s = id !== null ? support.status.get(id) : undefined;
-    return h('td', { class: 'elig' }, s ? h('span', { class: `badge elig-${s.decision}`, title: s.labels.join(' · ') || null }, DECISION_LABEL[s.decision]) : '-');
+    return h('td', { class: 'elig' }, s ? h('span', { class: `badge-status elig-${s.decision}`, title: s.labels.join(' · ') || null }, DECISION_LABEL[s.decision]) : '-');
   };
 
   const paint = () => {

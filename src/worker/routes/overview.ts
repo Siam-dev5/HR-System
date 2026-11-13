@@ -1,4 +1,5 @@
 import { Hono } from 'hono';
+import { CHANGE_SET, attendanceDbError, changeValues, newChange } from '../lib/attendance-records';
 import type { AppEnv, AuthUser } from '../env';
 import { CRUD_MODULES, MODULES, viewPermission } from '../../shared/modules';
 import type { CrudMeta, DashboardResponse, LookupOption, MenuItem, MetaResponse, NineBoxResponse, NotificationItem, PageMeta } from '../../shared/types';
@@ -192,8 +193,16 @@ overviewRoutes.post('/ess/clock', requirePerm('ess.view'), async (c) => {
     const defaultStart = settingText(await loadSettings(db), 'attendance.default_start_time', '09:00');
     const check = checkClock(shift ? shiftTimes(shift) : null, time, null, { defaultStart });
     const status = check.status;
-    if (existing) await db.prepare("UPDATE attendance_records SET clock_in = ?, status = ?, source = 'web', shift_id = ?, late_minutes = ?, updated_at = datetime('now'), updated_by = ? WHERE id = ?").bind(time, status, shift?.id ?? null, check.lateMinutes, user.id, existing.id).run();
-    else await db.prepare("INSERT INTO attendance_records (employee_id, work_date, clock_in, status, source, shift_id, late_minutes, created_by, updated_by) VALUES (?, ?, ?, ?, 'web', ?, ?, ?, ?)").bind(user.employeeId, date, time, status, shift?.id ?? null, check.lateMinutes, user.id, user.id).run();
+    // every change is a revision (P2): the employee's own clock, channel 'web'
+    const change = newChange('web', 'ลงเวลาเข้าผ่านเว็บ', null);
+    // a day of an approved / published payroll period is locked for every writer, the web clock included (P2)
+    try {
+      if (existing) await db.prepare(`UPDATE attendance_records SET clock_in = ?, status = ?, source = 'web', shift_id = ?, late_minutes = ?, ${CHANGE_SET}, updated_at = datetime('now'), updated_by = ? WHERE id = ?`).bind(time, status, shift?.id ?? null, check.lateMinutes, ...changeValues(change), user.id, existing.id).run();
+      else await db.prepare("INSERT INTO attendance_records (employee_id, work_date, clock_in, status, source, shift_id, late_minutes, created_by, updated_by, change_op, change_channel, change_reason, change_reference) VALUES (?, ?, ?, ?, 'web', ?, ?, ?, ?, ?, ?, ?, ?)").bind(user.employeeId, date, time, status, shift?.id ?? null, check.lateMinutes, user.id, user.id, ...changeValues(change)).run();
+    } catch (e) {
+      attendanceDbError(e);
+      throw e;
+    }
     await audit(c, 'attendance.clock_in', 'attendance', user.employeeId, { date, time, status, shift_id: shift?.id ?? null });
     return c.json({ ok: true, date, time, status });
   }
@@ -208,10 +217,15 @@ overviewRoutes.post('/ess/clock', requirePerm('ess.view'), async (c) => {
     if (rec.clock_out) throw conflict('ลงเวลาออกแล้ววันนี้');
     const shift = rec.shift_id ? await db.prepare(`SELECT ${SHIFT_COLUMNS} FROM shifts WHERE id = ?`).bind(rec.shift_id).first<ShiftRow>() : null;
     const check = checkClock(shift ? shiftTimes(shift) : null, rec.clock_in, time, { outNextDay: rec.work_date !== date });
-    await db
-      .prepare("UPDATE attendance_records SET clock_out = ?, clock_out_next_day = ?, early_leave_minutes = ?, worked_minutes = ?, updated_at = datetime('now'), updated_by = ? WHERE id = ?")
-      .bind(time, check.outNextDay ? 1 : 0, shift ? check.earlyLeaveMinutes : null, check.workedMinutes, user.id, rec.id)
-      .run();
+    try {
+      await db
+        .prepare(`UPDATE attendance_records SET clock_out = ?, clock_out_next_day = ?, early_leave_minutes = ?, worked_minutes = ?, ${CHANGE_SET}, updated_at = datetime('now'), updated_by = ? WHERE id = ?`)
+        .bind(time, check.outNextDay ? 1 : 0, shift ? check.earlyLeaveMinutes : null, check.workedMinutes, ...changeValues(newChange('web', 'ลงเวลาออกผ่านเว็บ', null)), user.id, rec.id)
+        .run();
+    } catch (e) {
+      attendanceDbError(e);
+      throw e;
+    }
     await audit(c, 'attendance.clock_out', 'attendance', user.employeeId, { date: rec.work_date, time });
     return c.json({ ok: true, date: rec.work_date, time });
   }
