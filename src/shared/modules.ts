@@ -297,6 +297,9 @@ export const MODULES: readonly ModuleDef[] = [
   page('payroll', '/payroll', 'งวดเงินเดือน', 'payroll', 'payroll.view', '/api/payroll/periods'),
   page('payroll_preview', '/payroll/preview', 'Payroll Preview', 'payroll', 'payroll_preview.view', '/api/payroll/periods'),
   page('accounting_review', '/payroll/accounting-review', 'ACC ตรวจสอบและลงนาม', 'payroll', 'payroll.accounting.review', '/api/payroll/accounting/periods'),
+  page('payroll_selection', '/payroll/selection', 'รายชื่อพนักงานในงวด', 'payroll', 'payroll_selection.view', '/api/payroll-selection'),
+  page('employee_contracts', '/payroll/contracts', 'สัญญาจ้างพนักงาน', 'payroll', 'employee_contract.view', '/api/employee-contracts'),
+  page('pay_frequency', '/payroll/pay-frequency', 'รอบการจ่ายเงินเดือน', 'payroll', 'payroll.view', '/api/pay-frequency/companies'),
   page('payslips', '/payroll/payslips', 'สลิปเงินเดือน (HR)', 'payroll', 'payroll.view', '/api/payroll/payslips'),
   crud({
     key: 'pay_components', path: '/payroll/components', title: 'รายการเงินได้/เงินหัก', group: 'payroll', table: 'pay_components', description: 'Master รายการเงินได้และเงินหัก', labelExpr: codeName, codeField: 'code', defaultSort: 'code',

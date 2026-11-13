@@ -658,14 +658,26 @@ input[aria-invalid='true'], select[aria-invalid='true'], textarea[aria-invalid='
 .preview-table tbody tr:hover td, .preview-table tbody tr:hover .fz { background: var(--surface-2); }
 .preview-table tbody tr.is-picked:hover td, .preview-table tbody tr.is-picked:hover .fz { background: var(--surface-3); }
 .preview-table .empty-row { text-align: center; color: var(--text-2); padding: 1.5rem; }
-.preview-table .elig .badge { white-space: nowrap; }
-.preview-table .elig-pay { background: #dcfce7; color: #166534; }
-.preview-table .elig-review { background: #fef3c7; color: #92400e; }
-.preview-table .elig-block { background: #fee2e2; color: #991b1b; }
+.preview-table .elig .badge-status { white-space: nowrap; }
+.elig-pay { background: #dcfce7; color: #166534; }
+.elig-review { background: #fef3c7; color: #92400e; }
+.elig-block { background: #fee2e2; color: #991b1b; }
 .pick-bar { align-items: center; flex-wrap: wrap; gap: 0.6rem; }
 .pick-bar .pick-search { min-width: 14rem; flex: 0 1 20rem; }
 .pick-count { color: var(--text-2); font-size: 0.88rem; }
 .result-list { margin: 0; padding-left: 1.2rem; max-height: 14rem; overflow: auto; }
+/* employee list of a period (P4–P6 screens) */
+.chips { display: flex; flex-wrap: wrap; gap: 0.35rem; }
+.chip { border: 1px solid var(--border); background: var(--surface); color: var(--text-2); border-radius: 999px; padding: 0.25rem 0.7rem; font: inherit; font-size: 0.82rem; cursor: pointer; }
+.chip.active { background: var(--primary); border-color: var(--primary); color: #fff; }
+.badge-contract { background: #e0e7ff; color: #3730a3; }
+.sel-table td.reasons { white-space: normal; min-width: 14rem; max-width: 24rem; }
+.sel-table ul.plain { margin: 0; padding: 0; list-style: none; }
+.kpi.kpi-warn .kpi-value { color: #b45309; }
+.kpi.kpi-bad .kpi-value { color: #b91c1c; }
+details.history { margin-top: 1rem; }
+details.history > summary { cursor: pointer; font-weight: 600; }
+.form-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(12rem, 1fr)); gap: 0.6rem; }
 @media (max-width: 640px) {
   .preview-table { --fz-code: 5.5rem; --fz-name: 8.5rem; }
   .pick-bar .pick-search { min-width: 0; flex: 1 1 100%; }
