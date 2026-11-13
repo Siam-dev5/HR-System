@@ -64,7 +64,7 @@ describe('roles and permissions', () => {
     writeFileSync(join(dir, 'm.sql'), files.map((x) => readFileSync(join('migrations', x), 'utf8')).join('\n;\n'));
     const w = (args: string[]) => execFileSync(process.execPath, [join('node_modules', 'wrangler', 'bin', 'wrangler.js'), 'd1', 'execute', 'hr-system-db', '--local', '--persist-to', join(dir, 's'), ...args], { env: { ...process.env, CI: '1' }, encoding: 'utf8' });
     w(['--file', join(dir, 'm.sql')]);
-    const q = "SELECT r.code || ':' || rp.permission AS g FROM role_permissions rp JOIN roles r ON r.id = rp.role_id WHERE r.code NOT IN ('hr_leader', 'hr_payroll', 'acc_staff', 'acc_manager') AND r.code NOT LIKE 'zz%' AND rp.permission NOT LIKE 'org_assignment.%' AND rp.permission <> 'payroll_hold.resolve' ORDER BY 1"; // 0017 grants: tests/integration/cross-company.test.ts · 0019 grant: tests/integration/payroll-holds.test.ts
+    const q = "SELECT r.code || ':' || rp.permission AS g FROM role_permissions rp JOIN roles r ON r.id = rp.role_id WHERE r.code NOT IN ('hr_leader', 'hr_payroll', 'acc_staff', 'acc_manager') AND r.code NOT LIKE 'zz%' AND rp.permission NOT LIKE 'org_assignment.%' AND rp.permission NOT IN ('payroll_hold.resolve', 'attendance.correct') ORDER BY 1"; // 0017 grants: tests/integration/cross-company.test.ts · 0019 grant: tests/integration/payroll-holds.test.ts · 0020 grant: tests/integration/attendance-daily.test.ts
     const out = w(['--json', '--command', q]);
     const before = (JSON.parse(out.slice(out.indexOf('['))) as Array<{ results: Array<{ g: string }> }>)[0]!.results.map((x) => x.g);
     const now = H.sql(q).map((x) => String(x.g));

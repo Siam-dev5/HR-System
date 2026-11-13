@@ -276,7 +276,8 @@ describe('company scope and permissions', () => {
 
   it('concurrent scans never open, resolve or record a change twice', async () => {
     // a new absence for ZH5 on Mon 12 Oct and the old one corrected: one opened + one resolved, recorded once
-    H.sql(`DELETE FROM attendance_records WHERE employee_id = ${ids.H5} AND work_date = '2026-10-12'; INSERT INTO attendance_records (employee_id, work_date, clock_in, clock_out, status, source) VALUES (${ids.H5}, '2026-10-09', '09:00', '18:00', 'present', 'manual');`);
+    // attendance is never deleted since 0020 (P2): the day is corrected — moved from 12 Oct to 9 Oct — with a revision
+    H.sql(`UPDATE attendance_records SET work_date = '2026-10-09', source = 'manual', change_op = 'zz-move-h5', change_channel = 'correction', change_reason = 'zz test ย้ายวัน', change_reference = 'zz' WHERE employee_id = ${ids.H5} AND work_date = '2026-10-12';`);
     const rs = await Promise.all([1, 2, 3].map(() => c.admin!.post(`/api/payroll/periods/${ids.PB}/attendance-holds/scan`)));
     expect(rs.every((r) => r.status === 200)).toBe(true);
     expect(holds(ids.PB)).toEqual(['ZH5:absent:2026-10-09:resolved', 'ZH5:absent:2026-10-12:open']);

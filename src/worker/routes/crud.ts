@@ -1,4 +1,5 @@
 import { Hono } from 'hono';
+import { CHANGE_SET, attendanceDbError, changeValues, crudChange } from '../lib/attendance-records';
 import type { Context } from 'hono';
 import type { AppEnv, AuthUser } from '../env';
 import type { CrudModule, FieldDef } from '../../shared/modules';
@@ -259,19 +260,23 @@ crudRoutes.post('/:key', async (c) => {
   }
   crossValidate(values);
   const cols = Object.keys(values);
+  // attendance (P2): scope, period lock and a revision for the new record (with the reason when one is required)
+  const change = m.table === 'attendance_records' ? await crudChange(c.env.DB, user, body, null, values) : null;
+  const extra = change ? ['change_op', 'change_channel', 'change_reason', 'change_reference'] : [];
   const insert = c.env.DB.prepare(
-    `INSERT INTO ${m.table} (${[...cols, 'created_by', 'updated_by'].join(', ')}) VALUES (${[...cols, 'a', 'b'].map(() => '?').join(', ')}) RETURNING id`,
-  ).bind(...cols.map((k) => values[k] ?? null), user.id, user.id);
+    `INSERT INTO ${m.table} (${[...cols, ...extra, 'created_by', 'updated_by'].join(', ')}) VALUES (${[...cols, ...extra, 'a', 'b'].map(() => '?').join(', ')}) RETURNING id`,
+  ).bind(...cols.map((k) => values[k] ?? null), ...(change ? changeValues(change) : []), user.id, user.id);
   let id: number;
   try {
     const row = await insert.first<{ id: number }>();
     if (!row) throw new HttpError(500, 'insert_failed', 'บันทึกไม่สำเร็จ');
     id = row.id;
   } catch (e) {
+    if (change) attendanceDbError(e);
     translateDbError(e, m);
   }
   if (m.workflow) await startWorkflow(c, m, id, values);
-  await audit(c, 'data.create', m.key, id, { fields: cols });
+  await audit(c, 'data.create', m.key, id, { fields: cols, ...(change ? { change: { op: change.op, reason: change.reason, reference: change.reference } } : {}) });
   return c.json(maskRow(user, m, await loadVisible(c, user, m, id)), 201);
 });
 
@@ -294,15 +299,18 @@ crudRoutes.put('/:key/:id', async (c) => {
   const cols = Object.keys(values);
   if (!cols.length) throw badRequest('ไม่มีข้อมูลที่จะแก้ไข');
   crossValidate({ ...existing, ...values });
+  const change = m.table === 'attendance_records' ? await crudChange(c.env.DB, user, body, existing as { employee_id: number; work_date: string }, values) : null;
   try {
-    await c.env.DB.prepare(`UPDATE ${m.table} SET ${cols.map((k) => `${k} = ?`).join(', ')}, updated_at = datetime('now'), updated_by = ? WHERE id = ?`)
-      .bind(...cols.map((k) => values[k] ?? null), user.id, id)
+    await c.env.DB.prepare(`UPDATE ${m.table} SET ${cols.map((k) => `${k} = ?`).join(', ')}${change ? `, ${CHANGE_SET}` : ''}, updated_at = datetime('now'), updated_by = ? WHERE id = ?`)
+      .bind(...cols.map((k) => values[k] ?? null), ...(change ? changeValues(change) : []), user.id, id)
       .run();
   } catch (e) {
+    if (change) attendanceDbError(e);
     translateDbError(e, m);
   }
   const changed = cols.filter((k) => String(existing[k] ?? '') !== String(values[k] ?? ''));
-  await audit(c, 'data.update', m.key, id, { fields: changed });
+  // attendance: the original and corrected values are in attendance_record_revisions (op_token = change.op)
+  await audit(c, 'data.update', m.key, id, { fields: changed, ...(change ? { change: { op: change.op, reason: change.reason, reference: change.reference } } : {}) });
   return c.json(maskRow(user, m, await loadVisible(c, user, m, id)));
 });
 
@@ -321,6 +329,8 @@ crudRoutes.delete('/:key/:id', async (c) => {
     return c.json({ ok: true, cancelled: true });
   }
   need(user, m, 'delete');
+  // attendance history is corrected, never deleted (P2; the database refuses it too)
+  if (m.table === 'attendance_records') throw new HttpError(409, 'attendance_delete_forbidden', 'ลบบันทึกเวลาทำงานไม่ได้ ใช้การแก้ไขพร้อมเหตุผลแทน (ประวัติการแก้ไขถูกเก็บไว้)');
   try {
     await c.env.DB.prepare(`DELETE FROM ${m.table} WHERE id = ?`).bind(id).run();
   } catch (e) {
