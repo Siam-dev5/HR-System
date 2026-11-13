@@ -1,7 +1,7 @@
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { CRUD_MODULES, MODULES } from '../../src/shared/modules';
 import type { LookupOption, MetaResponse } from '../../src/shared/types';
-import { Client, startHarness, type Harness } from './harness';
+import { Client, seedAccountingSignOff, startHarness, type Harness } from './harness';
 
 let H: Harness;
 const admin = () => clients.admin as Client;
@@ -452,6 +452,9 @@ describe('payroll and payslips', () => {
     expect((await admin().post(`/api/payroll/periods/${periodId}/publish`)).status).toBe(409);
     expect((await admin().post(`/api/payroll/periods/${periodId}/approve`)).body.status).toBe('approved');
     expect((await clients.payroll!.post(`/api/payroll/periods/${periodId}/calculate`)).status).toBe(409);
+    // approved is not enough: publishing needs the ACC sign-off of this calculation version
+    expect((await admin().post(`/api/payroll/periods/${periodId}/publish`)).status).toBe(409);
+    seedAccountingSignOff(H, periodId);
     expect((await clients.manager!.post(`/api/payroll/periods/${periodId}/publish`)).status).toBe(403);
     expect((await admin().post(`/api/payroll/periods/${periodId}/publish`)).body.status).toBe('published');
   });
@@ -802,7 +805,8 @@ describe('Employee Welfare Fund in payroll', () => {
     await admin().put('/api/admin/settings', { 'payroll.ewf_enabled': true });
     await clients.payroll!.post(`/api/payroll/periods/${nov}/calculate`);
     await admin().post(`/api/payroll/periods/${nov}/approve`);
-    await admin().post(`/api/payroll/periods/${nov}/publish`);
+    seedAccountingSignOff(H, nov);
+    expect((await admin().post(`/api/payroll/periods/${nov}/publish`)).status).toBe(200);
     const mine = (await clients.employee!.get('/api/my/payslips')).body.rows.find((r: { period_code: string }) => r.period_code === '2026-11');
     const own = (await clients.employee!.get(`/api/payslips/${mine.id}`)).body;
     expect(own.ewf_employee).toBe(41.25);

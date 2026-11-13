@@ -10,7 +10,7 @@ import { createHash } from 'node:crypto';
 import { join } from 'node:path';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import type { Cell } from '../../src/shared/xlsx';
-import { Client, startHarness, type Harness } from './harness';
+import { Client, seedAccountingSignOff, startHarness, type Harness } from './harness';
 
 let H: Harness;
 const c: Record<string, Client> = {};
@@ -87,6 +87,8 @@ beforeAll(async () => {
   for (const p of [ids.PA1, ids.PB1]) {
     expect((await c.admin.post(`/api/payroll/periods/${p}/calculate`)).status).toBe(200);
     expect((await c.officer.post(`/api/payroll/periods/${p}/approve`)).status).toBe(200);
+    // this suite is about company scope: the ACC sign-off of the version is a fixture (workflow: accounting-signoff.test.ts)
+    seedAccountingSignOff(H, p);
     expect((await c.admin.post(`/api/payroll/periods/${p}/publish`)).status).toBe(200);
   }
   // month 2: one all-company period, calculated
@@ -139,6 +141,21 @@ describe('payroll periods follow the company scope', () => {
     const before = state(ids.PA3);
     expect((await c.noLink!.post(`/api/payroll/periods/${ids.PA3}/calculate`)).status).toBe(403);
     expect(state(ids.PA3)).toBe(before);
+  });
+});
+
+describe('attendance period picker follows company scope', () => {
+  it('shows only the company user periods plus all-company periods; organisation-wide users keep all periods', async () => {
+    const a = await c.payA!.get('/api/attendance/periods');
+    expect(a.status).toBe(200);
+    const aCodes = codes(a.body);
+    expect(aCodes).toEqual(expect.arrayContaining(['ZS-A1', 'ZS-A3', 'ZS-ALL2']));
+    expect(aCodes).not.toContain('ZS-B1');
+    expect(aCodes).not.toContain('ZS-B3');
+    const all = await c.admin!.get('/api/attendance/periods');
+    expect(all.status).toBe(200);
+    expect(codes(all.body)).toEqual(expect.arrayContaining(['ZS-A1', 'ZS-B1', 'ZS-ALL2', 'ZS-A3', 'ZS-B3']));
+    expect((await c.noLink!.get('/api/attendance/periods')).body).toEqual([]);
   });
 });
 

@@ -106,3 +106,17 @@ export function arg(name, fallback = undefined) {
   const v = process.argv[i + 1];
   return v === undefined || v.startsWith('--') ? true : v;
 }
+
+/**
+ * Test fixture for UI suites that need a published period but do not test the ACC workflow (migration 0018): records an
+ * ACC review + sign-off of the period's current calc_version in the suite's local D1. Publishing still goes through
+ * the API and its gate. The workflow itself is tested through the API in tests/integration/accounting-signoff.test.ts.
+ */
+export function seedAccountingSignOff(persist, periodId) {
+  const id = Math.trunc(Number(periodId));
+  const sql = `INSERT INTO payroll_accounting_reviews (period_id, calc_version, status, staff_reviewed_by, staff_note, manager_signed_by, manager_signed_at, manager_note)
+    SELECT p.id, p.calc_version, 'signed_off', (SELECT MIN(id) FROM users), 'ui fixture', (SELECT MAX(id) FROM users), datetime('now'), 'ui fixture'
+    FROM payroll_periods p WHERE p.id = ${id} AND p.calc_version > 0
+    ON CONFLICT (period_id, calc_version) DO UPDATE SET status = 'signed_off', manager_signed_by = excluded.manager_signed_by, manager_signed_at = excluded.manager_signed_at, updated_at = datetime('now');`;
+  execFileSync(process.execPath, [join('node_modules', 'wrangler', 'bin', 'wrangler.js'), 'd1', 'execute', 'hr-system-db', '--local', '--persist-to', persist, '--command', sql], { cwd: ROOT, env: { ...process.env, CI: '1' }, stdio: 'ignore' });
+}

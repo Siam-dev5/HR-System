@@ -6,7 +6,7 @@ import { execFileSync, spawn } from 'node:child_process';
 import { createHmac, randomBytes } from 'node:crypto';
 import { join } from 'node:path';
 import { mkdirSync } from 'node:fs';
-import { ROOT, EXE, SERVER_SPAWN, outDir, freePort, stopServer } from './lib/env.mjs';
+import { ROOT, EXE, SERVER_SPAWN, outDir, freePort, stopServer, seedAccountingSignOff } from './lib/env.mjs';
 
 const W = join('node_modules', 'wrangler', 'bin', 'wrangler.js');
 const SHOTS = outDir('period-admin-shots');
@@ -95,6 +95,7 @@ try {
   const d = await api(admin, 'POST', '/api/payroll/periods', { company_id: 1, code: 'UI-2027-02', name: 'ui draft', start_date: '2027-01-26', end_date: '2027-02-25', pay_date: '2027-02-28' });
   await api(admin, 'POST', `/api/payroll/periods/${a.body.id}/calculate`);
   const ap = await api(pay, 'POST', `/api/payroll/periods/${a.body.id}/approve`);
+  seedAccountingSignOff(persist, a.body.id); // ACC review + sign-off fixture (publish gate, migration 0018)
   const pb = await api(pay, 'POST', `/api/payroll/periods/${a.body.id}/publish`);
   check('setup: published period + empty draft', a.status === 201 && d.status === 201 && ap.status === 200 && pb.status === 200);
 

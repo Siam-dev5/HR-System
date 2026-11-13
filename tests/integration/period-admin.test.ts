@@ -4,7 +4,7 @@
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { totpCode } from '../../src/shared/totp';
 import { hasPermission } from '../../src/shared/permissions';
-import { Client, startHarness, type Harness } from './harness';
+import { Client, seedAccountingSignOff, startHarness, type Harness } from './harness';
 
 let H: Harness;
 const c: Record<string, Client> = {};
@@ -101,6 +101,7 @@ describe('setup (synthetic company ZZP)', () => {
     ids.d = await mk('ZP-2027-01', 'monthly', '2026-12-26', '2027-01-25', '2027-01-31');
     expect((await payroll().post(`/api/payroll/periods/${ids.a}/calculate`)).status).toBe(200);
     expect((await admin().post(`/api/payroll/periods/${ids.a}/approve`)).status).toBe(200);
+    seedAccountingSignOff(H, ids.a!);
     expect((await payroll().post(`/api/payroll/periods/${ids.a}/publish`)).status).toBe(200);
     expect(status(ids.a!).status).toBe('published');
     expect(slipStats(ids.a!)).toMatchObject({ n: 2, pub: 2 });
@@ -216,6 +217,9 @@ describe('reopen a closed (published) period', () => {
     expect(status(ids.a!).status).toBe('calculated');
     expect((await payroll().post(`/api/payroll/periods/${ids.a}/approve`)).status).toBe(200);
     expect(status(ids.a!)).toMatchObject({ status: 'approved', reopened_from: null });
+    // the sign-off of the previous version never covers the recalculated figures
+    expect((await payroll().post(`/api/payroll/periods/${ids.a}/publish`)).status).toBe(409);
+    seedAccountingSignOff(H, ids.a!);
     expect((await payroll().post(`/api/payroll/periods/${ids.a}/publish`)).status).toBe(200);
     expect((await payroll().post(`/api/payroll/periods/${ids.a}/publish`)).status).toBe(409); // duplicate publish
     // recalculated payslips are new: announced once more; visible again with YTD
@@ -226,7 +230,13 @@ describe('reopen a closed (published) period', () => {
   it('re-publishing an unchanged reopened period sends no duplicate notification', async () => {
     const r = await asAdmin((who, totp) => who.post(`/api/payroll/periods/${ids.a}/reopen-closed`, { reason: 'เปิดตรวจซ้ำ ไม่แก้ยอด', confirm_code: 'ZP-2026-09', totp }));
     expect(r.status, r.text).toBe(200);
+    // the reopen superseded the ACC sign-off of this (unchanged) version: a fresh review / sign-off is required
+    const v = status(ids.a!).calc_version;
+    expect(H.sql(`SELECT status FROM payroll_accounting_reviews WHERE period_id = ${ids.a} AND calc_version = ${v}`)).toEqual([{ status: 'superseded' }]);
+    expect(H.sql(`SELECT action FROM payroll_accounting_review_events WHERE period_id = ${ids.a} AND calc_version = ${v} ORDER BY id DESC LIMIT 1`)).toEqual([{ action: 'invalidated' }]);
     expect((await payroll().post(`/api/payroll/periods/${ids.a}/approve`)).status).toBe(200);
+    expect((await payroll().post(`/api/payroll/periods/${ids.a}/publish`)).status).toBe(409);
+    seedAccountingSignOff(H, ids.a!);
     expect((await payroll().post(`/api/payroll/periods/${ids.a}/publish`)).status).toBe(200);
     expect(notified()).toBe(2);
     expect(JSON.parse(audits(ids.a!, 'payroll.published').at(-1)!.details)).toMatchObject({ notified: 0 });

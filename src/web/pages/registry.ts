@@ -6,6 +6,7 @@ import { renderAudit, renderHelp, renderReports, renderRoles, renderSettings, re
 import { renderAttendanceImport, renderOtReview } from './attendance';
 import { renderAppManagement } from './app-management';
 import { renderPayrollPreview } from './payroll-preview';
+import { renderAccountingReview } from './accounting-review';
 import { renderOrgChart } from './org';
 import { renderOrgAssignments } from './org-assignments';
 import { renderHolidays } from './holidays';
@@ -35,6 +36,7 @@ export const PAGES: Record<string, PageRenderer> = {
   attendance_import: renderAttendanceImport,
   ot_review: renderOtReview,
   payroll_preview: renderPayrollPreview,
+  accounting_review: renderAccountingReview,
   org_chart: renderOrgChart,
   org_assignments: renderOrgAssignments,
   payroll: renderPayroll,

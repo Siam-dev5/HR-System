@@ -343,7 +343,10 @@ describe('regression: ACC roles unchanged and still read-only', () => {
   it('ACC Staff / Manager keep their grants and cannot reach payroll write or admin paths', async () => {
     const perms = (code: string) => H.sql(`SELECT rp.permission FROM role_permissions rp JOIN roles r ON r.id = rp.role_id WHERE r.code = '${code}' ORDER BY 1`).map((x) => String(x.permission));
     const staff = perms('acc_staff');
-    expect(perms('acc_manager').filter((p) => !staff.includes(p))).toEqual(['payroll_preview.export']);
+    // 0016: ACC Manager may also export the Preview; 0018: ACC Manager signs off, only ACC Staff submits the review
+    const manager = perms('acc_manager'); // one query per role (each H.sql call starts wrangler)
+    expect(manager.filter((p) => !staff.includes(p))).toEqual(['payroll.accounting.signoff', 'payroll_preview.export']);
+    expect(staff.filter((p) => !manager.includes(p))).toEqual(['payroll.accounting.review.submit']);
     for (const k of ['accStaff', 'accManager'] as const) {
       expect((await c[k]!.get('/api/payroll/periods')).status).toBe(200);
       expect((await c[k]!.post('/api/payroll/periods/1/approve')).status).toBe(403);

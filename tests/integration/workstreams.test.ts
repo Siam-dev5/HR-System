@@ -4,7 +4,7 @@ import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { createHash } from 'node:crypto';
 import { readXlsx, parseCsv, type Cell } from '../../src/shared/xlsx';
 import { PREVIEW_COLUMNS } from '../../src/shared/payroll-columns';
-import { Client, startHarness, type Harness } from './harness';
+import { Client, seedAccountingSignOff, startHarness, type Harness } from './harness';
 
 let H: Harness;
 const c: Record<string, Client> = {};
@@ -80,6 +80,7 @@ describe('setup: companies, employees, salary history, periods', () => {
     for (const p of [periods.y2025, periods.oct]) {
       expect((await payroll().post(`/api/payroll/periods/${p}/calculate`)).status).toBe(200);
       expect((await admin().post(`/api/payroll/periods/${p}/approve`)).status).toBe(200);
+      seedAccountingSignOff(H, p);
       expect((await admin().post(`/api/payroll/periods/${p}/publish`)).status).toBe(200);
     }
   });
@@ -359,6 +360,7 @@ describe('Payroll Preview, column layouts and export', () => {
 describe('payslip YTD', () => {
   it('month-end approval is blocked while Feishu OT is pending; publish then lock', async () => {
     expect((await admin().post(`/api/payroll/periods/${periods.nov}/approve`)).status).toBe(200);
+    seedAccountingSignOff(H, periods.nov);
     expect((await admin().post(`/api/payroll/periods/${periods.nov}/publish`)).status).toBe(200);
     expect((await payroll().post(`/api/payroll/periods/${periods.nov}/calculate`)).status).toBe(409);
     expect((await payroll().post(`/api/payroll/periods/${periods.nov}/reopen`)).status).toBe(409);
