@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { evaluateEligibility, outsideReason, payable, reviewBasis, type EligibilityEmployee } from '../../src/shared/payroll-eligibility';
+import { contractsCover, evaluateEligibility, outsideReason, payable, reviewBasis, type ContractPeriod, type EligibilityEmployee } from '../../src/shared/payroll-eligibility';
 import type { CompanyAssignment } from '../../src/shared/company-detection';
 
 const P = { start_date: '2026-06-01', end_date: '2026-06-30', company_id: 1 };
@@ -10,11 +10,11 @@ const ev = (e: Partial<EligibilityEmployee> = {}, assignments: CompanyAssignment
 
 describe('evaluateEligibility — employment', () => {
   it('9. hired before the period: eligible for the whole period', () => {
-    expect(ev()).toEqual({ status: 'eligible', decision: 'pay', reasons: [], from: '2026-06-01', to: '2026-06-30' });
+    expect(ev()).toEqual({ status: 'eligible', decision: 'pay', reasons: [], notes: [], from: '2026-06-01', to: '2026-06-30' });
   });
 
   it('10. hired during the period: eligible, prorated from the hire date (existing proration)', () => {
-    expect(ev({ hire_date: '2026-06-15' }, [asg(1, '2026-06-15')])).toEqual({ status: 'eligible_prorated', decision: 'pay', reasons: ['starts_in_period'], from: '2026-06-15', to: '2026-06-30' });
+    expect(ev({ hire_date: '2026-06-15' }, [asg(1, '2026-06-15')])).toEqual({ status: 'eligible_prorated', decision: 'pay', reasons: ['starts_in_period'], notes: [], from: '2026-06-15', to: '2026-06-30' });
   });
 
   it('11. terminated during the period: prorated to the termination date', () => {
@@ -97,5 +97,49 @@ describe('outsideReason', () => {
     expect(outsideReason(P, emp({ status: 'suspended' }))).toBe('status_other');
     expect(outsideReason(P, emp({ base_salary: null }))).toBe('no_salary');
     expect(outsideReason(P, emp({ company_id: 2 }))).toBe('transferred');
+  });
+});
+
+describe('contract employees (P5)', () => {
+  const ct = (start_date: string, end_date: string | null, status: ContractPeriod['status'] = 'active'): ContractPeriod => ({ start_date, end_date, status });
+  const evc = (contracts: ContractPeriod[], over: Partial<EligibilityEmployee> = {}) =>
+    evaluateEligibility({ period: P, employee: emp({ employment_type: 'contract', ...over }), salaryHistory: [], assignments: [asg()], contracts });
+
+  it('a contract covering the whole period: eligible, no note (same as a regular employee)', () => {
+    expect(evc([ct('2026-01-01', '2026-12-31')])).toEqual({ status: 'eligible', decision: 'pay', reasons: [], notes: [], from: '2026-06-01', to: '2026-06-30' });
+    expect(evc([ct('2026-01-01', null)]).decision).toBe('pay');
+  });
+
+  it('no recorded contract: paid as before, with a note (never a block)', () => {
+    expect(evc([])).toMatchObject({ status: 'eligible', decision: 'pay', notes: ['contract_unrecorded'] });
+    expect(evc([ct('2026-01-01', '2026-12-31', 'cancelled')])).toMatchObject({ decision: 'pay', notes: ['contract_unrecorded'] });
+  });
+
+  it('a contract that ends, starts or has a gap inside the paid days: review (HR sets the end, renews or confirms)', () => {
+    expect(evc([ct('2026-01-01', '2026-06-15')])).toMatchObject({ status: 'review_required', decision: 'review', reasons: ['contract_not_covering'] });
+    expect(evc([ct('2026-06-10', null)])).toMatchObject({ decision: 'review', reasons: ['contract_not_covering'] });
+    expect(evc([ct('2026-01-01', '2026-06-09'), ct('2026-06-11', null)])).toMatchObject({ decision: 'review', reasons: ['contract_not_covering'] });
+    // consecutive contracts are continuous
+    expect(evc([ct('2026-01-01', '2026-06-10'), ct('2026-06-11', null)]).decision).toBe('pay');
+  });
+
+  it('a termination date inside the contract makes the paid days end there (existing proration), no review', () => {
+    expect(evc([ct('2026-01-01', '2026-06-15')], { status: 'resigned', termination_date: '2026-06-15' })).toMatchObject({ status: 'eligible_prorated', decision: 'pay', reasons: ['ends_in_period'], to: '2026-06-15' });
+  });
+
+  it('a confirmation covers exactly the contract reason; blocks still come first', () => {
+    const r = evc([ct('2026-01-01', '2026-06-15')]);
+    expect(payable(r, { review_confirmed: 1, review_basis: 'contract_not_covering' })).toBe(true);
+    expect(evc([ct('2026-01-01', '2026-06-15')], { base_salary: null })).toMatchObject({ status: 'missing_salary', decision: 'block' });
+  });
+
+  it('contracts only matter for contract employees', () => {
+    expect(evaluateEligibility({ period: P, employee: emp({ employment_type: 'permanent' }), salaryHistory: [], assignments: [asg()], contracts: [ct('2026-01-01', '2026-06-15')] })).toMatchObject({ decision: 'pay', notes: [] });
+  });
+
+  it('contractsCover', () => {
+    expect(contractsCover([ct('2026-06-01', '2026-06-30')], '2026-06-01', '2026-06-30')).toBe(true);
+    expect(contractsCover([], '2026-06-01', '2026-06-30')).toBe(false);
+    expect(contractsCover([ct('2025-01-01', '2025-12-31'), ct('2026-06-01', null)], '2026-06-01', '2026-06-30')).toBe(true);
   });
 });
