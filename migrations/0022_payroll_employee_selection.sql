@@ -89,6 +89,9 @@ CREATE TABLE payroll_selection_results (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   period_id INTEGER NOT NULL REFERENCES payroll_periods(id),
   calc_version INTEGER NOT NULL,
+  -- one calculation run: its rows share the token (a calc_version is never assumed unique — a period whose legacy
+  -- calc_version was reset must still record every run, never overwrite or refuse it)
+  run_token TEXT NOT NULL,
   employee_id INTEGER NOT NULL REFERENCES employees(id),
   company_id INTEGER NOT NULL REFERENCES companies(id),
   -- standard / added / deselected
@@ -99,8 +102,9 @@ CREATE TABLE payroll_selection_results (
   review_confirmed INTEGER NOT NULL DEFAULT 0,
   calculated INTEGER NOT NULL CHECK (calculated IN (0, 1)),
   created_at TEXT NOT NULL DEFAULT (datetime('now')),
-  UNIQUE (period_id, calc_version, employee_id)
+  UNIQUE (run_token, employee_id)
 );
+CREATE INDEX idx_payroll_selection_results_period ON payroll_selection_results(period_id, calc_version);
 CREATE TRIGGER trg_payroll_selection_results_readonly BEFORE UPDATE ON payroll_selection_results
 BEGIN
   SELECT RAISE(ABORT, 'payroll_selection_results is append-only');

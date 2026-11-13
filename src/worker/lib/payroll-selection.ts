@@ -178,10 +178,10 @@ export function selectionCalcStatements(db: D1Database, p: SelPeriod, calcVersio
        ON CONFLICT (period_id) DO UPDATE SET calculated_version = excluded.calculated_version, calc_version = excluded.calc_version, updated_at = datetime('now')`,
     ).bind(p.id, r.version.version, calcVersion),
     db.prepare(
-      `INSERT INTO payroll_selection_results (period_id, calc_version, employee_id, company_id, selection, eligibility, decision, reasons_json, review_confirmed, calculated)
-       SELECT ?1, ?2, json_extract(j.value, '$.e'), json_extract(j.value, '$.c'), json_extract(j.value, '$.s'), json_extract(j.value, '$.el'), json_extract(j.value, '$.d'),
+      `INSERT INTO payroll_selection_results (period_id, calc_version, run_token, employee_id, company_id, selection, eligibility, decision, reasons_json, review_confirmed, calculated)
+       SELECT ?1, ?2, ?4, json_extract(j.value, '$.e'), json_extract(j.value, '$.c'), json_extract(j.value, '$.s'), json_extract(j.value, '$.el'), json_extract(j.value, '$.d'),
               json_extract(j.value, '$.r'), json_extract(j.value, '$.k'), json_extract(j.value, '$.p')
        FROM json_each(?3) j`,
-    ).bind(p.id, calcVersion, JSON.stringify(rows)),
+    ).bind(p.id, calcVersion, JSON.stringify(rows), crypto.randomUUID()),
   ];
 }
