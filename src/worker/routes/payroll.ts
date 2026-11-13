@@ -16,13 +16,62 @@ import { advancePeriods, assertCalculable, coveringMonthly, sameScope, computePe
 import { verifyStepUp } from '../lib/step-up';
 import { can, currentUser, requireAuth, requirePerm, requirePeriodAdmin, requireSuperAdmin } from '../auth';
 
-const PERIOD_SELECT = `SELECT p.id, p.code, p.name, p.start_date, p.end_date, p.pay_date, p.status, p.kind, p.company_id, (SELECT name FROM companies c WHERE c.id = p.company_id) AS company,
+// ---- Company scope ------------------------------------------------------------------------------
+// Payroll data follows the system's company scope (lib/companies): a role holding employees.all sees every company,
+// any other user only the company of their linked employee record, a user without one sees nothing. The scope is
+// always resolved on the server from the authenticated user; a company id in the request can only narrow it.
+
+interface PayrollScope {
+  /** organisation-wide (employees.all): every company, active or not */
+  all: boolean;
+  /** companies in scope when not organisation-wide (never empty) */
+  ids: number[];
+}
+
+const ALL_SCOPE: PayrollScope = { all: true, ids: [] };
+
+async function payrollScope(c: Context<AppEnv>): Promise<PayrollScope> {
+  const s = await companyScope(c.env.DB, currentUser(c));
+  if (s.scope === 'all') return { all: true, ids: [] };
+  const ids = s.items.map((x) => x.id).filter((id) => Number.isInteger(id) && id > 0);
+  if (!ids.length) throw forbidden('บัญชีนี้ยังไม่ได้ผูกกับบริษัท จึงดูข้อมูลเงินเดือนไม่ได้');
+  return { all: false, ids };
+}
+
+/** SQL condition limiting a company column to the scope (ids are integers read from D1, never request input). */
+function scopeSql(column: string, scope: PayrollScope): string {
+  return scope.all ? '1' : `${column} IN (${scope.ids.map((id) => String(Math.trunc(id))).join(', ')})`;
+}
+
+/** A period is visible when it pays a company in scope; an all-company period (NULL) is visible, its data scoped. */
+function periodVisible(p: { company_id: number | null }, scope: PayrollScope): boolean {
+  return scope.all || p.company_id === null || scope.ids.includes(p.company_id);
+}
+
+/**
+ * Changing a period (create / calculate / reopen / approve / publish) touches every payslip in it, so the whole
+ * period must be in scope: an all-company period (NULL) needs organisation-wide scope.
+ */
+function assertPeriodWritable(p: { code?: string; company_id: number | null }, scope: PayrollScope): void {
+  if (scope.all) return;
+  if (p.company_id === null || !scope.ids.includes(p.company_id)) {
+    throw forbidden(p.company_id === null
+      ? `งวด ${p.code ?? ''} เป็นงวดของทุกบริษัท ต้องมีสิทธิ์ทุกบริษัท (employees.all) จึงดำเนินการได้`
+      : 'ไม่มีสิทธิ์ดำเนินการกับงวดเงินเดือนของบริษัทนี้');
+  }
+}
+
+/** Period columns; payslip totals only count slips of companies in scope. */
+const periodSelect = (scope: PayrollScope) => {
+  const slips = `s.period_id = p.id AND ${scopeSql('s.company_id', scope)}`;
+  return `SELECT p.id, p.code, p.name, p.start_date, p.end_date, p.pay_date, p.status, p.kind, p.company_id, (SELECT name FROM companies c WHERE c.id = p.company_id) AS company,
   p.calc_version, p.calculated_by, p.approved_by, p.calculated_at, p.approved_at, p.published_at, p.reopened_from, p.updated_at,
-  (SELECT COUNT(*) FROM payslips s WHERE s.period_id = p.id) AS employees,
-  (SELECT COALESCE(SUM(net), 0) FROM payslips s WHERE s.period_id = p.id) AS total_net,
-  (SELECT COALESCE(SUM(ewf_employer), 0) FROM payslips s WHERE s.period_id = p.id) AS total_ewf_employer,
-  (SELECT COUNT(*) FROM payslips s WHERE s.period_id = p.id AND s.calc_version = 0) AS legacy_slips
+  (SELECT COUNT(*) FROM payslips s WHERE ${slips}) AS employees,
+  (SELECT COALESCE(SUM(net), 0) FROM payslips s WHERE ${slips}) AS total_net,
+  (SELECT COALESCE(SUM(ewf_employer), 0) FROM payslips s WHERE ${slips}) AS total_ewf_employer,
+  (SELECT COUNT(*) FROM payslips s WHERE ${slips} AND s.calc_version = 0) AS legacy_slips
   FROM payroll_periods p`;
+};
 
 const SLIP_SELECT = `SELECT s.id, p.code AS period_code, p.name AS period_name, p.pay_date, s.employee_id,
   e.emp_code || ' ' || e.first_name || ' ' || e.last_name AS employee, s.gross, s.deductions, s.net, s.published
@@ -65,10 +114,19 @@ async function legacyConfirmed(c: Context<AppEnv>): Promise<boolean> {
   return body.confirm_legacy_recalculation === true;
 }
 
-async function period(db: D1Database, id: number): Promise<PeriodRow> {
-  const p = await db.prepare(`${PERIOD_SELECT} WHERE p.id = ? AND p.deleted_at IS NULL`).bind(id).first<PeriodRow>();
-  if (!p) throw notFound('ไม่พบงวดเงินเดือน');
+/** A period the user may see (404 otherwise, so ids of other companies' periods reveal nothing). */
+async function period(db: D1Database, id: number, scope: PayrollScope): Promise<PeriodRow> {
+  const p = await db.prepare(`${periodSelect(scope)} WHERE p.id = ? AND p.deleted_at IS NULL`).bind(id).first<PeriodRow>();
+  if (!p || !periodVisible(p, scope)) throw notFound('ไม่พบงวดเงินเดือน');
   return p;
+}
+
+/** A period the user may change: visible and entirely in scope. Checked before anything is read or written. */
+async function writablePeriod(c: Context<AppEnv>, id: number): Promise<{ p: PeriodRow; scope: PayrollScope }> {
+  const scope = await payrollScope(c);
+  const p = await period(c.env.DB, id, scope);
+  assertPeriodWritable(p, scope);
+  return { p, scope };
 }
 
 /** Feishu OT rows of the period still waiting for HR review (they are excluded from pay until confirmed). */
@@ -84,7 +142,8 @@ export const payrollRoutes = new Hono<AppEnv>();
 payrollRoutes.use('*', requireAuth, requirePerm('payroll.view'));
 
 payrollRoutes.get('/periods', async (c) => {
-  const { results } = await c.env.DB.prepare(`${PERIOD_SELECT} WHERE p.deleted_at IS NULL ORDER BY p.start_date DESC, p.kind`).all<PeriodRow>();
+  const scope = await payrollScope(c);
+  const { results } = await c.env.DB.prepare(`${periodSelect(scope)} WHERE p.deleted_at IS NULL AND (p.company_id IS NULL OR ${scopeSql('p.company_id', scope)}) ORDER BY p.start_date DESC, p.kind`).all<PeriodRow>();
   return c.json(results);
 });
 
@@ -105,6 +164,8 @@ payrollRoutes.post('/periods', requirePerm('payroll.calculate'), async (c) => {
     companyId = intParam(String(body.company_id), 'company_id');
     if (!(await c.env.DB.prepare('SELECT id FROM companies WHERE id = ? AND active = 1').bind(companyId).first())) throw badRequest('ไม่พบบริษัท หรือบริษัทปิดใช้งาน');
   }
+  const scope = await payrollScope(c);
+  assertPeriodWritable({ code, company_id: companyId }, scope);
   // the same days can never be paid twice to the same employees by two periods of the same kind
   const overlap = await c.env.DB.prepare(`SELECT code FROM payroll_periods WHERE kind = ?1 AND deleted_at IS NULL AND start_date <= ?2 AND end_date >= ?3 AND ${sameScope(4)} LIMIT 1`)
     .bind(kind, end, start, companyId)
@@ -116,7 +177,7 @@ payrollRoutes.post('/periods', requirePerm('payroll.calculate'), async (c) => {
       .bind(code, name, start, end, pay, kind, companyId, user.id, user.id)
       .first<{ id: number }>();
     await audit(c, 'payroll.period_created', 'payroll_periods', row?.id ?? null, { code, kind, company: companyId });
-    return c.json(await period(c.env.DB, row?.id ?? 0), 201);
+    return c.json(await period(c.env.DB, row?.id ?? 0, scope), 201);
   } catch (e) {
     if (e instanceof Error && /UNIQUE/i.test(e.message)) throw conflict('รหัสงวดซ้ำ');
     throw e;
@@ -126,7 +187,7 @@ payrollRoutes.post('/periods', requirePerm('payroll.calculate'), async (c) => {
 payrollRoutes.post('/periods/:id/calculate', requirePerm('payroll.calculate'), async (c) => {
   const user = currentUser(c);
   const db = c.env.DB;
-  const p = await period(db, intParam(c.req.param('id')));
+  const { p, scope } = await writablePeriod(c, intParam(c.req.param('id')));
   if (p.status !== 'draft' && p.status !== 'calculated') throw conflict('คำนวณใหม่ได้เฉพาะงวดที่ยังไม่อนุมัติ');
   // payslips produced by the engine before migration 0005 (calc_version 0) are never replaced silently:
   // the new rules (proration, probation split, Feishu OT) can change the amounts, so HR must confirm explicitly
@@ -165,14 +226,14 @@ payrollRoutes.post('/periods/:id/calculate', requirePerm('payroll.calculate'), a
   stmts.push(db.prepare("UPDATE attendance_imports SET locked = 1, locked_at = datetime('now') WHERE payroll_period_id = ? AND status = 'active' AND locked = 0").bind(p.id));
   await db.batch(stmts);
   await audit(c, 'payroll.calculated', 'payroll_periods', p.id, { employees: slips.length, version, kind: p.kind, archivedSlips: p.employees, archivedTotalNet: p.total_net, ...(p.legacy_slips ? { replacedLegacySlips: p.legacy_slips, legacyTotalNet: p.total_net } : {}), ...(forced ? { forced: true, reopenedFrom: p.reopened_from, reason: forced } : {}) });
-  return c.json({ ...(await period(db, p.id)), totalNet: round2(totalNet) });
+  return c.json({ ...(await period(db, p.id, scope)), totalNet: round2(totalNet) });
 });
 
 /** calculated → draft: drops the unapproved payslips and unlocks the period's attendance for correction. */
 payrollRoutes.post('/periods/:id/reopen', requirePerm('payroll.calculate'), async (c) => {
   const user = currentUser(c);
   const db = c.env.DB;
-  const p = await period(db, intParam(c.req.param('id')));
+  const { p, scope } = await writablePeriod(c, intParam(c.req.param('id')));
   if (p.status !== 'calculated') throw conflict('เปิดแก้ไขได้เฉพาะงวดที่คำนวณแล้วแต่ยังไม่อนุมัติ');
   if (p.legacy_slips > 0 && !(await legacyConfirmed(c))) {
     throw new HttpError(409, 'legacy_recalculation', `งวด ${p.code} มีสลิป ${p.legacy_slips} รายการที่คำนวณด้วยเวอร์ชันก่อนหน้า (Legacy) การเปิดแก้ไขจะนำสลิปเหล่านี้ออกจากงวด (เก็บสำเนาไว้ในประวัติ) ต้องยืนยันอย่างชัดเจน`);
@@ -187,13 +248,13 @@ payrollRoutes.post('/periods/:id/reopen', requirePerm('payroll.calculate'), asyn
     db.prepare('UPDATE holiday_work_records SET payroll_period_id = NULL, paid_calc_version = NULL WHERE payroll_period_id = ?').bind(p.id),
   ]);
   await audit(c, 'payroll.reopened', 'payroll_periods', p.id, { version: p.calc_version, archivedSlips: p.employees, archivedTotalNet: p.total_net, legacy: p.legacy_slips, ...(forced ? { forced: true, reopenedFrom: p.reopened_from, reason: forced } : {}) });
-  return c.json(await period(db, p.id));
+  return c.json(await period(db, p.id, scope));
 });
 
 payrollRoutes.post('/periods/:id/approve', requirePerm('payroll.approve'), async (c) => {
   const user = currentUser(c);
   const db = c.env.DB;
-  const p = await period(db, intParam(c.req.param('id')));
+  const { p, scope } = await writablePeriod(c, intParam(c.req.param('id')));
   if (p.status !== 'calculated') throw conflict('อนุมัติได้เฉพาะงวดที่คำนวณแล้ว');
   if (!p.employees) throw conflict('งวดนี้ไม่มีสลิปเงินเดือน');
   // maker-checker always: the calculator never approves, except a Super Admin with a note. The old setting
@@ -204,7 +265,7 @@ payrollRoutes.post('/periods/:id/approve', requirePerm('payroll.approve'), async
   if (p.kind === 'mid_month') await assertCalculable(db, p);
   const done = await db.prepare("UPDATE payroll_periods SET status = 'approved', reopened_from = NULL, approved_by = ?, approved_at = datetime('now'), updated_at = datetime('now'), updated_by = ? WHERE id = ? AND status = 'calculated' AND deleted_at IS NULL").bind(user.id, user.id, p.id).run();
   if (!done.meta.changes) throw conflict('งวดนี้ถูกอนุมัติหรือเปลี่ยนสถานะไปแล้ว');
-  const approved = await period(db, p.id);
+  const approved = await period(db, p.id, scope);
   await audit(c, 'payroll.approved', 'payroll_periods', p.id, {
     period_id: p.id, calculated_by: p.calculated_by, approved_by: user.id, approved_at: approved.approved_at, self_approved: ap.selfApproved, note: ap.note,
     ...(p.reopened_from ? { reopenedFrom: p.reopened_from } : {}),
@@ -215,7 +276,7 @@ payrollRoutes.post('/periods/:id/approve', requirePerm('payroll.approve'), async
 payrollRoutes.post('/periods/:id/publish', requirePerm('payroll.publish'), async (c) => {
   const user = currentUser(c);
   const db = c.env.DB;
-  const p = await period(db, intParam(c.req.param('id')));
+  const { p, scope } = await writablePeriod(c, intParam(c.req.param('id')));
   if (p.status !== 'approved') throw conflict('เผยแพร่ได้เฉพาะงวดที่อนุมัติแล้ว');
   const res = await db.batch([
     db.prepare("UPDATE payroll_periods SET status = 'published', published_by = ?, published_at = datetime('now'), updated_at = datetime('now'), updated_by = ? WHERE id = ? AND status = 'approved' AND deleted_at IS NULL").bind(user.id, user.id, p.id),
@@ -234,7 +295,7 @@ payrollRoutes.post('/periods/:id/publish', requirePerm('payroll.publish'), async
     .bind(p.id)
     .all<{ id: number; user_id: number }>();
   for (const r of results) await notify(db, r.user_id, 'สลิปเงินเดือนพร้อมแล้ว', p.name, `/my/payslips/${r.id}`);
-  const published = await period(db, p.id);
+  const published = await period(db, p.id, scope);
   await audit(c, 'payroll.published', 'payroll_periods', p.id, {
     period_id: p.id, calculated_by: p.calculated_by, approved_by: p.approved_by, published_by: user.id, published_at: published.published_at ?? null, notified: results.length,
   });
@@ -269,17 +330,24 @@ async function requireForce(c: Context<AppEnv>, p: PeriodRow, action: string): P
   return reason;
 }
 
-async function periodImpact(db: D1Database, p: PeriodRow): Promise<PeriodImpact> {
+/** Company of an archived payslip (the full row is kept in row_json). */
+const ARCHIVE_COMPANY = "json_extract(row_json, '$.company_id')";
+
+/**
+ * What a period change would affect. `scope` limits every figure to the companies in scope; the blockers of the
+ * change endpoints are always computed organisation-wide (ALL_SCOPE) so a rule is never weakened by filtering.
+ */
+async function periodImpact(db: D1Database, p: PeriodRow, scope: PayrollScope = ALL_SCOPE): Promise<PeriodImpact> {
   const slips = await db
-    .prepare('SELECT COUNT(*) AS count, ROUND(COALESCE(SUM(gross), 0), 2) AS gross, ROUND(COALESCE(SUM(net), 0), 2) AS net, COALESCE(SUM(published), 0) AS published, COALESCE(SUM(advance > 0), 0) AS withAdvance, ROUND(COALESCE(SUM(advance), 0), 2) AS advance FROM payslips WHERE period_id = ?')
+    .prepare(`SELECT COUNT(*) AS count, ROUND(COALESCE(SUM(gross), 0), 2) AS gross, ROUND(COALESCE(SUM(net), 0), 2) AS net, COALESCE(SUM(published), 0) AS published, COALESCE(SUM(advance > 0), 0) AS withAdvance, ROUND(COALESCE(SUM(advance), 0), 2) AS advance FROM payslips WHERE period_id = ? AND ${scopeSql('company_id', scope)}`)
     .bind(p.id)
     .first<PeriodImpact['payslips']>();
   const arch = await db
-    .prepare('SELECT COUNT(*) AS count, COUNT(DISTINCT calc_version) AS versions, MAX(archived_at) AS lastArchivedAt, COALESCE(SUM(json_extract(row_json, \'$.published\') = 1), 0) AS published FROM payslip_archive WHERE period_id = ?')
+    .prepare(`SELECT COUNT(*) AS count, COUNT(DISTINCT calc_version) AS versions, MAX(archived_at) AS lastArchivedAt, COALESCE(SUM(json_extract(row_json, '$.published') = 1), 0) AS published FROM payslip_archive WHERE period_id = ? AND ${scopeSql(ARCHIVE_COMPANY, scope)}`)
     .bind(p.id)
     .first<PeriodImpact['archive'] & { published: number }>();
   const att = await db
-    .prepare("SELECT COALESCE(SUM(status = 'active'), 0) AS active, COALESCE(SUM(status = 'active' AND locked = 1), 0) AS locked, COUNT(*) AS total FROM attendance_imports WHERE payroll_period_id = ?")
+    .prepare(`SELECT COALESCE(SUM(status = 'active'), 0) AS active, COALESCE(SUM(status = 'active' AND locked = 1), 0) AS locked, COUNT(*) AS total FROM attendance_imports WHERE payroll_period_id = ? AND ${scopeSql('company_id', scope)}`)
     .bind(p.id)
     .first<PeriodImpact['attendance']>();
   const publishedEver = await db.prepare("SELECT COUNT(*) AS n FROM audit_logs WHERE entity = 'payroll_periods' AND entity_id = ? AND action = 'payroll.published'").bind(String(p.id)).first<{ n: number }>();
@@ -288,14 +356,14 @@ async function periodImpact(db: D1Database, p: PeriodRow): Promise<PeriodImpact>
   const dependencies: PeriodImpact['dependencies'] = [];
   if (p.kind === 'monthly') {
     for (const m of await advancePeriods(db, p)) {
-      const paid = await db.prepare('SELECT ROUND(COALESCE(SUM(net), 0), 2) AS n FROM payslips WHERE period_id = ?').bind(m.id).first<{ n: number }>();
+      const paid = await db.prepare(`SELECT ROUND(COALESCE(SUM(net), 0), 2) AS n FROM payslips WHERE period_id = ? AND ${scopeSql('company_id', scope)}`).bind(m.id).first<{ n: number }>();
       dependencies.push({ id: m.id, code: m.code, kind: 'mid_month', status: m.status as PayrollPeriod['status'], relation: 'mid_month_round', advance: paid?.n ?? 0 });
     }
   } else {
     const m = await coveringMonthly(db, p);
     if (m) {
       const deducted = await db
-        .prepare('SELECT ROUND(COALESCE(SUM(advance), 0), 2) AS n FROM payslips WHERE period_id = ? AND employee_id IN (SELECT employee_id FROM payslips WHERE period_id = ?)')
+        .prepare(`SELECT ROUND(COALESCE(SUM(advance), 0), 2) AS n FROM payslips WHERE period_id = ? AND employee_id IN (SELECT employee_id FROM payslips WHERE period_id = ?) AND ${scopeSql('company_id', scope)}`)
         .bind(m.id, p.id)
         .first<{ n: number }>();
       dependencies.push({ id: m.id, code: m.code, kind: 'monthly', status: m.status as PayrollPeriod['status'], relation: 'month_end', advance: deducted?.n ?? 0 });
@@ -333,16 +401,18 @@ async function periodImpact(db: D1Database, p: PeriodRow): Promise<PeriodImpact>
   };
 }
 
+// Only for a period the user may change as a whole: a company-limited user gets 403 on an all-company period (its
+// figures cover every company) and 404 on another company's period; the figures are also filtered by scope.
 payrollRoutes.get('/periods/:id/impact', requirePeriodAdmin(...Object.values(PERIOD_ADMIN)), async (c) => {
-  const db = c.env.DB;
-  return c.json(await periodImpact(db, await period(db, intParam(c.req.param('id')))));
+  const { p, scope } = await writablePeriod(c, intParam(c.req.param('id')));
+  return c.json(await periodImpact(c.env.DB, p, scope));
 });
 
 /** approved / published → calculated: payslips archived and unpublished (kept), nothing recalculated or published. */
 payrollRoutes.post('/periods/:id/reopen-closed', requirePeriodAdmin(PERIOD_ADMIN.reopen), async (c) => {
   const user = currentUser(c);
   const db = c.env.DB;
-  const p = await period(db, intParam(c.req.param('id')));
+  const { p, scope } = await writablePeriod(c, intParam(c.req.param('id')));
   const body = await readJson(c);
   const reason = reasonOf(body);
   confirmCode(body, p);
@@ -363,14 +433,14 @@ payrollRoutes.post('/periods/:id/reopen-closed', requirePeriodAdmin(PERIOD_ADMIN
     code: p.code, from: p.status, to: 'calculated', reason, archivedSlips: impact.payslips.count, archivedTotalNet: impact.payslips.net, unpublished: impact.payslips.published,
     approvedBy: p.approved_by, approvedAt: p.approved_at ?? null, publishedAt: p.published_at ?? null, calcVersion: p.calc_version, op,
   });
-  return c.json(await period(db, p.id));
+  return c.json(await period(db, p.id, scope));
 });
 
 /** Metadata (name, code) in any status; dates / pay date / company only on an empty draft without dependencies. */
 payrollRoutes.put('/periods/:id', requirePeriodAdmin(PERIOD_ADMIN.edit), async (c) => {
   const user = currentUser(c);
   const db = c.env.DB;
-  const p = await period(db, intParam(c.req.param('id')));
+  const { p, scope } = await writablePeriod(c, intParam(c.req.param('id')));
   const body = await readJson(c);
   const reason = reasonOf(body);
   const next: Record<string, string | number | null> = {};
@@ -391,6 +461,7 @@ payrollRoutes.put('/periods/:id', requirePeriodAdmin(PERIOD_ADMIN.edit), async (
     const companyId = body.company_id === null || body.company_id === '' ? null : intParam(String(body.company_id), 'company_id');
     if (companyId !== p.company_id) {
       if (companyId !== null && !(await db.prepare('SELECT id FROM companies WHERE id = ? AND active = 1').bind(companyId).first())) throw badRequest('ไม่พบบริษัท หรือบริษัทปิดใช้งาน');
+      assertPeriodWritable({ code: p.code, company_id: companyId }, scope);
       next.company_id = companyId;
     }
   }
@@ -429,14 +500,14 @@ payrollRoutes.put('/periods/:id', requirePeriodAdmin(PERIOD_ADMIN.edit), async (
     throw e;
   }
   await audit(c, 'payroll.period_edited', 'payroll_periods', p.id, { code: p.code, status: p.status, reason, changes: Object.fromEntries(keys.map((k) => [k, { from: p[k as keyof PeriodRow] ?? null, to: next[k] }])) });
-  return c.json(await period(db, p.id));
+  return c.json(await period(db, p.id, scope));
 });
 
 /** Soft delete (recoverable): only an empty, never-published draft without attendance or advance dependencies. */
 payrollRoutes.post('/periods/:id/delete', requirePeriodAdmin(PERIOD_ADMIN.delete), async (c) => {
   const user = currentUser(c);
   const db = c.env.DB;
-  const p = await period(db, intParam(c.req.param('id')));
+  const { p } = await writablePeriod(c, intParam(c.req.param('id')));
   const body = await readJson(c);
   const reason = reasonOf(body);
   confirmCode(body, p);
@@ -462,12 +533,15 @@ payrollRoutes.post('/periods/:id/delete', requirePeriodAdmin(PERIOD_ADMIN.delete
   return c.json({ ok: true, id: p.id, code: p.code });
 });
 
+// A company-limited user sees deleted periods of companies in scope only: a deleted all-company period can only be
+// restored organisation-wide, and its archive covers every company. Archive counts are filtered by scope as well.
 payrollRoutes.get('/deleted-periods', requirePeriodAdmin(PERIOD_ADMIN.delete), async (c) => {
+  const scope = await payrollScope(c);
   const { results } = await c.env.DB.prepare(
     `SELECT p.id, p.deleted_code AS code, p.name, p.kind, (SELECT name FROM companies c WHERE c.id = p.company_id) AS company, p.start_date, p.end_date, p.pay_date,
        p.deleted_at, (SELECT username FROM users u WHERE u.id = p.deleted_by) AS deleted_by, p.delete_reason,
-       (SELECT COUNT(*) FROM payslip_archive a WHERE a.period_id = p.id) AS archived
-     FROM payroll_periods p WHERE p.deleted_at IS NOT NULL ORDER BY p.deleted_at DESC`,
+       (SELECT COUNT(*) FROM payslip_archive a WHERE a.period_id = p.id AND ${scopeSql(`json_extract(a.row_json, '$.company_id')`, scope)}) AS archived
+     FROM payroll_periods p WHERE p.deleted_at IS NOT NULL AND ${scopeSql('p.company_id', scope)} ORDER BY p.deleted_at DESC`,
   ).all<DeletedPeriod>();
   return c.json(results);
 });
@@ -480,7 +554,9 @@ payrollRoutes.post('/periods/:id/restore', requirePeriodAdmin(PERIOD_ADMIN.delet
     .prepare('SELECT id, deleted_code, kind, start_date, end_date, company_id FROM payroll_periods WHERE id = ? AND deleted_at IS NOT NULL')
     .bind(id)
     .first<{ id: number; deleted_code: string; kind: string; start_date: string; end_date: string; company_id: number | null }>();
-  if (!row) throw notFound('ไม่พบงวดที่ถูกลบ');
+  const scope = await payrollScope(c);
+  if (!row || !periodVisible(row, scope)) throw notFound('ไม่พบงวดที่ถูกลบ');
+  assertPeriodWritable({ code: row.deleted_code, company_id: row.company_id }, scope);
   const body = await readJson(c);
   const reason = reasonOf(body);
   if (await db.prepare('SELECT id FROM payroll_periods WHERE code = ?').bind(row.deleted_code).first()) throw conflict(`มีงวดรหัส ${row.deleted_code} อยู่แล้ว จึงกู้คืนไม่ได้`);
@@ -499,28 +575,39 @@ payrollRoutes.post('/periods/:id/restore', requirePeriodAdmin(PERIOD_ADMIN.delet
     .run();
   if (!res.meta.changes) throw conflict('งวดนี้ถูกกู้คืนไปแล้ว');
   await audit(c, 'payroll.period_restored', 'payroll_periods', id, { code: row.deleted_code, reason });
-  return c.json(await period(db, id));
+  return c.json(await period(db, id, scope));
 });
 
+/** Company a payslip belongs to: the company that paid it (set since migration 0005), else the employee's company. */
+const SLIP_COMPANY = 'COALESCE(s.company_id, e.company_id)';
+
 payrollRoutes.get('/payslips', async (c) => {
+  const db = c.env.DB;
+  const scope = await payrollScope(c);
   const pid = c.req.query('period_id');
+  const inScope = scopeSql(SLIP_COMPANY, scope);
+  if (pid) await period(db, intParam(pid, 'period_id'), scope);
   const { results } = pid
-    ? await c.env.DB.prepare(`${SLIP_SELECT} WHERE s.period_id = ? ORDER BY e.emp_code`).bind(intParam(pid, 'period_id')).all<PayslipSummary>()
-    : await c.env.DB.prepare(`${SLIP_SELECT} ORDER BY p.start_date DESC, e.emp_code LIMIT 500`).all<PayslipSummary>();
+    ? await db.prepare(`${SLIP_SELECT} WHERE s.period_id = ? AND p.deleted_at IS NULL AND ${inScope} ORDER BY e.emp_code`).bind(intParam(pid, 'period_id')).all<PayslipSummary>()
+    : await db.prepare(`${SLIP_SELECT} WHERE p.deleted_at IS NULL AND ${inScope} ORDER BY p.start_date DESC, e.emp_code LIMIT 500`).all<PayslipSummary>();
   return c.json(results);
 });
 
 payrollRoutes.get('/periods/:id/export.csv', requirePerm('payroll.export'), async (c) => {
-  const p = await period(c.env.DB, intParam(c.req.param('id')));
+  const scope = await payrollScope(c);
+  const p = await period(c.env.DB, intParam(c.req.param('id')), scope);
+  // same company filter as the Payroll Preview: an optional ?company inside the scope, otherwise the whole scope
+  const company = await payrollCompany(c);
   const { results } = await c.env.DB.prepare(
     `SELECT e.emp_code, e.first_name || ' ' || e.last_name AS name, e.bank_name, e.bank_account, s.base_salary, s.ot_amount, s.earnings, s.unpaid_leave, s.gross, s.sso, s.ewf_employee, s.tax, s.deductions, s.net, s.ewf_employer
-     FROM payslips s JOIN employees e ON e.id = s.employee_id WHERE s.period_id = ? ORDER BY e.emp_code`,
+     FROM payslips s JOIN employees e ON e.id = s.employee_id
+     WHERE s.period_id = ?1 AND ${scopeSql(SLIP_COMPANY, scope)} AND (?2 IS NULL OR ${SLIP_COMPANY} = ?2) ORDER BY e.emp_code`,
   )
-    .bind(p.id)
+    .bind(p.id, company?.id ?? null)
     .all<Record<string, string | number | null>>();
   const head = ['รหัส', 'ชื่อ', 'ธนาคาร', 'เลขบัญชี', 'เงินเดือน', 'OT', 'เงินได้อื่น', 'หักลาไม่รับค่าจ้าง', 'รวมเงินได้', 'ประกันสังคม', 'กองทุนสงเคราะห์ลูกจ้าง (พนักงาน)', 'ภาษี', 'รวมหัก', 'สุทธิ', 'กองทุนสงเคราะห์ลูกจ้าง (นายจ้างสมทบ)'];
   const keys = ['emp_code', 'name', 'bank_name', 'bank_account', 'base_salary', 'ot_amount', 'earnings', 'unpaid_leave', 'gross', 'sso', 'ewf_employee', 'tax', 'deductions', 'net', 'ewf_employer'];
-  await audit(c, 'payroll.exported', 'payroll_periods', p.id, { rows: results.length });
+  await audit(c, 'payroll.exported', 'payroll_periods', p.id, { rows: results.length, company: company?.id ?? null, scope: scope.all ? 'all' : scope.ids });
   return c.body(csv([head, ...results.map((r) => keys.map((k) => r[k] ?? null))]), 200, {
     'content-type': 'text/csv; charset=utf-8',
     'content-disposition': `attachment; filename="${safeName(`payroll-${p.code}`)}.csv"`,
@@ -617,7 +704,7 @@ async function payrollCompany(c: Context<AppEnv>): Promise<CompanyOption | null>
 async function buildPreview(c: Context<AppEnv>): Promise<PayrollPreviewResponse> {
   const db = c.env.DB;
   const user = currentUser(c);
-  const p = await period(db, intParam(c.req.param('id')));
+  const p = await period(db, intParam(c.req.param('id')), await payrollScope(c));
   const company = await payrollCompany(c);
   const companyId = company?.id ?? null;
   const pvdCode = ewfConfig(await loadSettings(db)).providentFundComponent;
@@ -785,7 +872,12 @@ async function personRecords(db: D1Database, employeeId: number): Promise<number
   return ids.includes(employeeId) ? ids : [employeeId];
 }
 
-async function payslipYtd(db: D1Database, slip: { id: number; employee_id: number; period_id: number; pay_date: string; published: number; company_id: number | null }): Promise<PayslipYtd> {
+/**
+ * `onlyCompanies`: payroll staff limited to some companies see the YTD of those companies only (a transferred
+ * employee's pay at another company is outside their scope). null = every company (organisation-wide staff, or the
+ * employee viewing their own payslip).
+ */
+async function payslipYtd(db: D1Database, slip: { id: number; employee_id: number; period_id: number; pay_date: string; published: number; company_id: number | null }, onlyCompanies: number[] | null): Promise<PayslipYtd> {
   const year = Number(slip.pay_date.slice(0, 4));
   const ids = await personRecords(db, slip.employee_id);
   // published monthly payslips only: mid-month advances are already part of the month-end gross
@@ -799,7 +891,8 @@ async function payslipYtd(db: D1Database, slip: { id: number; employee_id: numbe
        GROUP BY s.company_id ORDER BY MIN(p.pay_date)`,
     )
     .bind(...ids, `${year}-01-01`, slip.pay_date, slip.pay_date, slip.period_id)
-    .all<YtdTotals & { company_id: number | null; company: string | null }>();
+    .all<YtdTotals & { company_id: number | null; company: string | null }>()
+    .then((r) => (onlyCompanies ? { results: r.results.filter((x) => x.company_id !== null && onlyCompanies.includes(x.company_id)) } : r));
   const zero: YtdTotals = { gross: 0, sso: 0, tax: 0, ewf_employee: 0, slips: 0 };
   const own = results.find((r) => r.company_id === slip.company_id);
   const companyName = own?.company ?? (slip.company_id ? (await db.prepare('SELECT name FROM companies WHERE id = ?').bind(slip.company_id).first<{ name: string }>())?.name ?? null : null);
@@ -821,19 +914,26 @@ payslipRoutes.get('/payslips/:id', async (c) => {
             e.emp_code || ' ' || e.first_name || ' ' || e.last_name AS employee,
             (SELECT name FROM companies x WHERE x.id = COALESCE(s.company_id, e.company_id)) AS company,
             (SELECT name FROM departments d WHERE d.id = e.department_id) AS department,
-            (SELECT title FROM positions x WHERE x.id = e.position_id) AS position
-     FROM payslips s JOIN payroll_periods p ON p.id = s.period_id JOIN employees e ON e.id = s.employee_id WHERE s.id = ?`,
+            (SELECT title FROM positions x WHERE x.id = e.position_id) AS position,
+            COALESCE(s.company_id, e.company_id) AS slip_company
+     FROM payslips s JOIN payroll_periods p ON p.id = s.period_id JOIN employees e ON e.id = s.employee_id WHERE s.id = ? AND p.deleted_at IS NULL`,
   )
     .bind(id)
-    .first<Omit<PayslipDetail, 'lines' | 'ewf_employer' | 'ewf_employer_rate' | 'calc' | 'ytd'> & { lines_json: string; calc_json: string | null; ewf_employer: number; ewf_employer_rate: number | null; period_id: number; company_id: number | null; calc_version: number }>();
-  const own = row && user.employeeId !== null && row.employee_id === user.employeeId && row.published === 1 && can(user, 'payslip.own');
-  if (!row || (!own && !can(user, 'payroll.view'))) throw notFound('ไม่พบสลิปเงินเดือน');
-  const { lines_json, calc_json, ewf_employer, ewf_employer_rate, ...rest } = row;
+    .first<Omit<PayslipDetail, 'lines' | 'ewf_employer' | 'ewf_employer_rate' | 'calc' | 'ytd'> & { lines_json: string; calc_json: string | null; ewf_employer: number; ewf_employer_rate: number | null; period_id: number; company_id: number | null; calc_version: number; slip_company: number | null }>();
+  if (!row) throw notFound('ไม่พบสลิปเงินเดือน');
+  const own = user.employeeId !== null && row.employee_id === user.employeeId && row.published === 1 && can(user, 'payslip.own');
+  // payroll staff only reach payslips of companies in their scope; any other id answers 404 like a missing one
+  const scope = can(user, 'payroll.view') ? await companyScope(c.env.DB, user) : null;
+  const staffScope = scope && (scope.scope === 'all' ? 'all' : scope.items.map((x) => x.id));
+  const staff = staffScope === 'all' || (Array.isArray(staffScope) && row.slip_company !== null && staffScope.includes(row.slip_company));
+  if (!own && !staff) throw notFound('ไม่พบสลิปเงินเดือน');
+  const { lines_json, calc_json, ewf_employer, ewf_employer_rate, slip_company: _company, ...rest } = row;
   // the employer contribution is company cost: only payroll staff see it, the employee's own view does not
   await audit(c, 'payslip.viewed', 'payslips', id, { own: !!own });
-  const employer = can(user, 'payroll.view') ? { ewf_employer, ewf_employer_rate } : {};
+  const employer = staff ? { ewf_employer, ewf_employer_rate } : {};
   const calc = calc_json ? (JSON.parse(calc_json) as PayslipCalc) : null;
-  const ytd = can(user, 'payslip_ytd.view') ? { ytd: await payslipYtd(c.env.DB, row) } : {};
+  const ytdScope = staff && Array.isArray(staffScope) && !own ? staffScope : null;
+  const ytd = can(user, 'payslip_ytd.view') ? { ytd: await payslipYtd(c.env.DB, row, ytdScope) } : {};
   return c.json<PayslipDetail>({ ...rest, ...employer, ...ytd, calc, lines: JSON.parse(lines_json) as PayslipDetail['lines'] });
 });
 

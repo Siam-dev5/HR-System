@@ -93,10 +93,21 @@ overviewRoutes.get('/dashboard', requirePerm('dashboard.view'), async (c) => {
   }
   if (can(user, 'leave.all')) kpis.push({ label: 'ลาวันนี้', value: await count(`SELECT COUNT(*) n FROM leave_requests l JOIN employees e ON e.id = l.employee_id WHERE l.status = 'approved' AND ? BETWEEN l.start_date AND l.end_date${inCompany}`, today, ...companyParams), href: linkIfAllowed(user, '/leave'), companyScoped: scoped });
   if (can(user, 'attendance.all')) kpis.push({ label: 'มาสายวันนี้', value: await count(`SELECT COUNT(*) n FROM attendance_records a JOIN employees e ON e.id = a.employee_id WHERE a.work_date = ? AND a.status = 'late'${inCompany}`, today, ...companyParams), href: linkIfAllowed(user, '/attendance'), companyScoped: scoped });
-  // recruitment, training and payroll periods are not tied to a company in this data model
+  // recruitment and training are not tied to a company in this data model
   if (can(user, 'requisitions.view')) kpis.push({ label: 'ใบขอสรรหาที่เปิด', value: await count("SELECT COUNT(*) n FROM requisitions WHERE status = 'open'"), href: linkIfAllowed(user, '/recruitment'), companyScoped: false });
   if (can(user, 'training.view')) kpis.push({ label: 'รอบอบรมที่เปิดรับ', value: await count("SELECT COUNT(*) n FROM training_sessions WHERE status IN ('planned','open')"), href: linkIfAllowed(user, '/training'), companyScoped: false });
-  if (can(user, 'payroll.view')) kpis.push({ label: 'งวดเงินเดือนรอดำเนินการ', value: await count("SELECT COUNT(*) n FROM payroll_periods WHERE status <> 'published' AND deleted_at IS NULL"), href: linkIfAllowed(user, '/payroll'), companyScoped: false });
+  // payroll periods: organisation-wide users keep the organisation-wide count (marked companyScoped: false, as
+  // before, whatever ?company says); a company-limited user counts the periods of companies in scope plus
+  // all-company periods (one period that also pays their company), never another company's period. A user without
+  // a company gets no payroll KPI.
+  if (can(user, 'payroll.view')) {
+    const scope = await companyScope(db, user);
+    const ids = scope.scope === 'all' ? null : scope.items.map((x) => x.id);
+    if (!ids || ids.length) {
+      const inScope = ids ? ` AND (company_id IS NULL OR company_id IN (${ids.map(() => '?').join(',')}))` : '';
+      kpis.push({ label: 'งวดเงินเดือนรอดำเนินการ', value: await count(`SELECT COUNT(*) n FROM payroll_periods WHERE status <> 'published' AND deleted_at IS NULL${inScope}`, ...(ids ?? [])), href: linkIfAllowed(user, '/payroll'), companyScoped: ids !== null });
+    }
+  }
 
   let headcountByDepartment: DashboardResponse['headcountByDepartment'] = [];
   if (can(user, 'employees.all') && can(user, 'employees.view')) {
