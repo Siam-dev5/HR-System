@@ -143,3 +143,30 @@ describe('contract employees (P5)', () => {
     expect(contractsCover([ct('2025-01-01', '2025-12-31'), ct('2026-06-01', null)], '2026-06-01', '2026-06-30')).toBe(true);
   });
 });
+
+describe('pay frequency (P6)', () => {
+  const MID = { start_date: '2026-10-26', end_date: '2026-11-10', company_id: 1, kind: 'mid_month' };
+  const MONTH = { start_date: '2026-10-26', end_date: '2026-11-25', company_id: 1, kind: 'monthly' };
+  const evf = (pay_frequency: string | null, period: typeof MID, over: Partial<EligibilityEmployee> = {}) =>
+    evaluateEligibility({ period, employee: emp({ pay_frequency, ...over }), salaryHistory: [], assignments: [asg()] });
+
+  it('not configured: exactly as before in both kinds of period', () => {
+    expect(evf(null, MID)).toMatchObject({ decision: 'pay', notes: [] });
+    expect(evf(null, MONTH)).toMatchObject({ decision: 'pay', notes: [] });
+  });
+
+  it('monthly employees are blocked from a mid-month round, never from the month-end period', () => {
+    expect(evf('monthly', MID)).toMatchObject({ status: 'blocked', decision: 'block', reasons: ['monthly_pay_frequency'] });
+    expect(evf('monthly', MONTH)).toMatchObject({ decision: 'pay' });
+  });
+
+  it('semi-monthly: a probation employee takes part as before; anyone else gets a note (no mid-month rule exists for them)', () => {
+    expect(evf('semi_monthly', MID, { status: 'probation' })).toMatchObject({ decision: 'pay', notes: [] });
+    expect(evf('semi_monthly', MID, { status: 'active' })).toMatchObject({ decision: 'pay', notes: ['no_mid_month_rule'] });
+    expect(evf('semi_monthly', MONTH, { status: 'active' })).toMatchObject({ decision: 'pay', notes: [] });
+  });
+
+  it('a block for another reason still comes first', () => {
+    expect(evf('monthly', MID, { base_salary: null })).toMatchObject({ status: 'missing_salary' });
+  });
+});
