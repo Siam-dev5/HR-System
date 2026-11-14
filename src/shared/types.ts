@@ -297,6 +297,8 @@ export interface PayslipCalc {
     otHours: number;
     unpaidLeaveDays: number;
     unpaidLeaveHours: number | null;
+    /** without a Feishu period report: the daily attendance (P2) the working-day figures were read from */
+    daily?: { version: string; judgedThrough: string };
   };
   /** holiday work paid by this payslip (present only when there was approved holiday work): frozen inputs and rates */
   holiday?: HolidayPaySnapshot;
