@@ -3,6 +3,8 @@
 // approved requests, recurring pay items, System Settings. Nothing here writes.
 import type { PayResult } from '../../shared/payroll';
 import { standardWhere } from './payroll-selection';
+import { dailyState } from './attendance-daily';
+import type { EmployeeAggregate } from '../../shared/attendance-daily';
 import { calculatePay, resolveEwf, round2, wageSegments, type EwfStatus, type WageResult } from '../../shared/payroll';
 import { priceHolidayWork, type ApplicableRule, type HolidayWorkInput as HolidayWorkBase } from '../../shared/holidays';
 import type { HolidayPaySnapshot, PayslipCalc, PayrollPeriod } from '../../shared/types';
@@ -161,6 +163,12 @@ export async function computePeriod(db: D1Database, p: PeriodRowLike, filterComp
         .bind(p.id)
         .all<{ import_id: number; employee_id: number; actual_work_days: number | null; expected_work_days: number | null; actual_work_hours: number | null; ot_status: string; ot_confirmed_hours: number | null; ot_rate: number | null; unpaid_sick_leave_hours: number | null; unpaid_personal_leave_hours: number | null }>()
     : { results: [] };
+  // working-day figures shown with the payslip (expected days, days worked, hours worked): a Feishu period report
+  // carries them; without one for the employee's company they come from the daily attendance of the period (P2:
+  // imported / web / corrected records, the employee's schedule, or the company calendar's weekly rest days and
+  // approved holidays). Display only: no amount reads them.
+  const daily = emps.some((e) => !imports.some((i) => i.company_id === e.company_id)) ? await dailyState(db, p) : null;
+  const dailyOf = new Map<number, EmployeeAggregate>((daily?.aggregates ?? []).map((a) => [a.employee_id, a]));
   const { results: otReq } = await db
     .prepare("SELECT employee_id, hours, rate FROM overtime_requests WHERE status = 'approved' AND work_date BETWEEN ? AND ?")
     .bind(p.start_date, p.end_date)
@@ -204,6 +212,7 @@ export async function computePeriod(db: D1Database, p: PeriodRowLike, filterComp
 
     const imp = imports.find((i) => i.company_id === e.company_id) ?? null;
     const att = imp ? attRows.find((r) => r.import_id === imp.id && r.employee_id === e.id) ?? null : null;
+    const day = imp ? null : (dailyOf.get(e.id) ?? null);
     const overtime = midMonth
       ? []
       : imp
@@ -297,9 +306,11 @@ export async function computePeriod(db: D1Database, p: PeriodRowLike, filterComp
           source: imp ? 'feishu' : 'requests',
           importId: imp?.id ?? null,
           importVersion: imp?.version ?? null,
-          workDays: att?.actual_work_days ?? null,
-          expectedWorkDays: att?.expected_work_days ?? null,
-          actualWorkHours: att?.actual_work_hours ?? null,
+          workDays: imp ? (att?.actual_work_days ?? null) : (day?.actualWorkDays ?? null),
+          expectedWorkDays: imp ? (att?.expected_work_days ?? null) : (day?.scheduledWorkDays ?? null),
+          actualWorkHours: imp ? (att?.actual_work_hours ?? null) : day ? round2(day.workedMinutes / 60) : null,
+          // which daily attendance the figures above were read from (absent with a Feishu period report)
+          ...(day && daily ? { daily: { version: daily.version, judgedThrough: daily.judgedThrough } } : {}),
           otHours: round2(overtime.reduce((a, o) => a + o.hours, 0)),
           unpaidLeaveDays: unpaidDays,
           unpaidLeaveHours: unpaidHours,
