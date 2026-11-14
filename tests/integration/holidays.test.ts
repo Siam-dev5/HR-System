@@ -454,10 +454,22 @@ describe('payroll with holiday work', () => {
   it('REGRESSION: employees without holiday work get exactly the baseline payslip', async () => {
     const s = slips();
     // ZH3: nothing changed · ZH5 / ZH9: holiday work recorded, approved and then cancelled before payroll
+    // The calculation snapshot is identical except the working-day figures of the daily attendance, which follow the
+    // company calendar: the holiday approved after the baseline (d('05-20'), a weekday of the period) is one expected
+    // working day less, with a new attendance version. Amounts and lines are byte-identical.
+    const withoutDaily = (calc: string) => {
+      const x = JSON.parse(calc);
+      const { expectedWorkDays, daily, ...rest } = x.attendance;
+      return { calc: { ...x, attendance: rest }, expectedWorkDays: expectedWorkDays as number, version: daily.version as string };
+    };
     for (const code of ['ZH3', 'ZH5', 'ZH9']) {
       const a = baseline.get(ids[code]!)!;
       const b = s.get(ids[code]!)!;
-      expect({ net: b.net, gross: b.gross, sso: b.sso, tax: b.tax, lines: b.lines_json, calc: b.calc_json }, code).toEqual({ net: a.net, gross: a.gross, sso: a.sso, tax: a.tax, lines: a.lines_json, calc: a.calc_json });
+      expect({ net: b.net, gross: b.gross, sso: b.sso, tax: b.tax, lines: b.lines_json }, code).toEqual({ net: a.net, gross: a.gross, sso: a.sso, tax: a.tax, lines: a.lines_json });
+      const [da, db] = [withoutDaily(a.calc_json), withoutDaily(b.calc_json)];
+      expect(db.calc, code).toEqual(da.calc);
+      expect(db.expectedWorkDays, code).toBe(da.expectedWorkDays - 1);
+      expect(db.version, code).not.toBe(da.version);
     }
     // ZH4: the rejected holiday-work record pays nothing; the approved OT request is paid once as normal OT (3 h × 3 × 125)
     const z4 = JSON.parse(s.get(ids.ZH4!)!.lines_json) as Array<{ code: string; amount: number }>;
