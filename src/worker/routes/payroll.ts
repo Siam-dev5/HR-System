@@ -694,7 +694,9 @@ payrollRoutes.get('/periods/:id/attendance-review', requirePerm('payroll_preview
   const p = await period(db, intParam(c.req.param('id')), scope);
   const inScope = (id: number) => scope.all || scope.ids.includes(id);
   const state = await dailyState(db, p);
-  const companies = periodCompanies(state).filter(inScope);
+  // the employees the period pays, and their companies (the ones Calculate needs a confirmation for)
+  const employees = (await reviewEmployees(db, p, state)).filter((e) => inScope(e.company_id));
+  const companies = periodCompanies(state).filter((id) => inScope(id) && employees.some((e) => e.company_id === id));
   const list = await companyReviews(db, p, state, currentUser(c).id, companies);
   await auditInvalidated(c, p.id, list);
   const { results: history } = companies.length
@@ -706,7 +708,6 @@ payrollRoutes.get('/periods/:id/attendance-review', requirePerm('payroll_preview
     : { results: [] as Array<{ id: number; username: string }> };
   const names = await companyNames(db, companies);
   const userMap = new Map(users.map((u) => [u.id, u.username]));
-  const employees = (await reviewEmployees(db, p, state)).filter((e) => inScope(e.company_id));
   return c.json({
     period: { id: p.id, code: p.code, status: p.status, kind: p.kind, start_date: p.start_date, end_date: p.end_date, calc_version: p.calc_version },
     judgedThrough: state.judgedThrough,
@@ -1157,7 +1158,8 @@ interface EmpLike {
   bank_account: string | null;
 }
 
-const STATUTORY = new Set(['SSO', 'TAX', 'EWF', 'ADV', 'UNPAID']);
+// lines with their own column (UNPAID / ABSENCE reduce gross pay: never an "other deduction")
+const STATUTORY = new Set(['SSO', 'TAX', 'EWF', 'ADV', 'UNPAID', 'ABSENCE']);
 
 function previewRow(e: EmpLike, s: SlipLike, calc: PayslipCalc | null, pvdCode: string): Record<string, string | number | null> {
   const sum = (f: (l: SlipLike['lines'][number]) => boolean) => round2(s.lines.filter(f).reduce((a, l) => a + l.amount, 0));
@@ -1179,8 +1181,14 @@ function previewRow(e: EmpLike, s: SlipLike, calc: PayslipCalc | null, pvdCode: 
     ot_hours: calc?.attendance.otHours ?? null,
     unpaid_leave_days: calc?.attendance.unpaidLeaveDays ?? null,
     unpaid_leave_hours: calc?.attendance.unpaidLeaveHours ?? null,
+    absence_days: calc?.attendance.absenceDays ?? null,
+    entitlement_days: calc?.attendance.entitlementDays ?? null,
+    payable_days: calc?.attendance.payableDays ?? null,
+    attendance_review: calc ? (calc.attendance.review?.length ? `ยืนยันแล้ว #${calc.attendance.review.map((r) => r.id).join(', #')}` : 'ยังไม่ยืนยัน') : null,
     base_salary: sum((l) => l.kind === 'earning' && l.code.startsWith('BASE')),
-    unpaid_leave_amount: s.unpaid_leave ? -s.unpaid_leave : 0,
+    // unpaid leave and absence separately (slips before the ABSENCE line carry the whole amount on UNPAID)
+    unpaid_leave_amount: s.unpaid_leave ? -round2(s.unpaid_leave - sum((l) => l.code === 'ABSENCE')) : 0,
+    absence_amount: -sum((l) => l.code === 'ABSENCE') || 0,
     ot_pay: s.ot_amount,
     holiday_pay: sum(holiday),
     allowance: sum((l) => earning(l) && l.category === 'allowance'),

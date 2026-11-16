@@ -112,6 +112,8 @@ export async function reviewEmployees(db: D1Database, p: DailyPeriod, state: Dai
       history: history.results.filter((h) => h.employee_id === e.id).map((h) => ({ from: h.effective_date, amount: h.base_salary })),
       mode: p.kind === 'mid_month' ? 'mid_month' : 'monthly', divisorDays: cfg.otDivisorDays,
     });
+    // only the employees the period pays (e.g. a mid-month round does not pay those who passed probation before it)
+    if (!wage.eligibleDays) continue;
     const ded = wage.from && wage.to ? payrollDeductions(state.input, state.validation, e.id, wage.from, wage.to) : { unpaidLeaveDays: 0, absenceDays: 0, items: [] };
     const entitlementDays = wage.segments.reduce((a, s) => a + s.paidDays, 0);
     const a = agg.get(e.id);
