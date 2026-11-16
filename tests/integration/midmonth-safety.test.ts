@@ -39,7 +39,7 @@ describe('setup (synthetic company ZZM)', () => {
       ids[code] = r.body.id;
     };
     await emp('ZM1', '2026-09-01'); // probation all month (day 90 = 11-29): 16 days in 26/10–10/11
-    await emp('ZM2', '2026-08-05'); // day 90 = 11-02: 8 days
+    await emp('ZM2', '2026-08-05'); // day 90 = 11-02, passes inside a round starting in ตุลาคม: the whole round, 16 days (2026-11-16 decision)
     await emp('ZM3', '2020-01-01', { employment_type: 'permanent', status: 'active' }); // passed long ago: not eligible
     await emp('ZM4', '2026-11-05'); // joins inside the round: 6 days
     await emp('ZM5', '2026-11-12'); // joins after the round: not eligible
@@ -72,13 +72,13 @@ describe('mid-month round', () => {
     expect(status(mid).status).toBe('draft');
   });
 
-  it('eligible employees and advance amounts (base ÷ 30 × probation days in the round, no statutory deductions)', async () => {
+  it('eligible employees and advance amounts (base ÷ 30 × entitled days of the round, no statutory deductions)', async () => {
     const r = await payroll().post(`/api/payroll/periods/${mid}/calculate`);
     expect(r.status, r.text).toBe(200);
     const s = by(mid);
     expect([...s.keys()].sort()).toEqual([ids.ZM1, ids.ZM2, ids.ZM4, ids.ZM6, ids.ZM7].sort());
     expect(s.get(ids.ZM1!)!.net).toBe(16000);
-    expect(s.get(ids.ZM2!)!.net).toBe(8000);
+    expect(s.get(ids.ZM2!)!.net).toBe(16000);
     expect(s.get(ids.ZM4!)!.net).toBe(6000);
     for (const x of s.values()) expect([x.sso, x.tax, x.gross - x.net]).toEqual([0, 0, 0]);
   });
@@ -88,7 +88,7 @@ describe('mid-month round', () => {
     expect(rs.every((x) => x.status === 200 || x.status === 409)).toBe(true);
     expect(slips(mid)).toHaveLength(5);
     expect(H.sql(`SELECT COUNT(DISTINCT employee_id) AS n FROM payslips WHERE period_id = ${mid}`)[0]!.n).toBe(5);
-    expect(r2(slips(mid).reduce((a, x) => a + x.net, 0))).toBe(62000);
+    expect(r2(slips(mid).reduce((a, x) => a + x.net, 0))).toBe(70000);
   });
 
   it('month-end is blocked while the round is calculated but not approved', async () => {
@@ -130,7 +130,7 @@ describe('month-end deduction', () => {
     const m = by(monthEnd);
     const a = by(mid);
     expect(m.get(ids.ZM1!)!.advance).toBe(16000);
-    expect(m.get(ids.ZM2!)!.advance).toBe(8000);
+    expect(m.get(ids.ZM2!)!.advance).toBe(16000);
     expect(m.get(ids.ZM4!)!.advance).toBe(6000);
     expect(m.get(ids.ZM3!)!.advance).toBe(0);
     for (const [emp, s] of m) {
@@ -145,13 +145,16 @@ describe('month-end deduction', () => {
     const m = slips(monthEnd);
     expect(new Set(m.map((s) => s.employee_id)).size).toBe(m.length);
     const adv = new Map(m.map((s) => [s.employee_id, s.advance]));
-    expect([adv.get(ids.ZM1!), adv.get(ids.ZM2!), adv.get(ids.ZM4!)]).toEqual([16000, 8000, 6000]);
+    expect([adv.get(ids.ZM1!), adv.get(ids.ZM2!), adv.get(ids.ZM4!)]).toEqual([16000, 16000, 6000]);
   });
 
   it('locking: no mid-month round can be calculated under a calculated month-end', async () => {
     const late = await payroll().post('/api/payroll/periods', { company_id: co, code: 'ZM-X4', name: 'late round', kind: 'mid_month', start_date: '2026-11-11', end_date: '2026-11-12', pay_date: '2026-11-15' });
     expect(late.status).toBe(201); // the definition may exist, but it can never be calculated / paid
+    // no attendance review for this scratch period (it is hard-deleted below; a confirmation would keep it referenced)
+    payroll().autoReview = false;
     expect((await payroll().post(`/api/payroll/periods/${late.body.id}/calculate`)).status).toBe(409);
+    payroll().autoReview = true;
     expect((await payroll().post(`/api/payroll/periods/${mid}/calculate`)).status).toBe(409);
     expect(slips(late.body.id)).toHaveLength(0);
     H.sql(`DELETE FROM payroll_periods WHERE id = ${late.body.id}`);
