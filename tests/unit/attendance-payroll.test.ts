@@ -108,12 +108,21 @@ describe('two-round payroll for employees on probation', () => {
     expect(w.wage).toBe(16000);
   });
 
-  it('probation completed during the mid-month round: only the days before day 91 are advanced', () => {
-    const w = wageSegments(base({ ...mid, hireDate: '2026-08-05' })); // day 90 = 2026-11-02
+  it('probation completed during a round starting in a month ending in "คม" (hired before the 26th): the whole round (2026-11-16 decision)', () => {
+    const w = wageSegments(base({ ...mid, hireDate: '2026-08-05' })); // day 90 = 2026-11-02; the round starts in ตุลาคม
+    expect(w.calendarEntitled).toBe(true);
+    expect(w.segments.map((s) => [s.status, s.start, s.end, s.paidDays])).toEqual([['probation', '2026-10-26', '2026-11-02', 8], ['passed', '2026-11-03', '2026-11-10', 8]]);
+    expect(w.eligibleDays).toBe(16);
+    expect(w.wage).toBe(16000);
+  });
+
+  it('probation completed during a round starting in any other month: only the days before day 91 are advanced (unchanged)', () => {
+    const w = wageSegments(base({ periodStart: '2026-11-26', periodEnd: '2026-12-10', mode: 'mid_month', hireDate: '2026-09-04' })); // day 90 = 2026-12-02
+    expect(w.calendarEntitled).toBe(false);
     expect(w.segments).toHaveLength(1);
-    expect(w.segments[0]!.end).toBe('2026-11-02');
-    expect(w.eligibleDays).toBe(8);
-    expect(w.wage).toBe(8000);
+    expect(w.segments[0]!.end).toBe('2026-12-02');
+    expect(w.eligibleDays).toBe(7);
+    expect(w.wage).toBe(7000);
   });
 
   it('employees who already passed probation get no mid-month round', () => {

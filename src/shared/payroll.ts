@@ -51,6 +51,8 @@ export interface PayInput {
   advance?: number;
   /** mid-month round: an advance of earned wage only, statutory deductions happen at month-end */
   advanceOnly?: boolean;
+  /** HR-confirmed absence days (attendance), deducted like unpaid leave on its own payslip line */
+  absenceDays?: number;
   /** pay for approved holiday work (HOLIDAY_WORK / HOLIDAY_OT): taxable, outside the SSO / EWF wage like OT */
   holidayPay?: Array<{ code: 'HOLIDAY_WORK' | 'HOLIDAY_OT'; name: string; amount: number }>;
 }
@@ -119,7 +121,11 @@ export function calculatePay(input: PayInput, cfg: PayrollConfig = DEFAULT_PAYRO
   const dailyRate = base / cfg.otDivisorDays;
   const hourly = dailyRate / cfg.hoursPerDay;
   const otAmount = round2(input.overtime.reduce((s, o) => s + o.hours * o.rate * hourly, 0));
-  const unpaidLeave = round2(Math.min(input.unpaidLeaveDays * dailyRate, wage));
+  // unpaid leave and confirmed absence: one rounding of the total (never more than the wage), split into two lines
+  const absenceDays = input.absenceDays ?? 0;
+  const unpaidLeave = round2(Math.min((input.unpaidLeaveDays + absenceDays) * dailyRate, wage));
+  const leaveLine = absenceDays ? Math.min(round2(input.unpaidLeaveDays * dailyRate), unpaidLeave) : unpaidLeave;
+  const absenceLine = round2(unpaidLeave - leaveLine);
   const earnings = round2(input.earnings.reduce((s, e) => s + e.amount, 0));
   const taxableEarnings = input.earnings.filter((e) => e.taxable).reduce((s, e) => s + e.amount, 0);
   const holiday = (input.holidayPay ?? []).filter((x) => x.amount > 0).map((x) => ({ ...x, amount: round2(x.amount) }));
@@ -141,7 +147,8 @@ export function calculatePay(input: PayInput, cfg: PayrollConfig = DEFAULT_PAYRO
   if (otAmount) lines.push({ code: 'OT', name: 'ค่าล่วงเวลา', kind: 'earning', amount: otAmount });
   for (const x of holiday) lines.push({ code: x.code, name: x.name, kind: 'earning', amount: x.amount });
   for (const e of input.earnings) lines.push({ code: e.code, name: e.name, kind: 'earning', amount: round2(e.amount), ...(e.category ? { category: e.category } : {}) });
-  if (unpaidLeave) lines.push({ code: 'UNPAID', name: 'หักลาไม่รับค่าจ้าง', kind: 'deduction', amount: unpaidLeave });
+  if (leaveLine) lines.push({ code: 'UNPAID', name: 'หักลาไม่รับค่าจ้าง', kind: 'deduction', amount: leaveLine });
+  if (absenceLine) lines.push({ code: 'ABSENCE', name: 'หักขาดงาน (HR ยืนยันแล้ว)', kind: 'deduction', amount: absenceLine });
   if (statutory) lines.push({ code: 'SSO', name: 'ประกันสังคม', kind: 'deduction', amount: sso });
   if (ewfEmployee) lines.push({ code: 'EWF', name: 'เงินสะสมกองทุนสงเคราะห์ลูกจ้าง', kind: 'deduction', amount: ewfEmployee });
   if (statutory) lines.push({ code: 'TAX', name: 'ภาษีหัก ณ ที่จ่าย', kind: 'deduction', amount: tax });
@@ -162,6 +169,24 @@ export function addDays(date: string, n: number): string {
 /** Inclusive number of calendar days from a to b (0 when b < a). */
 export function daysInclusive(a: string, b: string): number {
   return b < a ? 0 : Math.round((utc(b) - utc(a)) / 86_400_000) + 1;
+}
+
+// ---- Mid-month calendar entitlement (management decision 2026-11-16) -------------------------------
+// A mid-month round runs from the 26th of a month to the 10th of the next. When that month is a Thai month whose name
+// ends in "คม" (31 days: มกราคม มีนาคม พฤษภาคม กรกฎาคม สิงหาคม ตุลาคม ธันวาคม) and the employee was hired before the
+// 26th of it, the round pays its calendar days (26–31 + 1–10 = 16) on the 30-day base, even when probation ends inside
+// the round. Any other round keeps the earlier rule: the calendar days still on probation, counted from the hire date.
+// "That month" is the month of the round's first day (the 26th): a round paid in November covers 26 Oct – 10 Nov.
+export const THAI_MONTHS = ['มกราคม', 'กุมภาพันธ์', 'มีนาคม', 'เมษายน', 'พฤษภาคม', 'มิถุนายน', 'กรกฎาคม', 'สิงหาคม', 'กันยายน', 'ตุลาคม', 'พฤศจิกายน', 'ธันวาคม'] as const;
+export const MID_MONTH_CUTOFF_DAY = 26;
+
+/** Thai name of the month of a YYYY-MM-DD date. */
+export const thaiMonthOf = (date: string): string => THAI_MONTHS[Number(date.slice(5, 7)) - 1] ?? '';
+
+/** Whether a mid-month round starting on `periodStart` pays its full calendar days to an employee hired on `hireDate`. */
+export function midMonthCalendarEntitled(periodStart: string, hireDate: string): boolean {
+  if (!thaiMonthOf(periodStart).endsWith('คม')) return false;
+  return hireDate < `${periodStart.slice(0, 7)}-${String(MID_MONTH_CUTOFF_DAY).padStart(2, '0')}`;
 }
 
 // ---- Probation and earned wage ------------------------------------------------------------------
@@ -202,8 +227,13 @@ export interface WageInput {
 export interface WageResult {
   segments: WageSegment[];
   wage: number;
-  /** calendar days employed (and, for mid_month, still on probation) in the period */
+  /** calendar days employed (and, for mid_month without the calendar entitlement, still on probation) in the period */
   eligibleDays: number;
+  /** mid_month only: the round pays its calendar days (midMonthCalendarEntitled), not just the probation days */
+  calendarEntitled?: boolean;
+  /** first and last day the wage pays (absent when nothing is paid) */
+  from?: string;
+  to?: string;
   periodDays: number;
   fullPeriod: boolean;
   probationEnd: string;
@@ -245,8 +275,12 @@ export function wageSegments(w: WageInput): WageResult {
   const periodDays = daysInclusive(w.periodStart, w.periodEnd);
   const start = w.hireDate > w.periodStart ? w.hireDate : w.periodStart;
   let end = w.terminationDate && w.terminationDate < w.periodEnd ? w.terminationDate : w.periodEnd;
-  if (w.mode === 'mid_month' && probationEnd < end) end = probationEnd;
-  if (start > end) return { segments: [], wage: 0, eligibleDays: 0, periodDays, fullPeriod: false, probationEnd, probationStatus, rate: rateOn(w.periodEnd) };
+  // the round is still an advance for employees on probation when it starts: one who passed before the round is not
+  // paid by it (unchanged); one who passes during it keeps the whole round when the calendar entitlement applies
+  const calendarEntitled = w.mode === 'mid_month' && probationEnd >= w.periodStart && midMonthCalendarEntitled(w.periodStart, w.hireDate);
+  if (w.mode === 'mid_month' && !calendarEntitled && probationEnd < end) end = probationEnd;
+  const entitled = w.mode === 'mid_month' ? { calendarEntitled } : {};
+  if (start > end) return { segments: [], wage: 0, eligibleDays: 0, periodDays, fullPeriod: false, probationEnd, probationStatus, rate: rateOn(w.periodEnd), ...entitled };
 
   const cuts = new Set<string>();
   const passed = addDays(probationEnd, 1);
@@ -273,16 +307,27 @@ export function wageSegments(w: WageInput): WageResult {
       excess -= cut;
     }
   }
+  // one rounding of the whole wage (rate ÷ 30 × days, summed exactly); each segment line is rounded to 2 decimals and
+  // the last line takes the remainder, so the lines always add up to the wage without a rounding drift
+  const exact = segments.reduce((a, x) => a + (x.paidDays === D ? x.rate : (x.rate / D) * x.paidDays), 0);
+  const wage = round2(exact);
   for (const seg of segments) seg.amount = seg.paidDays === D ? seg.rate : round2((seg.rate / D) * seg.paidDays);
+  if (segments.length > 1) {
+    const last = segments[segments.length - 1] as WageSegment;
+    last.amount = round2(wage - segments.slice(0, -1).reduce((a, x) => a + x.amount, 0));
+  }
   return {
     segments,
-    wage: round2(segments.reduce((a, x) => a + x.amount, 0)),
+    wage,
     eligibleDays: daysInclusive(start, end),
     periodDays,
     fullPeriod,
     probationEnd,
     probationStatus,
     rate: rateOn(end),
+    from: start,
+    to: end,
+    ...entitled,
   };
 }
 
