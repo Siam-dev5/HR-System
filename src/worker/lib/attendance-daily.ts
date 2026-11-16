@@ -67,7 +67,7 @@ export async function loadDaily(db: D1Database, p: DailyPeriod, today = bangkokN
   const input: DailyInput = { periodStart: from, periodEnd: to, today, employees, schedule: new Map(), calendars: new Map(), records: [], leaves: [], exemptions: [], overtime: [], confirmed: new Set() };
   if (!employees.length) return { input, watermark };
   const json = JSON.stringify(employees.map((e) => e.id));
-  const [days, records, requests, imports, exemptions, overtime, confirmed] = await Promise.all([
+  const [days, records, requests, imports, exemptions, overtime, confirmed, excused] = await Promise.all([
     resolveDays(db, employees.map((e) => e.id), from, to),
     db.prepare(
       `SELECT a.id, a.employee_id, a.work_date, a.status, a.clock_in, a.clock_out, a.clock_out_next_day, a.shift_id, a.late_minutes, a.early_leave_minutes, a.worked_minutes,
@@ -75,9 +75,9 @@ export async function loadDaily(db: D1Database, p: DailyPeriod, today = bangkokN
        FROM attendance_records a WHERE a.employee_id IN (SELECT value FROM json_each(?1)) AND a.work_date BETWEEN ?2 AND ?3`,
     ).bind(json, from, to).all<DailyRecord>(),
     db.prepare(
-      `SELECT l.id, l.employee_id, l.start_date, l.end_date, l.status, t.paid FROM leave_requests l LEFT JOIN leave_types t ON t.id = l.leave_type_id
+      `SELECT l.id, l.employee_id, l.start_date, l.end_date, l.status, t.paid, l.days FROM leave_requests l LEFT JOIN leave_types t ON t.id = l.leave_type_id
        WHERE l.employee_id IN (SELECT value FROM json_each(?1)) AND l.start_date <= ?3 AND l.end_date >= ?2 AND l.status IN ('approved', 'pending', 'rejected', 'cancelled')`,
-    ).bind(json, from, to).all<{ id: number; employee_id: number; start_date: string; end_date: string; status: DailyLeave['status']; paid: number | null }>(),
+    ).bind(json, from, to).all<{ id: number; employee_id: number; start_date: string; end_date: string; status: DailyLeave['status']; paid: number | null; days: number | null }>(),
     db.prepare(
       `SELECT id, employee_id, start_date, end_date, approval_status AS status FROM leave_import_records
        WHERE status IN ('valid', 'warning') AND employee_id IN (SELECT value FROM json_each(?1)) AND approval_status IN ('approved', 'pending', 'rejected', 'cancelled')
@@ -88,6 +88,8 @@ export async function loadDaily(db: D1Database, p: DailyPeriod, today = bangkokN
     db.prepare("SELECT id, employee_id, work_date, hours, rate FROM overtime_requests WHERE status = 'approved' AND employee_id IN (SELECT value FROM json_each(?1)) AND work_date BETWEEN ?2 AND ?3")
       .bind(json, from, to).all<DailyOvertime>(),
     db.prepare("SELECT source_json FROM payroll_attendance_holds WHERE period_id = ? AND kind = 'pending_review' AND status = 'cleared'").bind(p.id).all<{ source_json: string }>(),
+    // absences HR excused (a cleared 'absent' hold of this period): never deducted
+    db.prepare("SELECT employee_id, work_date FROM payroll_attendance_holds WHERE period_id = ? AND kind = 'absent' AND status = 'cleared' AND work_date IS NOT NULL").bind(p.id).all<{ employee_id: number; work_date: string }>(),
   ]);
   const schedule = new Map<string, { kind: ScheduleKind; shiftId: number | null }>();
   for (const [key, day] of days) schedule.set(key, { kind: day.kind, shiftId: day.kind === 'shift' ? (day.shift?.id ?? null) : null });
@@ -109,12 +111,13 @@ export async function loadDaily(db: D1Database, p: DailyPeriod, today = bangkokN
       calendars,
       records: records.results,
       leaves: [
-        ...requests.results.map((l) => ({ source: 'request' as const, id: l.id, employee_id: l.employee_id, start_date: l.start_date, end_date: l.end_date, status: l.status, paid: l.paid === null ? null : l.paid === 1 })),
+        ...requests.results.map((l) => ({ source: 'request' as const, id: l.id, employee_id: l.employee_id, start_date: l.start_date, end_date: l.end_date, status: l.status, paid: l.paid === null ? null : l.paid === 1, days: l.days })),
         ...imports.results.map((l) => ({ ...l, source: 'import' as const, paid: null })),
       ],
       exemptions: exemptions.results,
       overtime: overtime.results,
       confirmed: ok,
+      excused: new Set(excused.results.map((x) => `${x.employee_id}|${x.work_date}`)),
     },
   };
 }
