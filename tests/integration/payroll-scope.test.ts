@@ -65,7 +65,7 @@ beforeAll(async () => {
   // company-limited payroll roles (no employees.all): a payroll officer of one company and a read-only viewer
   H.sql(`INSERT INTO roles (code, name, description, privileged, system) VALUES
     ('zz_payroll_company', 'ZZ Payroll (company)', 'test', 0, 0), ('zz_payroll_viewer', 'ZZ Payroll viewer (company)', 'test', 0, 0);
-    INSERT INTO role_permissions (role_id, permission) SELECT r.id, p.value FROM roles r, json_each('["dashboard.view","payroll.view","payroll.calculate","payroll.approve","payroll.publish","payroll.export","payroll_preview.view","payroll_preview.export","payslip_ytd.view","payslip.own","attendance_import.view","attendance_import.create"]') p WHERE r.code = 'zz_payroll_company';
+    INSERT INTO role_permissions (role_id, permission) SELECT r.id, p.value FROM roles r, json_each('["dashboard.view","payroll.view","payroll.calculate","payroll.approve","payroll.publish","payroll.export","payroll_preview.view","payroll_preview.export","payroll_attendance.confirm","payslip_ytd.view","payslip.own","attendance_import.view","attendance_import.create"]') p WHERE r.code = 'zz_payroll_company';
     INSERT INTO role_permissions (role_id, permission) SELECT r.id, p.value FROM roles r, json_each('["payroll.view","payroll_preview.view","payslip_ytd.view"]') p WHERE r.code = 'zz_payroll_viewer';`);
 
   const pw = (n: string) => `Zz-${n}-Scope-9a`;

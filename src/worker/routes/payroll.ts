@@ -366,9 +366,6 @@ payrollRoutes.post('/periods/:id/approve', requirePerm('payroll.approve'), async
   await assertPayrollCompanies(db, p);
   // P4: the selection is the one calculated, and every selected employee is still payable
   await assertSelectionApprovable(db, p);
-  // HR attendance review (0025): the payslips were calculated after a confirmation that is still in force and still
-  // matches the attendance as it is now; otherwise HR reviews again and the period is recalculated
-  await assertReviewApprovable(c, p);
   // attendance review (P1): a fresh scan; any open hold refuses approval, and a hold resolved after the calculation
   // (the source data changed, e.g. a leave was approved) needs a recalculation first, since the pay may differ
   if (await holdsEnabled(db, p)) {
@@ -387,6 +384,10 @@ payrollRoutes.post('/periods/:id/approve', requirePerm('payroll.approve'), async
     // opened or resolved no hold, needs a recalculation — a new calc_version)
     await assertAttendanceCurrent(db, p, 'approval');
   }
+  // HR attendance review (0025): the payslips were calculated after a confirmation that is still in force and still
+  // matches the attendance as it is now; otherwise HR reviews again and the period is recalculated (checked after the
+  // P1/P2 checks, which name the more precise reason)
+  await assertReviewApprovable(c, p);
   // figures ACC returned cannot be approved again unchanged: HR reopens and recalculates (a new calc_version)
   const returned = 'EXISTS (SELECT 1 FROM payroll_accounting_reviews r WHERE r.period_id = payroll_periods.id AND r.calc_version = payroll_periods.calc_version AND r.status = \'returned\')';
   if (await db.prepare(`SELECT 1 FROM payroll_periods WHERE id = ? AND ${returned}`).bind(p.id).first()) {
@@ -745,10 +746,8 @@ payrollRoutes.post('/periods/:id/attendance-review/confirm', requirePerm('payrol
   if (seen !== version) {
     throw new HttpError(409, 'attendance_review_stale', 'ข้อมูลเวลาทำงานเปลี่ยนระหว่างที่ตรวจสอบ กรุณาโหลดหน้าตรวจสอบใหม่และตรวจอีกครั้งก่อนยืนยัน');
   }
-  const invalid = state.validation.records.filter((v) => v.company_id === companyId && v.status === 'invalid');
-  if (invalid.length) {
-    throw new HttpError(409, 'attendance_review_invalid_records', `มีบันทึกเวลาที่ไม่ถูกต้อง ${invalid.length} รายการ ต้องแก้ไขบันทึกเวลา (Attendance Correction) ก่อนยืนยันการตรวจสอบ`);
-  }
+  // invalid records do not block the confirmation: Calculate holds them (P2 'invalid_record' holds, never counted or
+  // deducted) and approval is refused until they are corrected; their count is part of the confirmed summary
   const employees = (await reviewEmployees(db, p, state)).filter((e) => e.company_id === companyId);
   const summary = {
     employees: employees.map(({ deductions, ...e }) => ({ ...e, deductions })),
