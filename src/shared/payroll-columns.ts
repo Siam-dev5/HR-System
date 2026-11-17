@@ -9,6 +9,8 @@ export interface PreviewColumn {
   label: string;
   group: PreviewGroup;
   type: PreviewColumnType;
+  /** hidden in the standard layout (the preview table and the export); a Super Admin can still show it per company */
+  defaultHidden?: boolean;
 }
 
 export const PREVIEW_GROUPS: Record<PreviewGroup, string> = {
@@ -28,8 +30,10 @@ export const PREVIEW_COLUMNS: readonly PreviewColumn[] = [
   { key: 'position', label: 'ตำแหน่ง', group: 'employee', type: 'text' },
   { key: 'hire_date', label: 'วันเริ่มงาน', group: 'employee', type: 'date' },
   { key: 'probation_status', label: 'สถานะทดลองงาน', group: 'employee', type: 'text' },
-  { key: 'work_days', label: 'วันทำงาน', group: 'attendance', type: 'number' },
-  { key: 'expected_work_days', label: 'วันทำงานที่กำหนด (Expected)', group: 'attendance', type: 'number' },
+  // hidden by default (HR decision 2026-11-17): next to "วันมีสิทธิ์เงินเดือน (ฐาน 30)" they read as the days paid and
+  // confused the review. The figures stay in the rows (and in the attendance review); no amount reads them.
+  { key: 'work_days', label: 'วันทำงาน', group: 'attendance', type: 'number', defaultHidden: true },
+  { key: 'expected_work_days', label: 'วันทำงานที่กำหนด (Expected)', group: 'attendance', type: 'number', defaultHidden: true },
   { key: 'actual_work_hours', label: 'ชั่วโมงทำงานจริง', group: 'attendance', type: 'number' },
   { key: 'ot_hours', label: 'ชั่วโมง OT (ยืนยันแล้ว)', group: 'attendance', type: 'number' },
   { key: 'unpaid_leave_days', label: 'วันลาไม่รับค่าจ้าง', group: 'attendance', type: 'number' },
@@ -66,10 +70,13 @@ export interface LayoutColumn {
   visible: boolean;
 }
 
-export const DEFAULT_LAYOUT: readonly LayoutColumn[] = PREVIEW_COLUMNS.map((c) => ({ key: c.key, visible: true }));
+export const DEFAULT_LAYOUT: readonly LayoutColumn[] = PREVIEW_COLUMNS.map((c) => ({ key: c.key, visible: !c.defaultHidden }));
+
+const defaultVisible = (key: string): boolean => !PREVIEW_COLUMNS.find((c) => c.key === key)?.defaultHidden;
 
 /**
- * Validates a submitted layout: every known column exactly once (missing ones are appended visible), unknown keys
+ * Validates a submitted layout: every known column exactly once (missing ones are appended with their standard
+ * visibility), unknown keys
  * rejected, at least one visible column. Returns null when the payload is invalid.
  */
 export function normalizeLayout(input: unknown): LayoutColumn[] | null {
@@ -83,7 +90,7 @@ export function normalizeLayout(input: unknown): LayoutColumn[] | null {
     seen.add(key);
     out.push({ key, visible });
   }
-  for (const k of PREVIEW_KEYS) if (!seen.has(k)) out.push({ key: k, visible: true });
+  for (const k of PREVIEW_KEYS) if (!seen.has(k)) out.push({ key: k, visible: defaultVisible(k) });
   return out.some((c) => c.visible) ? out : null;
 }
 

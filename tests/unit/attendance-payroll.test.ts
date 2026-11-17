@@ -274,6 +274,17 @@ describe('payroll preview layout validation', () => {
     expect(l).toHaveLength(PREVIEW_KEYS.length);
     expect(new Set(l?.map((c) => c.key))).toEqual(new Set(PREVIEW_KEYS));
   });
+  it('hides "วันทำงาน" and "วันทำงานที่กำหนด (Expected)" in the standard layout; everything else stays shown', () => {
+    const hidden = DEFAULT_LAYOUT.filter((c) => !c.visible).map((c) => c.key);
+    expect(hidden).toEqual(['work_days', 'expected_work_days']);
+    expect(DEFAULT_LAYOUT.find((c) => c.key === 'entitlement_days')?.visible).toBe(true);
+    expect(DEFAULT_LAYOUT.map((c) => c.key)).toEqual(PREVIEW_KEYS); // still in the catalogue, in the same order
+    // columns not sent with a layout come back with their standard visibility; a company choice is kept
+    const l = normalizeLayout([{ key: 'net_pay', visible: true }]);
+    expect(l?.find((c) => c.key === 'work_days')?.visible).toBe(false);
+    expect(l?.find((c) => c.key === 'actual_work_hours')?.visible).toBe(true);
+    expect(normalizeLayout([{ key: 'work_days', visible: true }])?.[0]).toEqual({ key: 'work_days', visible: true });
+  });
   it('rejects unknown, duplicate, malformed or fully hidden layouts', () => {
     expect(normalizeLayout([{ key: 'password', visible: true }])).toBeNull();
     expect(normalizeLayout([{ key: 'net_pay', visible: true }, { key: 'net_pay', visible: true }])).toBeNull();
