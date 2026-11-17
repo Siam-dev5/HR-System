@@ -67,7 +67,13 @@ try {
   const created = await api('POST', '/api/payroll/periods', { code: 'PV-2027-05', name: 'zz preview', kind: 'monthly', company_id: 1, start_date: '2027-05-01', end_date: '2027-05-31', pay_date: '2027-05-31' });
   const pid = created.body?.id;
   check('test period created', created.status === 201, String(created.status));
-  check('test period calculated', (await api('POST', `/api/payroll/periods/${pid}/calculate`)).status === 200);
+  // HR attendance review before Calculate (0025): confirm each company's current version, as HR does in the UI
+  const review = await api('GET', `/api/payroll/periods/${pid}/attendance-review`);
+  for (const x of review.body?.companies ?? []) {
+    if (x.status !== 'confirmed') await api('POST', `/api/payroll/periods/${pid}/attendance-review/confirm`, { company_id: x.company_id, version: x.version });
+  }
+  const calculated = await api('POST', `/api/payroll/periods/${pid}/calculate`);
+  check('test period calculated', calculated.status === 200, `${calculated.status} ${calculated.body?.error?.code ?? ''}`);
   const previewBefore = await api('GET', `/api/payroll/periods/${pid}/preview?company=1`);
 
   const open = async (w, h) => {
@@ -92,6 +98,13 @@ try {
     const rows = await page.$$eval('.preview-table tbody tr', (x) => x.length);
     const boxes = await page.$$eval('.preview-table tbody tr td.fz-check input[type=checkbox]', (x) => x.length);
     check('1. a checkbox on every row', rows > 1 && boxes === rows, `${boxes}/${rows}`);
+    // standard layout: "วันทำงาน" / "วันทำงานที่กำหนด (Expected)" hidden, the salary entitlement days still shown
+    const headers = await page.$$eval('.preview-table thead th', (x) => x.map((t) => t.textContent.trim()));
+    check('0. workday columns hidden, "วันมีสิทธิ์เงินเดือน (ฐาน 30)" shown', !headers.includes('วันทำงาน') && !headers.includes('วันทำงานที่กำหนด (Expected)') && headers.includes('วันมีสิทธิ์เงินเดือน (ฐาน 30)'), headers.filter((t) => t.startsWith('วัน')).join(' | '));
+    await page.evaluate(() => { const w = document.querySelector('.preview-wrap'); const th = [...document.querySelectorAll('.preview-table thead th')].find((t) => t.textContent.trim() === 'สถานะทดลองงาน'); if (w && th) w.scrollLeft = th.offsetLeft - 420; });
+    await page.waitForTimeout(150);
+    await page.screenshot({ path: join(SHOTS, 'preview-1440-attendance.png') });
+    await scroll(0);
     const countText = () => page.textContent('.pick-count');
     const head = () => page.$eval('.pick-all', (e) => ({ checked: e.checked, indeterminate: e.indeterminate }));
     // 2. one, 3. several
