@@ -6,6 +6,7 @@ import { h, mount, loading, errorBox, fmtDate, fmtMoney, modal, toast, confirmDi
 import { optionLabel } from '../labels';
 import { basePath, can, isSuperAdmin, link, state } from '../app';
 import { attendanceReview } from './payroll-attendance-review';
+import { displayYear } from '../i18n';
 
 /** Super Admin period controls are shown only to the super_admin role holding the permission (the API checks both). */
 const adminCan = (perm: string) => isSuperAdmin() && can(perm);
@@ -350,7 +351,7 @@ function ytdBlock(y: PayslipYtd): HTMLElement {
   const row = (label: string, t: { gross: number; sso: number; tax: number; ewf_employee: number }) =>
     h('tr', null, h('td', null, label), h('td', { class: 'num' }, fmtMoney(t.gross)), h('td', { class: 'num' }, fmtMoney(t.sso)), h('td', { class: 'num' }, fmtMoney(t.tax)), h('td', { class: 'num' }, fmtMoney(t.ewf_employee)));
   const multi = y.employee.companies > 1 || y.byCompany.some((c) => c.company_id !== y.company.company_id);
-  return h('section', { class: 'ytd' }, h('h3', null, `ยอดสะสมตั้งแต่ต้นปี ${y.year + 543} (YTD)`),
+  return h('section', { class: 'ytd' }, h('h3', null, `ยอดสะสมตั้งแต่ต้นปี ${displayYear(y.year)} (YTD)`),
     h('div', { class: 'table-wrap' }, h('table', { class: 'table compact' },
       h('thead', null, h('tr', null, ['', 'เงินได้สะสม', 'ประกันสังคมสะสม', 'ภาษีสะสม', 'กองทุนสงเคราะห์ลูกจ้างสะสม (พนักงาน)'].map((t) => h('th', null, t)))),
       h('tbody', null,

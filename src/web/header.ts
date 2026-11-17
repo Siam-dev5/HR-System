@@ -4,6 +4,7 @@ import { h, mount, toast, type Child } from './dom';
 import { link, refreshRoute, state } from './app';
 import { resolvedTheme, setThemePref, themePref, type ThemePref } from './theme';
 import { icon, type IconName } from './icons';
+import { languageButton } from './i18n';
 
 // ---- dropdown primitive: one menu open at a time, outside click / Escape close, arrow-key navigation ----
 
@@ -254,5 +255,5 @@ function userMenu(meta: MetaResponse, onLogout: () => void) {
 export function headerMenus(meta: MetaResponse, bell: HTMLElement, onLogout: () => void): HTMLElement[] {
   listenGlobally();
   state.companyId = initialCompany(meta);
-  return [companyMenu(meta), bell, themeMenu(), userMenu(meta, onLogout)];
+  return [companyMenu(meta), bell, languageButton('icon-only'), themeMenu(), userMenu(meta, onLogout)];
 }

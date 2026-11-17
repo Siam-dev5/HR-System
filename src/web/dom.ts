@@ -1,4 +1,5 @@
 // Minimal DOM builder. All text goes through textContent / attributes, never innerHTML.
+import { locale } from './i18n';
 
 export type Child = Node | string | number | null | undefined | false | Child[];
 type Attrs = Record<string, unknown>;
@@ -106,12 +107,13 @@ export function errorBox(err: unknown): HTMLElement {
   return h('div', { class: 'alert alert-error', role: 'alert' }, msg);
 }
 
-const money = new Intl.NumberFormat('th-TH', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
-const num = new Intl.NumberFormat('th-TH', { maximumFractionDigits: 2 });
+// numbers and dates follow the UI language (th-TH: Buddhist year; en-GB / zh-CN: Gregorian year)
+const money = new Intl.NumberFormat(locale(), { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+const num = new Intl.NumberFormat(locale(), { maximumFractionDigits: 2 });
 export const fmtMoney = (v: unknown) => (v === null || v === undefined || v === '' ? '-' : typeof v === 'number' ? money.format(v) : String(v));
 export const fmtNum = (v: unknown) => (v === null || v === undefined || v === '' ? '-' : typeof v === 'number' ? num.format(v) : String(v));
 export function fmtDate(v: unknown): string {
   if (typeof v !== 'string' || !/^\d{4}-\d{2}-\d{2}/.test(v)) return v === null || v === undefined ? '-' : String(v);
   const d = new Date(v.length === 10 ? `${v}T00:00:00` : v.replace(' ', 'T') + 'Z');
-  return Number.isNaN(d.getTime()) ? v : d.toLocaleDateString('th-TH', { year: 'numeric', month: 'short', day: 'numeric' }) + (v.length > 10 ? ' ' + d.toLocaleTimeString('th-TH', { hour: '2-digit', minute: '2-digit' }) : '');
+  return Number.isNaN(d.getTime()) ? v : d.toLocaleDateString(locale(), { year: 'numeric', month: 'short', day: 'numeric' }) + (v.length > 10 ? ' ' + d.toLocaleTimeString(locale(), { hour: '2-digit', minute: '2-digit' }) : '');
 }

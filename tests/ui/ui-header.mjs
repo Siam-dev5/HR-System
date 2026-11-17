@@ -111,7 +111,7 @@ try {
     await page.goto(BASE + '/dashboard');
     await settle(page);
     const btns = await page.$$eval('.topbar-actions > *', (els) => els.map((e) => e.className));
-    check(`${label}: header order = company, bell, theme, user`, JSON.stringify(btns) === JSON.stringify(['dd', 'icon-btn bell', 'dd', 'dd']), btns.join(' | '));
+    check(`${label}: header order = company, bell, language, theme, user`, JSON.stringify(btns) === JSON.stringify(['dd', 'icon-btn bell', 'hdr-btn lang-btn icon-only', 'dd', 'dd']), btns.join(' | '));
     check(`${label}: no page h-scroll with new header`, await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth));
 
     // ---- company switcher ----

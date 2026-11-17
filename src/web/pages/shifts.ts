@@ -3,7 +3,8 @@
 // check and confirmation before saving). All data comes from /api/shifts; the API enforces every rule again.
 import type { CompanyOption } from '../../shared/types';
 import { SHIFT_TYPE_LABEL, WEEKDAY_SHORT, dateRange, formatDuration, monthEnd, netWorkMinutes, rotate, shiftProblems, shiftSpan, type BreakPeriod, type ShiftType } from '../../shared/shifts';
-import { THAI_MONTHS_FULL, buddhistYear, weekday } from '../../shared/holidays';
+import { weekday } from '../../shared/holidays';
+import { monthYear } from '../i18n';
 import { addDays } from '../../shared/payroll';
 import { get, post, put, qs } from '../api';
 import { h, mount, loading, errorBox, fmtDate, fmtNum, modal, toast, type Child } from '../dom';
@@ -561,7 +562,7 @@ export async function renderShiftSchedule(main: HTMLElement, params: URLSearchPa
       h('button', { class: 'btn small', onclick: () => go({ date: t }) }, 'วันนี้'),
       h('button', { class: 'btn small', 'aria-label': view === 'week' ? 'สัปดาห์ถัดไป' : 'เดือนถัดไป', onclick: () => go({ date: view === 'week' ? addDays(monday, 7) : addDays(to, 1) }) }, '›'));
 
-    const title = view === 'week' ? `สัปดาห์ ${fmtDate(d.from)} – ${fmtDate(d.to)}` : `${THAI_MONTHS_FULL[Number(anchor.slice(5, 7)) - 1]} ${buddhistYear(Number(anchor.slice(0, 4)))}`;
+    const title = view === 'week' ? `สัปดาห์ ${fmtDate(d.from)} – ${fmtDate(d.to)}` : monthYear(Number(anchor.slice(0, 4)), Number(anchor.slice(5, 7)));
     const effective = (emp: number, date: string): { kind: Pending['kind'] | 'none'; shift_id: number | null; source: Cell['source']; pending: boolean } => {
       const p = pending.get(`${emp}|${date}`);
       // a change made in a scheduled group's calendar is saved as the group's schedule, elsewhere as an override

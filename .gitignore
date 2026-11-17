@@ -25,3 +25,5 @@ payroll-*.csv
 # CSV templates shipped with the project stay tracked
 !templates/**/*.csv
 !**/templates/**/*.csv
+# UI dictionaries copied by build-web (source: src/web/i18n/*.json)
+public/assets/i18n/
