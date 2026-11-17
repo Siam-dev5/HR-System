@@ -26,6 +26,8 @@ const strings = new Map(); // text -> first file
 const add = (text, file) => {
   const t = text.replace(/\s+/g, ' ').trim();
   if (!t || !THAI.test(t)) return;
+  // SQL text is never shown to a user (a Thai value inside it reaches the UI as data and is covered on its own)
+  if (/^(SELECT|INSERT|UPDATE|DELETE|WITH|json_insert)\b/.test(t)) return;
   if (!strings.has(t)) strings.set(t, relative(ROOT, file).replace(/\\/g, '/'));
 };
 
@@ -52,6 +54,12 @@ for (const file of files) {
 // static text of public/index.html (loading text, footer, noscript)
 const html = readFileSync(join(ROOT, 'public/index.html'), 'utf8');
 for (const m of html.matchAll(/>([^<>]+)</g)) add(m[1], join(ROOT, 'public/index.html'));
+
+// reference data created by migrations and shown as labels (roles, system settings, leave types, payroll items…)
+for (const name of readdirSync(join(ROOT, 'migrations')).filter((f) => f.endsWith('.sql')).sort()) {
+  const sql = readFileSync(join(ROOT, 'migrations', name), 'utf8').replace(/--[^\n]*/g, '');
+  for (const m of sql.matchAll(/'((?:[^']|'')*)'/g)) add(m[1].replace(/''/g, "'"), join(ROOT, 'migrations', name));
+}
 
 const catalog = Object.fromEntries([...strings.keys()].sort((a, b) => a.localeCompare(b, 'th')).map((k) => [k, strings.get(k)]));
 const json = JSON.stringify(catalog, null, 1) + '\n';

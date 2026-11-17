@@ -16,6 +16,7 @@ interface Pattern {
   key: string;
   target: string;
   slots: number;
+  weak: boolean;
 }
 
 export interface Translator {
@@ -33,10 +34,17 @@ export function compile(dict: Dictionary): Translator {
   const patterns: Pattern[] = [];
   for (const [src, target] of Object.entries(dict)) {
     if (!target) continue;
-    const s = norm(src);
+    let s = norm(src);
     if (!/\{\d+\}/.test(s)) {
       exact.set(s, target);
       continue;
+    }
+    // adjacent placeholders ("{0}{1}") cannot be told apart in rendered text: one capture fills the first, the
+    // second becomes empty in the translation
+    let tgt = target;
+    for (let m = /\{(\d+)\}\{(\d+)\}/.exec(s); m; m = /\{(\d+)\}\{(\d+)\}/.exec(s)) {
+      s = s.replace(m[0], `{${m[1]}}`);
+      tgt = tgt.replace(`{${m[2]}}`, '');
     }
     const parts = s.split(/\{\d+\}/);
     const order = [...s.matchAll(/\{(\d+)\}/g)].map((m) => Number(m[1]));
@@ -44,7 +52,10 @@ export function compile(dict: Dictionary): Translator {
     if (!parts.some((p) => hasThai(p))) continue;
     const re = new RegExp('^' + parts.map(escapeRe).reduce((acc, p, i) => (i === 0 ? p : `${acc}(?<s${order[i - 1]}>[\\s\\S]+?)${p}`), '') + '$');
     const key = parts.reduce((a, p) => (p.trim().length > a.length ? p.trim() : a), '');
-    patterns.push({ re, key, target, slots: order.length });
+    // a short label word directly before data ("บริษัท {0}") must not rewrite a Thai name that only starts with it
+    // ("บริษัท สยาม จำกัด"): such a pattern is used only when every Thai value it captures is itself known
+    const weak = parts.join('').replace(/\s/g, '').length <= 8 && !/[:：·()#/\d]/.test(parts.join(''));
+    patterns.push({ re, key, target: tgt, slots: order.length, weak });
   }
   // most specific first: longer static text wins over a shorter, more general pattern
   patterns.sort((a, b) => b.key.length - a.key.length || a.slots - b.slots);
@@ -60,6 +71,8 @@ export function compile(dict: Dictionary): Translator {
         if (!text.includes(p.key)) continue;
         const m = p.re.exec(text);
         if (!m) continue;
+        const values = Object.values(m.groups ?? {});
+        if (p.weak && values.some((v) => hasThai(v) && lookup(v, depth + 1) === null)) continue;
         out = p.target.replace(/\{(\d+)\}/g, (_, n: string) => {
           const v = m.groups?.[`s${n}`] ?? '';
           return lookup(v, depth + 1) ?? v;
@@ -72,6 +85,18 @@ export function compile(dict: Dictionary): Translator {
       const pieces = text.split(' · ');
       const tr = pieces.map((x) => (hasThai(x) ? lookup(x, depth + 1) : x));
       if (tr.every((x) => x !== null)) out = tr.join(' · ');
+    }
+    // several lines (a tooltip built with "\n"): each line on its own; unknown lines (data) stay as they are
+    if (out === null && depth < 3 && /\n/.test(raw)) {
+      const lines = raw.split('\n');
+      const tr = lines.map((x) => (hasThai(x) ? lookup(x, depth + 1) : null));
+      if (tr.some((x) => x !== null)) out = lines.map((x, i) => tr[i] ?? x).join('\n');
+    }
+    // a list of short labels joined with spaces (e.g. weekday abbreviations): only when every word is known
+    if (out === null && depth === 0 && / /.test(text) && text.length <= 80) {
+      const words = text.split(' ');
+      const tr = words.map((x) => (hasThai(x) ? (exact.get(x) ?? null) : x));
+      if (words.length > 1 && tr.every((x) => x !== null)) out = tr.join(' ');
     }
     if (depth === 0) {
       if (cache.size > 20_000) cache.clear();

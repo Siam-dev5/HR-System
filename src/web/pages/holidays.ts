@@ -3,7 +3,7 @@
 // verified holiday-work records and holiday pay rules. Every button mirrors an API permission; the API decides.
 import type { CompanyOption, LookupOption } from '../../shared/types';
 import {
-  EMPLOYMENT_TYPES, HOLIDAY_TYPES, HOLIDAY_TYPE_LABEL, IMPORT_COLUMNS, IMPORT_HEADERS, THAI_MONTHS_FULL, THAI_WEEKDAYS, buddhistYear, isIsoDate, parseWeeklyRest, thaiDate, weekday,
+  EMPLOYMENT_TYPES, HOLIDAY_TYPES, HOLIDAY_TYPE_LABEL, IMPORT_COLUMNS, IMPORT_HEADERS, THAI_WEEKDAYS, isIsoDate, parseWeeklyRest, weekday,
   type HolidayListResponse, type HolidayPayRuleRow, type HolidayRow, type HolidayType, type HolidayWorkRow, type ImportRow,
 } from '../../shared/holidays';
 import { parseCsv, readXlsx, type Cell } from '../../shared/xlsx';
@@ -11,6 +11,7 @@ import { get, post, put, del, qs } from '../api';
 import { h, mount, loading, errorBox, fmtDate, fmtNum, modal, toast, confirmDialog, promptDialog, type Child } from '../dom';
 import { optionLabel } from '../labels';
 import { isSuperAdmin, state } from '../app';
+import { currentLang, displayYear, localDate as thaiDate, monthName, monthYear } from '../i18n';
 
 /**
  * Approve action under maker-checker (the API enforces the same rule): the makers of a record (its creator and the
@@ -32,7 +33,7 @@ type View = 'month' | 'year';
 
 const msg = (e: unknown) => (e instanceof Error ? e.message : String(e));
 const typeLabel = (t: string) => HOLIDAY_TYPE_LABEL[t as HolidayType] ?? t;
-const yearLabel = (y: number) => `${buddhistYear(y)} (${y})`;
+const yearLabel = (y: number) => (currentLang() === 'th' ? `${displayYear(y)} (${y})` : String(y));
 const statusBadge = (s: string) => h('span', { class: `badge-status s-${s === 'inactive' ? 'cancelled' : s}` }, s === 'inactive' ? 'ปิดใช้งาน' : optionLabel(s));
 const verifyBadge = (v: string) => h('span', { class: `badge-status s-${v === 'verified' ? 'confirmed' : 'pending'}` }, v === 'verified' ? 'ตรวจสอบแหล่งที่มาแล้ว' : 'ยังไม่ตรวจสอบแหล่งที่มา');
 
@@ -123,8 +124,8 @@ function calendarView(data: HolidayListResponse, year: number, view: View, month
         compact ? null : list.map((x) => h('button', { class: `hol-chip t-${x.holiday_type} st-${x.status}`, onclick: () => detailDialog(data, x.id, reload) }, x.name))));
     }
     return h('div', { class: `hol-month${compact ? ' compact' : ''}` },
-      h('div', { class: 'hol-month-title' }, compact ? h('button', { class: 'linklike', onclick: () => go({ view: 'month', month: String(m) }) }, `${THAI_MONTHS_FULL[m - 1]}`) : `${THAI_MONTHS_FULL[m - 1]} ${buddhistYear(year)}`),
-      h('div', { class: 'hol-grid', role: 'grid', 'aria-label': `${THAI_MONTHS_FULL[m - 1]} ${buddhistYear(year)}` }, THAI_WEEKDAYS.map((w) => h('div', { class: 'hol-wd', role: 'columnheader' }, w)), cells));
+      h('div', { class: 'hol-month-title' }, compact ? h('button', { class: 'linklike', onclick: () => go({ view: 'month', month: String(m) }) }, monthName(m)) : monthYear(year, m)),
+      h('div', { class: 'hol-grid', role: 'grid', 'aria-label': monthYear(year, m) }, THAI_WEEKDAYS.map((w) => h('div', { class: 'hol-wd', role: 'columnheader' }, w)), cells));
   };
   const switcher = h('div', { class: 'toolbar' },
     h('div', { class: 'segmented', role: 'group', 'aria-label': 'รูปแบบปฏิทิน' },

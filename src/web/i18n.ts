@@ -33,6 +33,31 @@ export function currentLang(): Lang {
 
 export const locale = (): string => LOCALE[currentLang()];
 
+// ---- dates in the UI language: Thai keeps the Buddhist year and the existing Thai format; others use Gregorian -----
+const THAI_MONTHS_SHORT = ['ม.ค.', 'ก.พ.', 'มี.ค.', 'เม.ย.', 'พ.ค.', 'มิ.ย.', 'ก.ค.', 'ส.ค.', 'ก.ย.', 'ต.ค.', 'พ.ย.', 'ธ.ค.'];
+const THAI_MONTHS_LONG = ['มกราคม', 'กุมภาพันธ์', 'มีนาคม', 'เมษายน', 'พฤษภาคม', 'มิถุนายน', 'กรกฎาคม', 'สิงหาคม', 'กันยายน', 'ตุลาคม', 'พฤศจิกายน', 'ธันวาคม'];
+const utcDate = (y: number, m: number, d = 1) => new Date(Date.UTC(y, m - 1, d));
+/** Year as shown to the user: Buddhist year in Thai, Gregorian otherwise. */
+export const displayYear = (gregorianYear: number): number => (currentLang() === 'th' ? gregorianYear + 543 : gregorianYear);
+/** "1 พ.ค. 2569" (Thai) / "1 May 2026" (English) / "2026年5月1日" (Chinese) for a stored YYYY-MM-DD. */
+export function localDate(iso: string): string {
+  const m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(iso ?? '');
+  if (!m) return iso;
+  const [y, mo, d] = [Number(m[1]), Number(m[2]), Number(m[3])];
+  if (currentLang() === 'th') return `${d} ${THAI_MONTHS_SHORT[mo - 1]} ${y + 543}`;
+  return new Intl.DateTimeFormat(locale(), { day: 'numeric', month: 'short', year: 'numeric', timeZone: 'UTC' }).format(utcDate(y, mo, d));
+}
+/** "พฤศจิกายน 2569" / "November 2026" / "2026年11月". */
+export function monthYear(y: number, m: number): string {
+  if (currentLang() === 'th') return `${THAI_MONTHS_LONG[m - 1]} ${y + 543}`;
+  return new Intl.DateTimeFormat(locale(), { month: 'long', year: 'numeric', timeZone: 'UTC' }).format(utcDate(y, m));
+}
+/** Month name only ("พฤศจิกายน" / "November" / "十一月"). */
+export function monthName(m: number): string {
+  if (currentLang() === 'th') return THAI_MONTHS_LONG[m - 1] ?? '';
+  return new Intl.DateTimeFormat(locale(), { month: 'long', timeZone: 'UTC' }).format(utcDate(2000, m));
+}
+
 let translator: Translator | null = null;
 const written = new WeakMap<Node, string>();
 const ATTRS = ['placeholder', 'title', 'aria-label', 'alt', 'data-label'];
