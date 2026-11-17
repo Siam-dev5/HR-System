@@ -299,7 +299,19 @@ export interface PayslipCalc {
     unpaidLeaveHours: number | null;
     /** without a Feishu period report: the daily attendance (P2) the working-day figures were read from */
     daily?: { version: string; judgedThrough: string };
+    /** HR-confirmed absence days deducted (without a Feishu period report) */
+    absenceDays?: number;
+    /** days the wage pays on the 30-day base (salary entitlement) */
+    entitlementDays?: number;
+    /** entitlement minus unpaid leave and confirmed absence */
+    payableDays?: number;
+    /** every deducted day with its source (leave request or attendance record) */
+    deductions?: Array<{ date: string; kind: 'unpaid_leave' | 'absence'; days: number; leave?: { source: 'request' | 'import'; id: number }; record?: number }>;
+    /** the HR attendance review(s) the calculation was made after */
+    review?: Array<{ id: number; company_id: number; version: string }>;
   };
+  /** mid_month: the round paid its calendar days (month ending in "คม", hired before the 26th) */
+  calendarEntitled?: boolean;
   /** holiday work paid by this payslip (present only when there was approved holiday work): frozen inputs and rates */
   holiday?: HolidayPaySnapshot;
 }

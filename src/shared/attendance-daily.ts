@@ -60,6 +60,8 @@ export interface DailyRecord {
 export interface DailyLeave extends HoldLeave {
   /** leave type paid (requests); null = unknown (Feishu imports carry the type as text only) */
   paid: boolean | null;
+  /** days requested (requests: half days are 0.5); absent = one day per workday of the leave */
+  days?: number | null;
 }
 
 export interface DailyOvertime {
@@ -85,6 +87,8 @@ export interface DailyInput {
   overtime: readonly DailyOvertime[];
   /** `${recordId}:${revision}` HR confirmed (a cleared 'pending_review' hold for exactly that revision) */
   confirmed: ReadonlySet<string>;
+  /** `${employeeId}|${date}` absences HR excused (a cleared 'absent' hold): never deducted */
+  excused?: ReadonlySet<string>;
 }
 
 export interface Issue {
@@ -366,7 +370,80 @@ export function versionPayload(input: DailyInput, period: { id: number; kind: st
     exemptions: sortBy(input.exemptions, (x) => `${pad(x.employee_id)}|${x.effective_from}`).map((x) => [x.employee_id, x.effective_from, x.effective_to, x.revoked_at]),
     overtime: sortBy(input.overtime.filter((o) => o.work_date <= jt), (o) => pad(o.id)).map((o) => [o.id, o.employee_id, o.work_date, o.hours, o.rate]),
     confirmed: [...input.confirmed].sort(),
+    // payroll deduction inputs (absent when empty, so versions of data without them are unchanged): the requested days
+    // of approved unpaid leave anywhere in the period (approved leave is deducted on days still to come as well) and
+    // the absences HR excused
+    ...(input.leaves.some((l) => l.paid === false && l.status === 'approved')
+      ? { unpaidLeave: sortBy(input.leaves.filter((l) => l.paid === false && l.status === 'approved'), (l) => `${l.source}|${pad(l.id)}`).map((l) => [l.source, l.id, l.employee_id, l.start_date, l.end_date, l.days ?? null]) }
+      : {}),
+    ...(input.excused?.size ? { excused: [...input.excused].sort() } : {}),
   });
+}
+
+// ---- Payroll deductions (management decision 2026-11-16) ---------------------------------------------------------
+// Only two things reduce pay, each read from the period's attendance and leave, one day at a time:
+//   unpaid leave  an approved leave request of an unpaid leave type, on a workday of the paid window
+//   absence       a counted attendance record with status 'absent' on a judged workday, not excused by HR
+// Never deducted: rest days and holidays (company calendar / schedule), paid leave, Feishu leave whose type is unknown,
+// pending / rejected leave, days without any record, records awaiting review (missing clock-in / clock-out…), exempt
+// days and days the employee was present. A day is deducted at most once (leave before absence), so the two sources
+// cannot add up on the same date. HR confirms the absences through the attendance review before the calculation.
+
+export interface DeductionItem {
+  date: string;
+  kind: 'unpaid_leave' | 'absence';
+  /** fraction of a day (a half-day leave is 0.5) */
+  days: number;
+  leave?: { source: 'request' | 'import'; id: number };
+  record?: number;
+}
+
+export interface PayrollDeduction {
+  employee_id: number;
+  unpaidLeaveDays: number;
+  absenceDays: number;
+  items: DeductionItem[];
+}
+
+/** Weight of one workday of a leave: the requested days spread over the leave's workdays (never above one day). */
+function leaveDayWeight(input: Pick<DailyInput, 'schedule' | 'calendars'>, e: HoldEmployee, l: DailyLeave): number {
+  if (l.days === undefined || l.days === null || !(l.days > 0)) return 1;
+  let workdays = 0;
+  for (let t = utc(l.start_date); t <= utc(l.end_date); t += DAY) if (dayKind(input, e, iso(t)).workday) workdays += 1;
+  return workdays ? Math.min(1, l.days / workdays) : 1;
+}
+
+/** Deductions of one employee over the window the wage pays (`from`–`to`, inside the period). */
+export function payrollDeductions(input: DailyInput, v: Validation, employeeId: number, from: string, to: string): PayrollDeduction {
+  const out: PayrollDeduction = { employee_id: employeeId, unpaidLeaveDays: 0, absenceDays: 0, items: [] };
+  const e = input.employees.find((x) => x.id === employeeId);
+  if (!e) return out;
+  const last = judgedThrough(input);
+  const lo = from > input.periodStart ? from : input.periodStart;
+  const hi = to < input.periodEnd ? to : input.periodEnd;
+  const mine = v.records.filter((x) => x.record.employee_id === e.id);
+  for (let t = utc(lo); t <= utc(hi); t += DAY) {
+    const d = iso(t);
+    if (!dayKind(input, e, d).workday || exemptOn(input, e.id, d)) continue;
+    const counted = d <= last ? mine.filter((x) => x.record.work_date === d && x.counted) : [];
+    if (counted.some((x) => isPresent(x.record))) continue;
+    const leave = approvedLeaveOn(input, e.id, d);
+    if (leave) {
+      if (leave.paid === false && leave.source === 'request') {
+        const days = leaveDayWeight(input, e, leave);
+        out.items.push({ date: d, kind: 'unpaid_leave', days: r2(days), leave: { source: leave.source, id: leave.id } });
+        out.unpaidLeaveDays += days;
+      }
+      continue;
+    }
+    const absent = counted.find((x) => x.record.status === 'absent');
+    if (absent && !input.excused?.has(`${e.id}|${d}`)) {
+      out.items.push({ date: d, kind: 'absence', days: 1, record: absent.record.id });
+      out.absenceDays += 1;
+    }
+  }
+  out.unpaidLeaveDays = r2(out.unpaidLeaveDays);
+  return out;
 }
 
 /** What the payroll engine used for one employee (from the payslip calc). */
@@ -375,6 +452,8 @@ export interface PaySide {
   otHours: number;
   unpaidLeaveDays: number;
   workDays: number | null;
+  /** confirmed absence days deducted (absent before the deduction existed = 0) */
+  absenceDays?: number;
 }
 
 export type DifferenceCode = 'unpaid_leave_differs' | 'ot_differs' | 'work_days_differ' | 'absent_not_deducted' | 'unclassified_leave';
@@ -385,7 +464,7 @@ export function payDifferences(a: EmployeeAggregate, pay: PaySide): DifferenceCo
   if (Math.abs(a.unpaidLeaveDays - pay.unpaidLeaveDays) > 0.001) out.push('unpaid_leave_differs');
   if (pay.source === 'feishu' && Math.abs(a.otHours - pay.otHours) > 0.001) out.push('ot_differs');
   if (pay.workDays !== null && Math.abs(a.presentDays - pay.workDays) > 0.001) out.push('work_days_differ');
-  if (a.absentDays > 0) out.push('absent_not_deducted');
+  if (a.absentDays > (pay.absenceDays ?? 0)) out.push('absent_not_deducted');
   if (a.unclassifiedLeaveDays > 0) out.push('unclassified_leave');
   return out;
 }
@@ -394,6 +473,6 @@ export const DIFFERENCE_LABEL: Record<DifferenceCode, string> = {
   unpaid_leave_differs: 'วันลาไม่รับค่าจ้างจากเวลาทำงานรายวันไม่ตรงกับที่ใช้คำนวณเงินเดือน',
   ot_differs: 'ชั่วโมง OT ที่อนุมัติในระบบไม่ตรงกับ OT ที่ใช้คำนวณ (Feishu)',
   work_days_differ: 'วันมาทำงานจากเวลาทำงานรายวันไม่ตรงกับวันทำงานในไฟล์สรุป Feishu',
-  absent_not_deducted: 'มีวันขาดงานตามเวลาทำงานรายวัน (สูตรปัจจุบันไม่หักเงินวันขาดงาน)',
+  absent_not_deducted: 'มีวันทำงานที่ไม่มีเวลาเข้างานซึ่งไม่ได้หักเงิน (หักเฉพาะบันทึก "ขาดงาน" ที่ HR ยืนยันแล้ว ไม่อนุมานการขาดงานจากวันที่ไม่มีบันทึก)',
   unclassified_leave: 'มีวันลาจาก Feishu ที่ไม่ทราบว่าได้รับค่าจ้างหรือไม่ (ไม่ถูกนำไปคำนวณ)',
 };

@@ -200,9 +200,15 @@ describe('probation payroll: mid-month advance and month-end', () => {
     const e6 = await slip(periods.mid, 'E006'); // probation until 2026-11-29: 16 days
     expect(e6.gross).toBe(7466.67);
     expect([e6.sso, e6.tax, e6.net]).toEqual([0, 0, 7466.67]);
-    const e9 = await slip(periods.mid, 'E009'); // day 90 = 2026-11-02: 8 days
-    expect(e9.net).toBe(8000);
-    expect(e9.calc.segments).toHaveLength(1);
+    // day 90 = 2026-11-02, inside the round: still the 16 calendar days of a round starting in October (policy
+    // 2026-11-16 §1.2), at the salary in force each day — 8 days @30,000 + 8 days @35,000 (approved rate from day 91)
+    const e9 = await slip(periods.mid, 'E009');
+    expect(e9.calc.calendarEntitled).toBe(true);
+    expect(e9.calc.segments.map((s: { status: string; paidDays: number; rate: number; amount: number }) => [s.status, s.paidDays, s.rate, s.amount])).toEqual([
+      ['probation', 8, 30000, 8000],
+      ['passed', 8, 35000, 9333.33],
+    ]);
+    expect([e9.sso, e9.tax, e9.net]).toEqual([0, 0, 17333.33]);
     expect(await slip(periods.mid, 'E010')).toBeNull(); // hired after the round
     expect(await slip(periods.mid, 'E001')).toBeNull(); // passed probation long ago
   });
@@ -231,7 +237,7 @@ describe('probation payroll: mid-month advance and month-end', () => {
     ]);
     expect(e9.lines.filter((l: { code: string }) => l.code.startsWith('BASE_')).map((l: { code: string }) => l.code)).toEqual(['BASE_PROB', 'BASE_PASS']);
     expect(e9.base_salary).toBe(33666.67);
-    expect(e9.advance).toBe(8000);
+    expect(e9.advance).toBe(17333.33); // the whole mid-month payment, deducted once
 
     expect((await slip(periods.nov, 'E010')).base_salary).toBe(15000); // joiner 11-11 → 15 days
     expect((await slip(periods.nov, 'E011')).base_salary).toBe(10000); // leaver 11-04 → 10 days
@@ -279,7 +285,7 @@ describe('Payroll Preview, column layouts and export', () => {
     expect(d.company.code).toBe('DEMO');
     expect(d.columns.map((x: { key: string }) => x.key)).toEqual(PREVIEW_COLUMNS.map((x) => x.key));
     const e9 = d.rows.find((r: { emp_code: string }) => r.emp_code === 'E009');
-    expect(e9).toMatchObject({ probation_status: 'ผ่านทดลองงานระหว่างงวด', base_salary: 33666.67, mid_month_advance: 8000, company: 'บริษัท เดโม่ เอชอาร์ จำกัด' });
+    expect(e9).toMatchObject({ probation_status: 'ผ่านทดลองงานระหว่างงวด', base_salary: 33666.67, mid_month_advance: 17333.33, company: 'บริษัท เดโม่ เอชอาร์ จำกัด' });
     const e7 = d.rows.find((r: { emp_code: string }) => r.emp_code === 'E007');
     expect(e7).toMatchObject({ work_days: 22, expected_work_days: 22, actual_work_hours: 176, ot_hours: 3, unpaid_leave_days: 1, unpaid_leave_hours: 8, unpaid_leave_amount: -550, allowance: 1000 });
     for (const r of d.rows) {

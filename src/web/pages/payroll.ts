@@ -5,6 +5,7 @@ import { get, post, put, qs } from '../api';
 import { h, mount, loading, errorBox, fmtDate, fmtMoney, modal, toast, confirmDialog, promptDialog } from '../dom';
 import { optionLabel } from '../labels';
 import { basePath, can, isSuperAdmin, link, state } from '../app';
+import { attendanceReview } from './payroll-attendance-review';
 
 /** Super Admin period controls are shown only to the super_admin role holding the permission (the API checks both). */
 const adminCan = (perm: string) => isSuperAdmin() && can(perm);
@@ -37,7 +38,7 @@ export async function renderPayroll(main: HTMLElement): Promise<void> {
     // a period a Super Admin reopened after closing is recalculated / reverted only by a Super Admin (reason + MFA)
     const forced = (p: PayrollPeriod) => !!p.reopened_from;
     mount(main,
-      h('p', { class: 'muted lead' }, 'ขั้นตอน: สร้างงวด → คำนวณ → Preview → อนุมัติ (ผู้อนุมัติต้องไม่ใช่ผู้คำนวณ) → เผยแพร่สลิปให้พนักงาน · พนักงานทดลองงานจ่าย 2 รอบ: กลางเดือน (26–10, จ่ายไม่เกินวันที่ 15) และสิ้นเดือน (หักยอดจ่ายกลางเดือน)'),
+      h('p', { class: 'muted lead' }, 'ขั้นตอน: สร้างงวด → ตรวจสอบเวลาทำงาน (HR ยืนยัน) → คำนวณ → Preview → อนุมัติ (ผู้อนุมัติต้องไม่ใช่ผู้คำนวณ) → เผยแพร่สลิปให้พนักงาน · พนักงานทดลองงานจ่าย 2 รอบ: กลางเดือน (26–10, จ่ายไม่เกินวันที่ 15) และสิ้นเดือน (หักยอดจ่ายกลางเดือน)'),
       h('div', { class: 'toolbar' }, h('div', { class: 'spacer' }),
         adminCan(PERIOD_ADMIN.delete) ? h('button', { class: 'btn', onclick: () => void deletedPeriods(reload) }, 'งวดที่ลบแล้ว') : null,
         can('payroll.calculate') ? h('button', { class: 'btn primary', onclick: () => newPeriod(reload) }, '+ สร้างงวด') : null),
@@ -50,6 +51,7 @@ export async function renderPayroll(main: HTMLElement): Promise<void> {
                 p.reopened_from ? h('span', { class: 'badge-status s-pending', title: `Super Admin เปิดงวดหลังปิด (เดิม: ${optionLabel(p.reopened_from)}) — คำนวณใหม่/เปิดแก้ไขได้เฉพาะ Super Admin จนกว่าจะอนุมัติอีกครั้ง` }, ' เปิดโดย Super Admin') : null),
               h('td', null, String(p.employees)), h('td', null, fmtMoney(p.total_net)), h('td', null, fmtMoney(p.total_ewf_employer)),
               h('td', { class: 'actions' },
+                (p.status === 'draft' || p.status === 'calculated') && can('payroll_preview.view') ? h('button', { class: 'btn small', onclick: () => void attendanceReview(p, reload) }, 'ตรวจสอบเวลาทำงาน') : null,
                 (p.status === 'draft' || p.status === 'calculated') && !forced(p) && can('payroll.calculate') ? h('button', { class: 'btn small', onclick: () => void act(p, 'calculate', 'คำนวณ') }, p.status === 'draft' ? 'คำนวณ' : 'คำนวณใหม่') : null,
                 p.status === 'calculated' && !forced(p) && can('payroll.calculate') ? h('button', { class: 'btn small', onclick: () => void act(p, 'reopen', 'เปิดแก้ไข (กลับเป็นร่าง)') }, 'เปิดแก้ไข') : null,
                 (p.status === 'draft' || p.status === 'calculated') && forced(p) && adminCan(PERIOD_ADMIN.forceRecalculate) ? h('button', { class: 'btn small', onclick: () => void adminDialog(p, 'calculate', reload) }, 'คำนวณใหม่ (Super Admin)') : null,
@@ -318,6 +320,10 @@ export async function renderPayslipView(main: HTMLElement, id: number, back: str
         s.period_kind === 'mid_month' ? h('div', { class: 'alert' }, 'รอบจ่ายกลางเดือน (ทดลองงาน): เป็นการจ่ายล่วงหน้าตามวันที่มีสิทธิ์ และจะถูกหักในงวดสิ้นเดือน (Mid-month Advance)') : null,
         s.calc && (s.calc.segments.length > 1 || !s.calc.fullPeriod) ? segmentTable(s.calc.segments) : null,
         h('div', { class: 'grid2' }, col('รายได้', earn, earn.reduce((a, l) => a + l.amount, 0)), col('รายการหัก', ded, s.deductions + s.unpaid_leave)),
+        // each deducted day with its source (approved unpaid leave or an absence HR confirmed)
+        s.calc?.attendance.deductions?.length
+          ? h('p', { class: 'muted small' }, `วันที่หัก: ${s.calc.attendance.deductions.map((x) => `${fmtDate(x.date)} ${x.kind === 'absence' ? 'ขาดงาน' : `ลาไม่รับค่าจ้าง${x.days !== 1 ? ` ${x.days} วัน` : ''}`}`).join(', ')}`)
+          : null,
         h('div', { class: 'net' }, 'เงินได้สุทธิ ', h('strong', null, `${fmtMoney(s.net)} บาท`)),
         // employer contribution is returned only to payroll staff; it is informational and never part of net pay
         s.ewf_employer !== undefined && s.ewf_employer > 0

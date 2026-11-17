@@ -459,7 +459,8 @@ describe('payroll with holiday work', () => {
     // working day less, with a new attendance version. Amounts and lines are byte-identical.
     const withoutDaily = (calc: string) => {
       const x = JSON.parse(calc);
-      const { expectedWorkDays, daily, ...rest } = x.attendance;
+      // review: the HR attendance confirmation (0025) the calculation used, which follows the attendance version too
+      const { expectedWorkDays, daily, review: _review, ...rest } = x.attendance;
       return { calc: { ...x, attendance: rest }, expectedWorkDays: expectedWorkDays as number, version: daily.version as string };
     };
     for (const code of ['ZH3', 'ZH5', 'ZH9']) {

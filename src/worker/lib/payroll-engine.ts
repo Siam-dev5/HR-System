@@ -4,7 +4,7 @@
 import type { PayResult } from '../../shared/payroll';
 import { standardWhere } from './payroll-selection';
 import { dailyState } from './attendance-daily';
-import type { EmployeeAggregate } from '../../shared/attendance-daily';
+import { payrollDeductions, type EmployeeAggregate } from '../../shared/attendance-daily';
 import { calculatePay, resolveEwf, round2, wageSegments, type EwfStatus, type WageResult } from '../../shared/payroll';
 import { priceHolidayWork, type ApplicableRule, type HolidayWorkInput as HolidayWorkBase } from '../../shared/holidays';
 import type { HolidayPaySnapshot, PayslipCalc, PayrollPeriod } from '../../shared/types';
@@ -166,7 +166,8 @@ export async function computePeriod(db: D1Database, p: PeriodRowLike, filterComp
   // working-day figures shown with the payslip (expected days, days worked, hours worked): a Feishu period report
   // carries them; without one for the employee's company they come from the daily attendance of the period (P2:
   // imported / web / corrected records, the employee's schedule, or the company calendar's weekly rest days and
-  // approved holidays). Display only: no amount reads them.
+  // approved holidays). Display only: no amount reads them. The same read gives the deductions (unpaid leave and
+  // HR-confirmed absence, day by day — payrollDeductions); a Feishu period report keeps its own unpaid-leave hours.
   const daily = emps.some((e) => !imports.some((i) => i.company_id === e.company_id)) ? await dailyState(db, p) : null;
   const dailyOf = new Map<number, EmployeeAggregate>((daily?.aggregates ?? []).map((a) => [a.employee_id, a]));
   const { results: otReq } = await db
@@ -180,10 +181,6 @@ export async function computePeriod(db: D1Database, p: PeriodRowLike, filterComp
     )
     .bind(p.end_date, p.start_date)
     .all<{ employee_id: number; amount: number; code: string; name: string; kind: string; taxable: number; category: string | null }>();
-  const { results: unpaid } = await db
-    .prepare("SELECT l.employee_id, SUM(l.days) AS days FROM leave_requests l JOIN leave_types t ON t.id = l.leave_type_id WHERE l.status = 'approved' AND t.paid = 0 AND l.start_date BETWEEN ? AND ? GROUP BY l.employee_id")
-    .bind(p.start_date, p.end_date)
-    .all<{ employee_id: number; days: number }>();
   // advances paid in this month (approved / published mid-month rounds inside the period)
   const advanceIds = midMonth ? [] : (await advancePeriods(db, p)).filter((x) => x.status === 'approved' || x.status === 'published').map((x) => x.id);
   const { results: advances } = advanceIds.length
@@ -221,7 +218,11 @@ export async function computePeriod(db: D1Database, p: PeriodRowLike, filterComp
           : []
         : otReq.filter((o) => o.employee_id === e.id).map((o) => ({ hours: o.hours, rate: Number(o.rate) }));
     const unpaidHours = att ? (att.unpaid_sick_leave_hours ?? 0) + (att.unpaid_personal_leave_hours ?? 0) : null;
-    const unpaidDays = midMonth ? 0 : imp ? round2((unpaidHours ?? 0) / cfg.hoursPerDay) : (unpaid.find((u) => u.employee_id === e.id)?.days ?? 0);
+    // deductions only inside the window the wage pays (a day that is not paid cannot be deducted)
+    const ded = !imp && daily && wage.from && wage.to ? payrollDeductions(daily.input, daily.validation, e.id, wage.from, wage.to) : null;
+    const unpaidDays = imp ? round2((unpaidHours ?? 0) / cfg.hoursPerDay) : (ded?.unpaidLeaveDays ?? 0);
+    const absenceDays = ded?.absenceDays ?? 0;
+    const paidDays = wage.segments.reduce((a, s) => a + s.paidDays, 0);
 
     const mine = midMonth ? [] : items.filter((i) => i.employee_id === e.id);
     const ewfFor = midMonth
@@ -275,6 +276,7 @@ export async function computePeriod(db: D1Database, p: PeriodRowLike, filterComp
         earnings: mine.filter((i) => i.kind === 'earning').map((i) => ({ code: i.code, name: i.name, amount: i.amount, taxable: i.taxable === 1, category: i.category ?? 'other' })),
         deductions: mine.filter((i) => i.kind === 'deduction').map((i) => ({ code: i.code, name: i.name, amount: i.amount, category: i.code === ewf.providentFundComponent ? 'provident_fund' : (i.category ?? 'other') })),
         unpaidLeaveDays: unpaidDays,
+        absenceDays,
         ewf: ewfFor.rates,
         advance: advances.find((a) => a.employee_id === e.id)?.amount ?? 0,
         advanceOnly: midMonth,
@@ -314,7 +316,12 @@ export async function computePeriod(db: D1Database, p: PeriodRowLike, filterComp
           otHours: round2(overtime.reduce((a, o) => a + o.hours, 0)),
           unpaidLeaveDays: unpaidDays,
           unpaidLeaveHours: unpaidHours,
+          // salary entitlement (days paid on the 30-day base) minus the deducted days: never the days actually worked
+          ...(ded
+            ? { absenceDays, entitlementDays: paidDays, payableDays: round2(Math.max(0, paidDays - unpaidDays - absenceDays)), deductions: ded?.items ?? [] }
+            : {}),
         },
+        ...(wage.calendarEntitled !== undefined ? { calendarEntitled: wage.calendarEntitled } : {}),
         // only present with holiday work, so the snapshot of every other payslip stays exactly as before
         ...(holiday ? { holiday } : {}),
       },

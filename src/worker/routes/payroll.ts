@@ -20,6 +20,10 @@ import { clearHold, holdsEnabled, scanHolds, type ScanResult } from '../lib/atte
 import { CLEARABLE_KINDS, HOLD_KIND_LABEL, type HoldKind } from '../../shared/attendance-holds';
 import { DIFFERENCE_LABEL, payDifferences, type DifferenceCode, type EmployeeAggregate } from '../../shared/attendance-daily';
 import { assertAttendanceCurrent, attendanceVersion, dailyState, loadDaily, snapshotOf, snapshotStatements, watermarkSql, type DailyState } from '../lib/attendance-daily';
+import {
+  companyNames, companyReviews, companyVersion, confirmedReview, periodCompanies, reviewEmployees, reviewGateError, reviewIdsOf,
+  type CompanyReview, type ReviewRow,
+} from '../lib/attendance-review';
 import { can, currentUser, requireAuth, requirePerm, requirePeriodAdmin, requireSuperAdmin } from '../auth';
 
 // ---- Company scope ------------------------------------------------------------------------------
@@ -248,6 +252,18 @@ payrollRoutes.post('/periods/:id/calculate', requirePerm('payroll.calculate'), a
   // P4: every selected employee must be payable (eligible, or a review case HR confirmed); the engine pays exactly them
   const selection = await selectionForCalculation(db, p);
   const slips = await computePeriod(db, p, null, selection.engineIds);
+  // HR attendance review (0025): every company the calculation pays needs a confirmation of its attendance as it is
+  // now; a confirmation whose attendance changed is ended here (and audited) and the calculation refused
+  const att = await dailyState(db, p);
+  const gate = await companyReviews(db, p, att, user.id, [...new Set(slips.map((s) => s.employee.company_id))].sort((a, b) => a - b));
+  await auditInvalidated(c, p.id, gate);
+  const refused = reviewGateError(gate, p.code, await companyNames(db, gate.map((x) => x.company_id)));
+  if (refused) throw refused;
+  const reviews = gate.flatMap((x) => (x.review ? [x.review] : []));
+  for (const s of slips) {
+    const r = reviews.find((x) => x.company_id === s.employee.company_id);
+    if (r) s.calc.attendance.review = [{ id: r.id, company_id: r.company_id, version: r.attendance_version }];
+  }
   const version = p.calc_version + 1;
   // attendance review (P1): scanned before the payslips are written, so a hold resolved by this scan is not newer than
   // the calculation; holds never change the figures (approval is what they block)
@@ -266,6 +282,9 @@ payrollRoutes.post('/periods/:id/calculate', requirePerm('payroll.calculate'), a
   const stmts = [
     guard(db, "EXISTS (SELECT 1 FROM payroll_periods WHERE id = ? AND status IN ('draft', 'calculated') AND calc_version = ? AND deleted_at IS NULL)", p.id, p.calc_version),
     ...archiveSlips(db, p.id, 'recalculate', user.id, crypto.randomUUID()), db.prepare('DELETE FROM payslips WHERE period_id = ?').bind(p.id),
+    // the confirmations used are still in force, and no attendance revision landed since the read above
+    ...reviews.map((r) => guard(db, "EXISTS (SELECT 1 FROM payroll_attendance_reviews WHERE id = ? AND status = 'confirmed')", r.id)),
+    ...(reviews.length ? [db.prepare(`SELECT CASE WHEN ${watermarkSql(1)} = ?3 THEN 1 ELSE json('${GUARD_FAILED}') END AS ok`).bind(p.start_date, p.end_date, att.watermark)] : []),
   ];
   if (daily) {
     stmts.push(
@@ -303,7 +322,7 @@ payrollRoutes.post('/periods/:id/calculate', requirePerm('payroll.calculate'), a
   const superseded = await activeAccounting(db, p.id);
   stmts.push(...supersedeAccounting(db, p.id, user.id, `recalculated: version ${p.calc_version} → ${version}`));
   await runGuarded(db, stmts, 'งวดนี้ถูกอนุมัติหรือคำนวณใหม่ระหว่างดำเนินการ กรุณาโหลดใหม่');
-  await audit(c, 'payroll.calculated', 'payroll_periods', p.id, { employees: slips.length, version, kind: p.kind, archivedSlips: p.employees, archivedTotalNet: p.total_net, ...(superseded ? { accountingSuperseded: superseded } : {}), ...(holds ? { attendanceHolds: holds } : {}), ...(daily ? { attendance: { version: daily.version, judgedThrough: daily.judgedThrough, records: daily.validation.counts } } : {}), ...(p.legacy_slips ? { replacedLegacySlips: p.legacy_slips, legacyTotalNet: p.total_net } : {}), ...(forced ? { forced: true, reopenedFrom: p.reopened_from, reason: forced } : {}) });
+  await audit(c, 'payroll.calculated', 'payroll_periods', p.id, { employees: slips.length, version, kind: p.kind, attendanceReviews: reviews.map((r) => ({ id: r.id, company_id: r.company_id, version: r.attendance_version, confirmed_by: r.confirmed_by })), archivedSlips: p.employees, archivedTotalNet: p.total_net, ...(superseded ? { accountingSuperseded: superseded } : {}), ...(holds ? { attendanceHolds: holds } : {}), ...(daily ? { attendance: { version: daily.version, judgedThrough: daily.judgedThrough, records: daily.validation.counts } } : {}), ...(p.legacy_slips ? { replacedLegacySlips: p.legacy_slips, legacyTotalNet: p.total_net } : {}), ...(forced ? { forced: true, reopenedFrom: p.reopened_from, reason: forced } : {}) });
   return c.json({ ...(await period(db, p.id, scope)), totalNet: round2(totalNet) });
 });
 
@@ -365,6 +384,10 @@ payrollRoutes.post('/periods/:id/approve', requirePerm('payroll.approve'), async
     // opened or resolved no hold, needs a recalculation — a new calc_version)
     await assertAttendanceCurrent(db, p, 'approval');
   }
+  // HR attendance review (0025): the payslips were calculated after a confirmation that is still in force and still
+  // matches the attendance as it is now; otherwise HR reviews again and the period is recalculated (checked after the
+  // P1/P2 checks, which name the more precise reason)
+  await assertReviewApprovable(c, p);
   // figures ACC returned cannot be approved again unchanged: HR reopens and recalculates (a new calc_version)
   const returned = 'EXISTS (SELECT 1 FROM payroll_accounting_reviews r WHERE r.period_id = payroll_periods.id AND r.calc_version = payroll_periods.calc_version AND r.status = \'returned\')';
   if (await db.prepare(`SELECT 1 FROM payroll_periods WHERE id = ? AND ${returned}`).bind(p.id).first()) {
@@ -629,6 +652,134 @@ payrollRoutes.get('/periods/:id/attendance-snapshots/:calcVersion', requirePerm(
     totals: scope.all ? (JSON.parse(snap.totals_json) as unknown) : null,
     rows: results.map((r) => JSON.parse(r.aggregate_json) as EmployeeAggregate),
   });
+});
+
+// ---- HR attendance review before Calculate (0025) ----------------------------------------------------------------
+// HR reviews the daily attendance of each company of the period (expected / actual days, hours, unpaid leave and
+// absence the calculation deducts, anomalies) and confirms exactly the version it saw. Calculate is refused until every
+// company it pays has a confirmation in force matching the attendance as it is now (lib/attendance-review.ts).
+
+/** Audits the confirmations a read found stale and ended (they stay in the table as 'invalidated'). */
+async function auditInvalidated(c: Context<AppEnv>, periodId: number, list: readonly CompanyReview[]): Promise<void> {
+  for (const x of list) {
+    if (!x.invalidated) continue;
+    await audit(c, 'payroll.attendance_review_invalidated', 'payroll_attendance_reviews', x.invalidated.id, {
+      period_id: periodId, company_id: x.company_id, confirmed_version: x.invalidated.attendance_version, current_version: x.version, reason: 'attendance_changed',
+    });
+  }
+}
+
+/** Approval: each company's payslips were calculated after the confirmation in force, and it is still current. */
+async function assertReviewApprovable(c: Context<AppEnv>, p: PeriodRow): Promise<void> {
+  const db = c.env.DB;
+  const { results } = await db.prepare('SELECT company_id, calc_json FROM payslips WHERE period_id = ?').bind(p.id).all<{ company_id: number; calc_json: string | null }>();
+  const companies = [...new Set(results.map((r) => r.company_id))].sort((a, b) => a - b);
+  if (!companies.length) return;
+  const state = await dailyState(db, p);
+  const list = await companyReviews(db, p, state, currentUser(c).id, companies);
+  await auditInvalidated(c, p.id, list);
+  const used = new Set(results.flatMap((r) => reviewIdsOf(r.calc_json)));
+  const stale = list.filter((x) => x.status !== 'confirmed' || !x.review || !used.has(x.review.id));
+  if (stale.length) {
+    const names = await companyNames(db, stale.map((x) => x.company_id));
+    throw new HttpError(409, 'attendance_review_changed', `การยืนยันเวลาทำงานที่ใช้คำนวณงวด ${p.code} ไม่เป็นปัจจุบันแล้ว (${stale.map((x) => names.get(x.company_id) ?? `#${x.company_id}`).join(', ')}): HR ต้องตรวจสอบและยืนยันเวลาทำงานใหม่ แล้วคำนวณงวดใหม่ก่อนอนุมัติ`);
+  }
+}
+
+const reviewView = (r: ReviewRow | null, users: ReadonlyMap<number, string>) =>
+  r ? { id: r.id, status: r.status, attendance_version: r.attendance_version, judged_through: r.judged_through, confirmed_by: users.get(r.confirmed_by) ?? null, confirmed_at: r.confirmed_at, note: r.note, ended_at: r.ended_at, ended_reason: r.ended_reason } : null;
+
+payrollRoutes.get('/periods/:id/attendance-review', requirePerm('payroll_preview.view'), async (c) => {
+  const db = c.env.DB;
+  const scope = await payrollScope(c);
+  const p = await period(db, intParam(c.req.param('id')), scope);
+  const inScope = (id: number) => scope.all || scope.ids.includes(id);
+  const state = await dailyState(db, p);
+  // the employees the period pays, and their companies (the ones Calculate needs a confirmation for)
+  const employees = (await reviewEmployees(db, p, state)).filter((e) => inScope(e.company_id));
+  const companies = periodCompanies(state).filter((id) => inScope(id) && employees.some((e) => e.company_id === id));
+  const list = await companyReviews(db, p, state, currentUser(c).id, companies);
+  await auditInvalidated(c, p.id, list);
+  const { results: history } = companies.length
+    ? await db.prepare(`SELECT * FROM payroll_attendance_reviews WHERE period_id = ? AND ${scopeSql('company_id', scope)} ORDER BY id DESC LIMIT 50`).bind(p.id).all<ReviewRow>()
+    : { results: [] as ReviewRow[] };
+  const userIds = [...new Set(history.flatMap((r) => [r.confirmed_by, r.ended_by ?? 0]).filter((x) => x > 0))];
+  const { results: users } = userIds.length
+    ? await db.prepare('SELECT id, username FROM users WHERE id IN (SELECT value FROM json_each(?1))').bind(JSON.stringify(userIds)).all<{ id: number; username: string }>()
+    : { results: [] as Array<{ id: number; username: string }> };
+  const names = await companyNames(db, companies);
+  const userMap = new Map(users.map((u) => [u.id, u.username]));
+  return c.json({
+    period: { id: p.id, code: p.code, status: p.status, kind: p.kind, start_date: p.start_date, end_date: p.end_date, calc_version: p.calc_version },
+    judgedThrough: state.judgedThrough,
+    canConfirm: can(currentUser(c), 'payroll_attendance.confirm') && (p.status === 'draft' || p.status === 'calculated'),
+    companies: list.map((x) => ({
+      company_id: x.company_id, company: names.get(x.company_id) ?? null, status: x.status, version: x.version,
+      review: reviewView(x.review, userMap), invalidated: reviewView(x.invalidated, userMap),
+      employees: employees.filter((e) => e.company_id === x.company_id).length,
+    })),
+    employees,
+    records: state.validation.records
+      .filter((v) => inScope(v.company_id) && (v.status === 'invalid' || (v.status === 'pending_review' && !v.confirmed)))
+      .map((v) => ({ id: v.record.id, employee_id: v.record.employee_id, company_id: v.company_id, work_date: v.record.work_date, status: v.status, clock_in: v.record.clock_in, clock_out: v.record.clock_out, issues: v.issues })),
+    dayIssues: state.validation.days.filter((d) => inScope(d.company_id)),
+    history: history.map((r) => ({ ...reviewView(r, userMap), company_id: r.company_id })),
+  });
+});
+
+payrollRoutes.post('/periods/:id/attendance-review/confirm', requirePerm('payroll_attendance.confirm'), async (c) => {
+  const user = currentUser(c);
+  const db = c.env.DB;
+  const scope = await payrollScope(c);
+  const p = await period(db, intParam(c.req.param('id')), scope);
+  if (p.status !== 'draft' && p.status !== 'calculated') throw conflict('ยืนยันการตรวจสอบเวลาทำงานได้เฉพาะงวดที่ยังไม่อนุมัติ');
+  const body = await readJson(c);
+  const companyId = Number(body.company_id);
+  if (!Number.isInteger(companyId) || companyId <= 0) throw badRequest('ต้องระบุบริษัท (company_id)');
+  const seen = str(body, 'version', { required: true, max: 100 }) as string;
+  const note = str(body, 'note', { max: 500 });
+  // a company outside the scope answers like one that is not in the period
+  if (!(scope.all || scope.ids.includes(companyId))) throw notFound('ไม่พบข้อมูลเวลาทำงานของบริษัทนี้ในงวด');
+  const state = await dailyState(db, p);
+  if (!periodCompanies(state).includes(companyId)) throw notFound('ไม่พบข้อมูลเวลาทำงานของบริษัทนี้ในงวด');
+  const version = await companyVersion(state, p, companyId);
+  if (seen !== version) {
+    throw new HttpError(409, 'attendance_review_stale', 'ข้อมูลเวลาทำงานเปลี่ยนระหว่างที่ตรวจสอบ กรุณาโหลดหน้าตรวจสอบใหม่และตรวจอีกครั้งก่อนยืนยัน');
+  }
+  // invalid records do not block the confirmation: Calculate holds them (P2 'invalid_record' holds, never counted or
+  // deducted) and approval is refused until they are corrected; their count is part of the confirmed summary
+  const employees = (await reviewEmployees(db, p, state)).filter((e) => e.company_id === companyId);
+  const summary = {
+    employees: employees.map(({ deductions, ...e }) => ({ ...e, deductions })),
+    totals: {
+      employees: employees.length,
+      unpaidLeaveDays: employees.reduce((a, e) => a + e.unpaidLeaveDays, 0),
+      absenceDays: employees.reduce((a, e) => a + e.absenceDays, 0),
+      pendingReviewRecords: employees.reduce((a, e) => a + e.pendingReviewRecords, 0),
+      missingAttendanceDays: employees.reduce((a, e) => a + e.missingAttendanceDays, 0),
+    },
+  };
+  const previous = await confirmedReview(db, p.id, companyId);
+  const op = crypto.randomUUID();
+  await runGuarded(db, [
+    // the period is still open and no attendance revision landed since the read
+    guard(db, "EXISTS (SELECT 1 FROM payroll_periods WHERE id = ? AND status IN ('draft', 'calculated') AND deleted_at IS NULL)", p.id),
+    db.prepare(`SELECT CASE WHEN ${watermarkSql(1)} = ?3 THEN 1 ELSE json('${GUARD_FAILED}') END AS ok`).bind(p.start_date, p.end_date, state.watermark),
+    // the confirmation in force (if any) is the one read, then superseded
+    previous
+      ? db.prepare("UPDATE payroll_attendance_reviews SET status = 'superseded', ended_at = datetime('now'), ended_by = ?2, ended_reason = 'superseded' WHERE id = ?1 AND status = 'confirmed'").bind(previous.id, user.id)
+      : guard(db, "NOT EXISTS (SELECT 1 FROM payroll_attendance_reviews WHERE period_id = ? AND company_id = ? AND status = 'confirmed')", p.id, companyId),
+    db.prepare(
+      `INSERT INTO payroll_attendance_reviews (period_id, company_id, attendance_version, judged_through, revision_watermark, summary_json, note, confirmed_by, op_token)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    ).bind(p.id, companyId, version, state.judgedThrough, state.watermark, JSON.stringify(summary), note ?? null, user.id, op),
+  ], 'ข้อมูลเวลาทำงานหรือการยืนยันเปลี่ยนระหว่างดำเนินการ กรุณาโหลดใหม่');
+  const row = await db.prepare('SELECT * FROM payroll_attendance_reviews WHERE op_token = ?').bind(op).first<ReviewRow>();
+  await audit(c, 'payroll.attendance_review_confirmed', 'payroll_attendance_reviews', row?.id ?? null, {
+    period_id: p.id, company_id: companyId, attendance_version: version, judged_through: state.judgedThrough, revision_watermark: state.watermark,
+    ...summary.totals, ...(previous ? { superseded: previous.id } : {}), ...(note ? { note } : {}),
+  });
+  return c.json({ ok: true, id: row?.id ?? null, company_id: companyId, status: 'confirmed', attendance_version: version, judged_through: state.judgedThrough });
 });
 
 payrollRoutes.post('/periods/:id/publish', requirePerm('payroll.publish'), async (c) => {
@@ -1006,7 +1157,8 @@ interface EmpLike {
   bank_account: string | null;
 }
 
-const STATUTORY = new Set(['SSO', 'TAX', 'EWF', 'ADV', 'UNPAID']);
+// lines with their own column (UNPAID / ABSENCE reduce gross pay: never an "other deduction")
+const STATUTORY = new Set(['SSO', 'TAX', 'EWF', 'ADV', 'UNPAID', 'ABSENCE']);
 
 function previewRow(e: EmpLike, s: SlipLike, calc: PayslipCalc | null, pvdCode: string): Record<string, string | number | null> {
   const sum = (f: (l: SlipLike['lines'][number]) => boolean) => round2(s.lines.filter(f).reduce((a, l) => a + l.amount, 0));
@@ -1028,8 +1180,14 @@ function previewRow(e: EmpLike, s: SlipLike, calc: PayslipCalc | null, pvdCode: 
     ot_hours: calc?.attendance.otHours ?? null,
     unpaid_leave_days: calc?.attendance.unpaidLeaveDays ?? null,
     unpaid_leave_hours: calc?.attendance.unpaidLeaveHours ?? null,
+    absence_days: calc?.attendance.absenceDays ?? null,
+    entitlement_days: calc?.attendance.entitlementDays ?? null,
+    payable_days: calc?.attendance.payableDays ?? null,
+    attendance_review: calc ? (calc.attendance.review?.length ? `ยืนยันแล้ว #${calc.attendance.review.map((r) => r.id).join(', #')}` : 'ยังไม่ยืนยัน') : null,
     base_salary: sum((l) => l.kind === 'earning' && l.code.startsWith('BASE')),
-    unpaid_leave_amount: s.unpaid_leave ? -s.unpaid_leave : 0,
+    // unpaid leave and absence separately (slips before the ABSENCE line carry the whole amount on UNPAID)
+    unpaid_leave_amount: s.unpaid_leave ? -round2(s.unpaid_leave - sum((l) => l.code === 'ABSENCE')) : 0,
+    absence_amount: -sum((l) => l.code === 'ABSENCE') || 0,
     ot_pay: s.ot_amount,
     holiday_pay: sum(holiday),
     allowance: sum((l) => earning(l) && l.category === 'allowance'),

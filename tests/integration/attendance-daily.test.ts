@@ -405,7 +405,10 @@ describe('payroll integration', () => {
         sqlAsync(`INSERT INTO attendance_records (employee_id, work_date, clock_in, clock_out, status, source) VALUES (${ids.D4}, '${saturday}', '09:00', '12:00', 'present', 'import')`),
       ]);
       expect([200, 409]).toContain(calc.status);
-      if (calc.status === 409) expect(['attendance_changed_during_calculation', 'conflict']).toContain(calc.body.error?.code);
+      if (calc.status === 409) {
+        // the HR attendance review gate (0025) refuses too when the correction lands between the confirmation and the calc
+        expect(['attendance_changed_during_calculation', 'conflict', 'attendance_review_changed', 'attendance_review_required']).toContain(calc.body.error?.code);
+      }
       expect(fix.status).toBe(200);
     }
     if (calcVersion(ids.PB) === 0) expect((await c.payroll!.post(`/api/payroll/periods/${ids.PB}/calculate`)).status).toBe(200);

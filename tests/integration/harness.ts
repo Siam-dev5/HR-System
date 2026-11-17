@@ -229,8 +229,24 @@ export class Client {
   get<T = any>(path: string) {
     return this.req<T>('GET', path);
   }
-  post<T = any>(path: string, body?: unknown) {
+  /**
+   * HR attendance review before Calculate (0025): tests of other features get the review done the way HR does it —
+   * read the review of the period, then confirm each company's current version — with this client's own session and
+   * permissions, right before POST …/calculate. Tests of the review gate itself set this to false.
+   */
+  autoReview = true;
+  async post<T = any>(path: string, body?: unknown): Promise<Res<T>> {
+    const calc = /^\/api\/payroll\/periods\/(\d+)\/calculate$/.exec(path);
+    if (calc && this.autoReview) await this.confirmAttendance(Number(calc[1]));
     return this.req<T>('POST', path, body ?? {});
+  }
+  /** Confirms the attendance review of every company of the period not yet confirmed (as HR would in the UI). */
+  async confirmAttendance(periodId: number): Promise<void> {
+    const r = await this.req('GET', `/api/payroll/periods/${periodId}/attendance-review`);
+    if (r.status !== 200) return;
+    for (const x of (r.body?.companies ?? []) as Array<{ company_id: number; status: string; version: string }>) {
+      if (x.status !== 'confirmed') await this.req('POST', `/api/payroll/periods/${periodId}/attendance-review/confirm`, { company_id: x.company_id, version: x.version });
+    }
   }
   put<T = any>(path: string, body: unknown) {
     return this.req<T>('PUT', path, body);

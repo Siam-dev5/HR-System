@@ -367,6 +367,13 @@ input[aria-invalid='true'], select[aria-invalid='true'], textarea[aria-invalid='
 .modal-head { display: flex; justify-content: space-between; align-items: center; gap: 0.75rem; padding: 1rem 1.25rem; border-bottom: 1px solid var(--border); }
 .modal-head h2 { margin: 0; }
 .modal-body { padding: 1.25rem; }
+/* HR attendance review before Calculate: a wide table per company (scrolls inside .table-wrap on small screens) */
+.modal:has(.attendance-review) { width: min(1240px, 100%); }
+.attendance-review .card { margin-bottom: 1rem; }
+.attendance-review .toolbar h3 { margin: 0; }
+.attendance-review td.small { min-width: 14rem; }
+.attendance-review tbody td:nth-child(2) { min-width: 11rem; }
+.attendance-review tbody td:nth-child(10) { min-width: 12rem; }
 .modal-actions { display: flex; flex-wrap: wrap; gap: 0.5rem; padding: 0.9rem 1.25rem; border-top: 1px solid var(--border); background: var(--surface-2); border-radius: 0 0 var(--radius-lg) var(--radius-lg); }
 #toasts { position: fixed; bottom: calc(var(--footer-h) + 1rem); right: 1rem; display: flex; flex-direction: column; gap: 0.5rem; z-index: 80; }
 .toast { background: var(--text); color: var(--bg); padding: 0.7rem 1rem; border-radius: var(--radius); box-shadow: var(--shadow-lg); max-width: 380px; font-size: 0.9rem; }
