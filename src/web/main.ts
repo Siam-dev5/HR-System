@@ -9,6 +9,7 @@ import { CRUD_SCREENS, PAGES, renderPayslipView } from './pages/registry';
 import { closeMenus, closeNotifications, headerMenus } from './header';
 import { icon, menuIcon } from './icons';
 import { applyTheme, watchSystemTheme } from './theme';
+import { initI18n } from './i18n';
 
 applyTheme();
 watchSystemTheme();
@@ -279,7 +280,8 @@ function renderRoute(main: HTMLElement): void {
   main.focus();
 }
 
-boot().catch((e) => {
+// the UI language is loaded before the first screen, so nothing appears in Thai first and then changes
+initI18n().finally(() => boot()).catch((e) => {
   mount(root, h('div', { class: 'state-page' }, h('h2', null, 'ไม่สามารถเริ่มระบบได้'), errorBox(e)));
   toast(e instanceof Error ? e.message : String(e), 'error');
 });

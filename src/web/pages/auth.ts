@@ -2,6 +2,7 @@ import qrcode from 'qrcode-generator';
 import type { AuthPolicy, LoginResponse, Me } from '../../shared/types';
 import { get, post, ApiFailure } from '../api';
 import { h, mount, toast, errorBox, fmtDate, loading, type Child } from '../dom';
+import { languageButton } from '../i18n';
 
 // ---- Authentication layout (brand panel + form card) ----------------------------------------
 const SVG_NS = 'http://www.w3.org/2000/svg';
@@ -43,6 +44,7 @@ function authShell(opts: { icon: string; title: string; subtitle: string; body: 
           h('li', null, icon(ICON.audit), 'บันทึก Audit ทุกการทำรายการ'))),
       h('p', { class: 'auth-brand-foot' }, 'HR SYSTEM · HUMAN CAPITAL PLATFORM')),
     h('main', { class: 'auth-main' },
+      h('div', { class: 'auth-lang' }, languageButton('auth-lang-btn')),
       h('div', { class: 'auth-card' },
         h('div', { class: 'auth-icon' }, icon(opts.icon)),
         h('h2', { class: 'auth-title' }, opts.title),
