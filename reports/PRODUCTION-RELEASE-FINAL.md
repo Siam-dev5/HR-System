@@ -14,7 +14,7 @@
 | Released commit | `b947f6aa10c2d8e37b5782386ef018603b4f0179` |
 | Merge to main | Fast-forward `eb1fc11 → b947f6a` (no merge commit, no force). It includes `8994cd4`, `6c6bda5`, `9f6748e` (period admin / step-up MFA) and `dca8701` (Phase D UI). `origin/main` = `origin/ui-redesign` = `b947f6a`. |
 | Worker before → after | `b984f052-6300-4392-818f-f8580e1a104e` → **`6cd27abe-6dab-478f-a92d-0fd55c6f24b1`** (created 2026-11-04T15:31:14Z) |
-| Production URL | `https://hr-system.siamhrbp.workers.dev` |
+| Production URL | `https://hr-systems.siamhrbp.com` (the former `hr-system.siamhrbp.workers.dev` URL was turned off on 2026-11-18) |
 | D1 | `hr-system-db` (`ba67e6d1-61b6-44f7-8922-49401a2cb295`), migrations 0001–0007 |
 
 ## 1. Credentials (wrangler error 7403)

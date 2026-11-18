@@ -13,7 +13,7 @@
 | Phase D commit | `dca8701a33ad2996fc9ce64ffef3061d30e350b3` — `feat(ui): finalize Phase D responsive HR system redesign` (27 files) |
 | Push | `git push -u origin ui-redesign` → `* [new branch]`, exit 0, no force. GitHub API: branch `ui-redesign` = `dca8701…`, commit has 27 files. |
 | Production Worker | `hr-system` (`wrangler.jsonc`: name `hr-system`, main `src/worker/index.ts`, assets `public`, D1 `hr-system-db` `ba67e6d1-…`) |
-| Production URL | `https://hr-system.siamhrbp.workers.dev` |
+| Production URL | `https://hr-systems.siamhrbp.com` (the former `hr-system.siamhrbp.workers.dev` URL was turned off on 2026-11-18) |
 | Production version (unchanged) | `b984f052-6300-4392-818f-f8580e1a104e`, deployed 2026-11-03T15:33Z |
 | New deployment ID / version | **none: not deployed** |
 
