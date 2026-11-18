@@ -26,6 +26,7 @@ import { requestImportRoutes } from './routes/request-imports';
 import { attendanceExemptionRoutes } from './routes/attendance-exemptions';
 import { bangkokNow } from './lib/time';
 import { runProbationJob } from './lib/probation-job';
+import { workersDevRedirect } from '../shared/public-origin';
 
 const app = new Hono<AppEnv>();
 
@@ -94,7 +95,7 @@ app.onError((err, c) => {
 export { app };
 
 export default {
-  fetch: app.fetch,
+  fetch: (req: Request, env: Env, ctx: ExecutionContext) => workersDevRedirect(req) ?? app.fetch(req, env, ctx),
   /**
    * Cron triggers (wrangler.jsonc): 17:05 and 01:05 UTC = 00:05 and 08:05 Asia/Bangkok. The job is idempotent, so the
    * second trigger is the retry of the first: it only does what an earlier run of the same day did not complete.

@@ -3,16 +3,18 @@
   "name": "hr-system",
   "main": "src/worker/index.ts",
   "compatibility_date": "2026-09-01",
-  // The only public address is the custom domain. Declared here so every deploy keeps it attached; the
-  // *.workers.dev URL and the per-version preview URLs are turned off (2026-11-18, owner's decision).
+  // The only public address is the custom domain, declared here so every deploy keeps it attached.
+  // Do NOT set workers_dev / preview_urls to false: on 2026-11-18 that also stopped the custom domain from serving
+  // (Cloudflare 404 for ~7 minutes). The *.workers.dev URL stays enabled and the Worker redirects it (301) to the
+  // custom domain instead (src/worker/index.ts, workersDevRedirect) — which is why run_worker_first is true.
   "routes": [{ "pattern": "hr-systems.siamhrbp.com", "custom_domain": true }],
-  "workers_dev": false,
-  "preview_urls": false,
+  "workers_dev": true,
+  "preview_urls": true,
   "assets": {
     "directory": "public",
     "binding": "ASSETS",
     "not_found_handling": "single-page-application",
-    "run_worker_first": ["/api/*"]
+    "run_worker_first": true
   },
   "d1_databases": [
     {
